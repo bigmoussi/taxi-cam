@@ -31,6 +31,8 @@ Download the Windows x64 ZIP from [Releases](https://github.com/rthomson83/380-t
 
 Set `-SimulatorDirectory` to the folder containing `FlightSimulator2024.exe`. If the installer cannot select the launch configuration, add `-ExeXml '<absolute path to exe.xml>'`.
 
+The installer places the EXE and bridge DLL together in `%LOCALAPPDATA%\380 Taxi Cam\app`. Use `-Destination 'C:\Users\<you>\Apps\380 Taxi Cam'` to choose another folder. Open `380-taxi-cam.exe` to launch the app; the DLL is loaded by the app and is not launched directly.
+
 The installer adds automatic startup to `exe.xml` and creates a Start menu shortcut. It backs up the launch configuration and preserves other add-ons.
 
 ## Use

@@ -41,7 +41,7 @@ The EXE and DLL communicate through a small Windows shared-memory block protecte
 
 The installer adds an `exe.xml` entry that starts the companion in background mode when MSFS launches.
 
-The companion checks the simulator's executable path, Windows user/session and supported executable identity. It then loads the bridge using Windows `LoadLibraryW` in the simulator process and calls the DLL's `TaxiCameraStart` export. The bridge starts its control worker after the loader has finished.
+The companion checks the simulator's executable path, Windows user/session and supported executable identity. Different paths are accepted only when Windows identifies them as the same file, allowing the Xbox installation path and its WindowsApps alias to match. It then loads the bridge using Windows `LoadLibraryW` in the simulator process and calls the DLL's `TaxiCameraStart` export. The bridge starts its control worker after the loader has finished.
 
 The bridge sets up observation of Direct3D calls and starts its SimConnect telemetry worker. Camera creation is requested when at least one enabled TAXI side has an assigned PFD, or when the explicit scene test is active.
 

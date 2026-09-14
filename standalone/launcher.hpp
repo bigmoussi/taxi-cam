@@ -28,7 +28,28 @@ inline std::vector<Module> modules(DWORD pid) {
   return result;
 }
 inline bool same_path(const std::wstring& a, const std::wstring& b) {
-  return !a.empty() && !b.empty() && _wcsicmp(a.c_str(), b.c_str()) == 0;
+  if (a.empty() || b.empty())
+    return false;
+  if (_wcsicmp(a.c_str(), b.c_str()) == 0)
+    return true;
+  // XboxGames and WindowsApps can expose the same MSFS executable under
+  // different paths. Accept aliases only when both handles identify one file.
+  // https://learn.microsoft.com/windows/win32/api/winbase/ns-winbase-file_id_info
+  constexpr DWORD sharing = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+  HANDLE first = CreateFileW(a.c_str(), FILE_READ_ATTRIBUTES, sharing, nullptr, OPEN_EXISTING, 0, nullptr);
+  if (first == INVALID_HANDLE_VALUE)
+    return false;
+  HANDLE second = CreateFileW(b.c_str(), FILE_READ_ATTRIBUTES, sharing, nullptr, OPEN_EXISTING, 0, nullptr);
+  FILE_ID_INFO first_id{}, second_id{};
+  const bool same =
+      second != INVALID_HANDLE_VALUE && GetFileInformationByHandleEx(first, FileIdInfo, &first_id, sizeof(first_id)) &&
+      GetFileInformationByHandleEx(second, FileIdInfo, &second_id, sizeof(second_id)) &&
+      first_id.VolumeSerialNumber == second_id.VolumeSerialNumber &&
+      std::equal(std::begin(first_id.FileId.Identifier), std::end(first_id.FileId.Identifier), std::begin(second_id.FileId.Identifier));
+  if (second != INVALID_HANDLE_VALUE)
+    CloseHandle(second);
+  CloseHandle(first);
+  return same;
 }
 inline bool same_user(HANDLE process) {
   HANDLE own{}, other{};
