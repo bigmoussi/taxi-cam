@@ -1,0 +1,30 @@
+# GPU copy capture packet
+
+`src/scene_capture_d3d12.*` captures an actual application's whole-texture copy source into an owned D3D12 texture. It does not yet connect MSFS scene outputs to the PFD. The native adapter must prove scene/resource identity, command-list lifetime and submission ordering before using it.
+
+Run `powershell -ExecutionPolicy Bypass -File validation/scene_capture_build.ps1` from the repository root. This uses the pinned compiler and creates an isolated, windowless D3D12 process on hardware and WARP. It does not open MSFS or install an add-on.
+
+The test records four changing source images. Each application copy is forwarded once, then the same live source is copied into the capture packet. Overwriting the source afterward ensures the snapshot contains the pixels at the copy event. A deliberately blocked producer queue must not publish a frame; a separately blocked consumer queue must prevent packet reuse. Pixel readback verifies all 24,576 snapshot/application-destination pixels per run, and four captures reuse one allocation. The debug layer is checked when available; the current host has no debug layer, so successful pixel tests do not claim debug-layer coverage.
+
+## Supported operation and state
+
+- One 2D mip/layer/sample, dimensions 1–8192, RGBA8/BGRA8 UNORM/sRGB/TYPELESS or typed RGBA16_FLOAT, no depth format. Each allocation is bounded by 128 MiB, including the device's reported allocation size. Typeless byte capture requires an explicit typed view at composition. RGBA16_FLOAT composition clamps into linear RGBA8 UNORM; it performs no HDR tone mapping or exposure calibration. R16 TYPELESS capture is refused.
+- A live **DIRECT** command list supplied by an actual copy callback, outside a render pass. The native adapter forwards the original operation once and then records the capture on that same list. If the matched scene is the original destination, the adapter must independently prove the operation covers the entire compatible texture and mirror its original source. Partial copies are refused by the adapter until a complete-image contract exists.
+- No transitions touch either application resource. The owned snapshot begins and remains in `COPY_DEST` through the producer operation. COPY queues are intentionally rejected: their resources decay to `COMMON` after submission, requiring a different owned-state contract. [Microsoft's state promotion and decay rules](https://learn.microsoft.com/en-us/windows/win32/direct3d12/using-resource-barriers-to-synchronize-resource-states-in-direct3d-12#state-decay-to-common).
+- Source `AddRef` occurs only on the real, live API argument. A raw address recovered by an engine observer is not a valid lifetime lease and must never be passed directly to this method.
+
+## Retirement and completion are different
+
+`retire_recording(queue)` requires the caller to establish that **all submissions of this recording returned, all used one producer queue, and this recording cannot execute again**. It then issues the producer fence signal. `poll_ready()` publishes the owned snapshot only after that fence completes. ReShade's `execute_command_list`, `close_command_list` and `reset_command_list` callbacks in pinned v6.8.0 occur before their respective native operations; they alone cannot prove retirement or successful submission.
+
+Only private DIRECT compositor commands may consume the ready texture. They must restore its `COPY_DEST` state and signal a same-device consumer fence after every submitted read. `finish_consumption()` hides the texture, and `recycle()` waits nonblockingly for that fence before reusing storage. Resource references alone do not order GPU access. [Microsoft's D3D12 fence-based resource management](https://learn.microsoft.com/en-us/windows/win32/direct3d12/fence-based-resource-management).
+
+Destroying a packet while an application recording or GPU operation could still reference it intentionally retains its native references until process exit. This is a bounded quarantine policy for an integration failure, not normal cleanup. A production pool must cap packet count/total bytes, retain quarantined packets and refuse additional captures when that cap is exhausted.
+
+## Native live-bridge integration boundary
+
+`src/scene_capture_manager.*` now connects the separate queue-submit observer's before/after receipt API to recording lifetime. A receipt pins exact packet membership before forwarding the application's batch. The manager waits for successful native Reset/destruction, returned receipts and GPU completion before exposing snapshots. Its post callback runs only after the original native submission returns. An oversized, unobserved or reentrant submission must not be reported as completed capture work.
+
+A post-submit signal alone does **not** prove that the original recording cannot replay. The manager uses recording retirement and a per-device Wait/Signal timeline. `retire_serialized_recording` additionally admits multiple DIRECT producer queues only after this explicit ordering proof; `discard_unsubmitted_retired` recycles a definitively retired recording that was never submitted. The stable output's recorded PFD consumers and private compositor writes use the same timeline, permitting old consumer recordings to read newly composed pixels. Submissions on an unobserved queue require synchronization before they execute; rejecting publication afterward cannot repair an already-recorded resource-state race. A pre-reset event is insufficient because native Reset may fail.
+
+The existing compositor changes graphics bindings and belongs on a private command list. No engine render-state guesses, incomplete generic barrier interpretation, or binding restoration assumptions are used here. Enhanced/legacy barrier interoperability requires explicit `COMMON` layout boundaries; direct RTV observation does not establish that contract. [DirectX enhanced barrier specification](https://microsoft.github.io/DirectX-Specs/d3d/D3D12EnhancedBarriers.html).

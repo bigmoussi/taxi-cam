@@ -1,0 +1,86 @@
+#pragma once
+
+#include "view_pool.hpp"
+
+namespace taxi_camera::engine_camera {
+
+enum class OwnedViewStatus {
+  not_inspected,
+  pending,
+  ready,
+  invalid_request,
+  invalid_pool,
+  invalid_pointer,
+  id_mismatch,
+  invalid_ready_byte,
+  invalid_view_index,
+  pool_changed,
+  node_unavailable,
+  node_mismatch,
+  wrong_camera_type,
+  invalid_fov,
+  material_mismatch,
+  read_failed,
+  changed,
+  read_budget_exhausted
+};
+
+struct OwnedViewSnapshot {
+  // complete includes a stable pending entry; ready requires the camera chain.
+  bool complete = false;
+  bool ready = false;
+  OwnedViewStatus status = OwnedViewStatus::not_inspected;
+  const char* error = "";
+  // Attempted bytes including failed reads; cap 8192, current full trace 494.
+  std::uint32_t read_bytes = 0;
+  std::uint32_t read_failures = 0;
+  std::int32_t view_index = -1;
+  // Internal, borrowed addresses, published only after the entire trace reread.
+  // Never log/serialize or retain them beyond the caller's proven engine phase.
+  std::uint64_t view_address = 0;
+  std::uint64_t node_address = 0;
+  std::uint64_t camera_address = 0;
+  // Opaque member for lifecycle-bracketed ReShade identity matching only.
+  // Never dereference/AddRef or send to UI/logs; no resource lifetime is acquired.
+  std::uint64_t resource_address = 0;
+  float fov = 0;
+  // Numeric diagnostics only, published with the complete ready snapshot.
+  // P+16/+20, P+24/+28, P+32/+36, respectively. The captured setup copies
+  // primary-view dimensions into these pairs; the third is used for output
+  // allocation. These observations are not a resource description or setters.
+  std::array<std::array<std::int32_t, 2>, 3> dimensions{};
+  // Exact P+48/P+56 flag words. Preserve as integers/hexadecimal strings in
+  // consumers; no guessed meanings, masking, writes or floating conversion.
+  std::array<std::uint64_t, 2> flags{};
+  // Only a nonnull pointer-shaped resource member was observed. No COM method,
+  // interface check, AddRef, description, resource state or GPU data is inspected.
+  bool resource_present = false;
+};
+
+// Fixed captured layout, not a general engine ABI. The caller must supply a
+// freshly verified owned entry and complete pool from the same renderer/update
+// phase. Check E+0/+16 IDs, E+8 ready, E+76 pool index and its current array slot.
+// Resolve generation-checked E+96/P+104 to one Node; Node+256 must point to a
+// Camera with WORD+160=7 and finite positive float+1616.
+//
+// Optional output observation resolves E+80/P+144 to matching material payloads,
+// then Material+520 bitmap handle -> Bitmap+88 record -> record+16 wrapper ->
+// wrapper+168 resource member. Null/stale output references report no resource;
+// malformed/unreadable/mismatched or changing fields refuse the entire result.
+// No output is published on failure, including failures in this optional chain.
+// Every observed byte is reread, but this does not make a snapshot atomic or
+// acquire references. No engine calls, global reads or payload virtual calls.
+// Reader owns accessible-region/lifetime/build checks and must not throw.
+// For Node, material and bitmap handles, control-record +28/+0 reads alone
+// permit byte alignment. No low bits are masked or rounded. Entry, view,
+// payload, record, wrapper and resource pointers retain eight-byte alignment;
+// null/generation/range/region/budget/full-trace checks remain required.
+// The three dimension pairs and two flag words above are included in that
+// trace. Zero, negative or unusual dimensions remain diagnostic observations;
+// this reader does not infer validity limits or silently resize a view.
+OwnedViewSnapshot inspect_owned_view(MemoryReader& reader,
+                                     std::uint64_t entry_address,
+                                     std::uint64_t expected_id,
+                                     const ViewPoolSnapshot& pool) noexcept;
+
+}  // namespace taxi_camera::engine_camera

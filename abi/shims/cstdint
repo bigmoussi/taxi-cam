@@ -1,0 +1,14 @@
+// Compile-only Windows x64 type definitions. Never used to build the add-on.
+#pragma once
+using int8_t = signed char;
+using uint8_t = unsigned char;
+using int16_t = short;
+using uint16_t = unsigned short;
+using int32_t = int;
+using uint32_t = unsigned int;
+using int64_t = long long;
+using uint64_t = unsigned long long;
+using intptr_t = long long;
+using uintptr_t = unsigned long long;
+#define UINT32_MAX 4294967295U
+#define UINT64_MAX 18446744073709551615ULL

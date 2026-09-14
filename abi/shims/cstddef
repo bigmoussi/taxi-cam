@@ -1,0 +1,8 @@
+// Compile-only Windows x64 type definitions. Never used to build the add-on.
+#pragma once
+#include "stddef.h"
+namespace std {
+using size_t = ::size_t;
+using ptrdiff_t = ::ptrdiff_t;
+using nullptr_t = decltype(nullptr);
+}

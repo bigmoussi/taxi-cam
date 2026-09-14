@@ -1,0 +1,120 @@
+#pragma once
+
+#include <array>
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <mutex>
+
+namespace taxi_camera::engine_camera {
+
+using EntryId = std::uint64_t;
+using PoseKey = std::array<std::uint8_t, 16>;
+using PairKeys = std::array<PoseKey, 2>;
+
+// Opaque adapter identity, not a dereferenceable pointer. Generation must change
+// if an address/identity is reused for a different manager lifetime.
+struct ManagerToken {
+  std::uint64_t identity = 0;
+  std::uint64_t generation = 0;
+  bool valid() const noexcept { return identity != 0 && generation != 0; }
+  bool operator==(const ManagerToken&) const = default;
+};
+
+// The observed initializer touches at least 196 bytes. This deliberately padded
+// backing store and its alignment are local choices, NOT a recovered sizeof or
+// engine ABI guarantee. A native adapter must establish compatibility separately.
+struct alignas(16) DescriptorStorage {
+  static constexpr std::size_t minimum_observed_extent = 196;
+  std::array<std::uint8_t, 256> bytes{};
+};
+
+// Confirms the initializer left both names empty and inline, then sets the
+// observed mode-zero fields and opaque key. Does not initialize or free strings.
+bool pack_mode_zero(DescriptorStorage& descriptor, const PoseKey& key) noexcept;
+// Experimental mode observed to bypass both built-in pose branches. This only
+// packs the descriptor; the native adapter owns setup, pose and view checks.
+bool pack_independent_pose(DescriptorStorage& descriptor) noexcept;
+
+struct EngineCallbacks {
+  void* context = nullptr;
+  bool (*initialize)(void*, DescriptorStorage&) noexcept = nullptr;
+  EntryId (*create)(void*, ManagerToken, const DescriptorStorage&) noexcept = nullptr;
+  // True ONLY when the adapter has confirmed this ID is absent after erase.
+  // The recovered native erase takes (manager, uint64 ID by value), with no
+  // established status return. This bool is the wrapper's verification result.
+  bool (*erase)(void*, ManagerToken, EntryId) noexcept = nullptr;
+};
+
+enum class State { disabled, active, cleanup_pending, failed, blocked };
+enum class Failure {
+  none,
+  initializer_failed,
+  initializer_contract,
+  first_create_failed,
+  second_create_failed,
+  duplicate_id,
+  manager_destroyed
+};
+enum class Blocked { none, invalid_manager, missing_callbacks, manager_mismatch };
+
+struct Snapshot {
+  State state = State::disabled;
+  Failure failure = Failure::none;
+  Blocked blocked = Blocked::none;
+  ManagerToken owner{};
+  std::array<EntryId, 2> owned_ids{};
+  // Last-wins mailbox: querying/publishing requests never calls the engine.
+  bool request_pending = false;
+  bool creation_pending = false;
+};
+
+class PairController {
+ public:
+  void request_enable(const PairKeys& keys) noexcept;
+  void request_independent_pose() noexcept;
+  void request_disable() noexcept;
+  Snapshot snapshot() const noexcept;
+
+  // Call ONLY from the approved update observer with a live manager. All engine
+  // callbacks happen here, synchronously and without the mailbox mutex held.
+  // False means a concurrent/reentrant update was refused, with no engine call.
+  // Failures consume the creation request; only a new enable retries creation.
+  bool process_update(ManagerToken manager, const EngineCallbacks& engine) noexcept;
+
+  // Explicit observer-side lifetime event, not a cleanup shortcut. Call only
+  // AFTER this exact manager lifetime has been destroyed by its owner. Forgets
+  // its invalidated IDs and clears queued requests without calling any engine.
+  bool acknowledge_manager_destroyed(ManagerToken manager) noexcept;
+
+ private:
+  enum class Command { none, enable, disable };
+  struct Request {
+    Command command = Command::none;
+    PairKeys keys{};
+    bool independent_pose = false;
+  };
+  bool has_owned_ids() const noexcept;
+  void publish(State state, Blocked blocked = Blocked::none) noexcept;
+  void cleanup(const EngineCallbacks& engine) noexcept;
+  bool prepare(const EngineCallbacks& engine, DescriptorStorage& descriptor, const PoseKey& key) noexcept;
+  void creation_failed(const EngineCallbacks& engine, Failure failure) noexcept;
+
+  mutable std::mutex mailbox_mutex_;
+  Request mailbox_{};
+  Snapshot published_{};
+  std::atomic_flag processing_ = ATOMIC_FLAG_INIT;
+  // Below: accessed only while processing_ is held by the update/lifetime API.
+  ManagerToken owner_{};
+  std::array<EntryId, 2> ids_{};
+  PairKeys desired_keys_{};
+  PairKeys owned_keys_{};
+  bool desired_independent_pose_ = false;
+  bool owned_independent_pose_ = false;
+  bool desired_enabled_ = false;
+  bool creation_pending_ = false;
+  bool active_pair_ = false;
+  Failure failure_ = Failure::none;
+};
+
+}  // namespace taxi_camera::engine_camera

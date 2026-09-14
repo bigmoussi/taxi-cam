@@ -1,0 +1,314 @@
+#include "pfd_stamp_state.hpp"
+
+#include <algorithm>
+#include <cmath>
+
+namespace taxi_camera {
+namespace {
+bool descriptor_kind(reshade::api::descriptor_type type, PfdRootKind& kind) noexcept {
+  using Type = reshade::api::descriptor_type;
+  switch (type) {
+    case Type::constant_buffer:
+      kind = PfdRootKind::cbv;
+      return true;
+    case Type::buffer_shader_resource_view:
+      kind = PfdRootKind::srv;
+      return true;
+    case Type::buffer_unordered_access_view:
+      kind = PfdRootKind::uav;
+      return true;
+    default:
+      return false;
+  }
+}
+std::uint64_t mask(UINT count) noexcept {
+  return count == 64 ? UINT64_MAX : ((std::uint64_t{1} << count) - 1);
+}
+}  // namespace
+
+PfdRootLayout parse_pfd_root_layout(std::uint32_t count, const reshade::api::pipeline_layout_param* params) noexcept {
+  PfdRootLayout result;
+  if (count > 65 || (count && !params))
+    return result;
+  using Type = reshade::api::pipeline_layout_param_type;
+  if (count && params[count - 1].type == Type::push_descriptors_with_ranges_and_flags) {
+    const auto& table = params[count - 1].descriptor_table_with_flags;
+    bool samplers = table.count > 0 && table.count <= 2048 && table.ranges;
+    if (samplers)
+      for (UINT n = 0; n < table.count; ++n)
+        samplers = samplers && table.ranges[n].type == reshade::api::descriptor_type::sampler && table.ranges[n].static_samplers;
+    if (samplers)
+      --count;
+  }
+  if (count > 64)
+    return result;
+  UINT cost = 0;
+  for (UINT n = 0; n < count; ++n) {
+    auto& output = result.parameters[n];
+    const auto& param = params[n];
+    switch (param.type) {
+      case Type::push_constants:
+        output = {PfdRootKind::constants, param.push_constants.count};
+        if (!output.count || output.count > 64)
+          return {};
+        cost += output.count;
+        break;
+      case Type::descriptor_table:
+        if (!param.descriptor_table.count || !param.descriptor_table.ranges)
+          return {};
+        output = {PfdRootKind::table, 1};
+        ++cost;
+        break;
+      case Type::descriptor_table_with_flags:
+        if (!param.descriptor_table_with_flags.count || !param.descriptor_table_with_flags.ranges)
+          return {};
+        output = {PfdRootKind::table, 1};
+        ++cost;
+        break;
+      case Type::push_descriptors:
+        if (param.push_descriptors.count != 1 || !descriptor_kind(param.push_descriptors.type, output.kind))
+          return {};
+        output.count = 1;
+        cost += 2;
+        break;
+      case Type::push_descriptors_with_ranges_and_flags:
+        if (param.descriptor_table_with_flags.count != 1 || !param.descriptor_table_with_flags.ranges ||
+            param.descriptor_table_with_flags.ranges[0].count != 1 || param.descriptor_table_with_flags.ranges[0].static_samplers ||
+            !descriptor_kind(param.descriptor_table_with_flags.ranges[0].type, output.kind))
+          return {};
+        output.count = 1;
+        cost += 2;
+        break;
+      default:
+        return {};
+    }
+    if (cost > 64)
+      return {};
+  }
+  result.count = count;
+  result.valid = true;
+  return result;
+}
+
+void PfdGraphicsState::reset(std::uint64_t generation, bool native_observations) noexcept {
+  *this = PfdGraphicsState{};
+  generation_ = generation;
+  observed_ = native_observations;
+}
+void PfdGraphicsState::bind_root(ID3D12RootSignature* root,
+                                 std::uint64_t generation,
+                                 const PfdRootLayout& layout,
+                                 bool exact_native_change) noexcept {
+  if (root_ == root && layout_generation_ == generation && layout_.valid && layout.valid)
+    return;
+  root_ = root;
+  layout_generation_ = generation;
+  layout_ = layout;
+  values_ = {};
+  native_root_observed_ = exact_native_change && observed_;
+  undefined_tables_ = {};
+  constants_ = {};
+  constant_offsets_ = {};
+  if (!layout_.valid || layout_.count > 64) {
+    layout_.valid = false;
+    return;
+  }
+  UINT offset = 0, cost = 0;
+  for (UINT n = 0; n < layout_.count; ++n) {
+    const auto& param = layout_.parameters[n];
+    if (param.kind == PfdRootKind::table)
+      undefined_tables_[n] = native_root_observed_;
+    if (param.kind == PfdRootKind::constants) {
+      if (!param.count || param.count > 64 - offset) {
+        layout_.valid = false;
+        return;
+      }
+      constant_offsets_[n] = static_cast<std::uint8_t>(offset);
+      offset += param.count;
+      cost += param.count;
+    } else {
+      if (param.count != 1 || param.kind > PfdRootKind::uav) {
+        layout_.valid = false;
+        return;
+      }
+      cost += param.kind == PfdRootKind::table ? 1 : 2;
+    }
+    if (cost > 64) {
+      layout_.valid = false;
+      return;
+    }
+  }
+}
+bool PfdGraphicsState::parameter(UINT index, PfdRootKind kind) noexcept {
+  if (!layout_.valid || index >= layout_.count || layout_.parameters[index].kind != kind) {
+    invalidate("root_parameter_kind_or_index");
+    return false;
+  }
+  return true;
+}
+void PfdGraphicsState::constants(UINT index, UINT first, UINT count, const void* data) noexcept {
+  if (!parameter(index, PfdRootKind::constants))
+    return;
+  if (!data || !count || first > layout_.parameters[index].count || count > layout_.parameters[index].count - first) {
+    invalidate("root_constant_bounds");
+    return;
+  }
+  std::memcpy(constants_.data() + constant_offsets_[index] + first, data, count * 4);
+  values_[index].known |= mask(count) << first;
+}
+void PfdGraphicsState::table(UINT index, UINT64 address) noexcept {
+  if (parameter(index, PfdRootKind::table)) {
+    values_[index].address = address;
+    values_[index].known = 1;
+    undefined_tables_[index] = false;
+  }
+}
+void PfdGraphicsState::descriptor(UINT index, PfdRootKind kind, UINT64 address) noexcept {
+  if (kind == PfdRootKind::table || kind == PfdRootKind::constants) {
+    invalidate("root_descriptor_kind");
+    return;
+  }
+  if (parameter(index, kind)) {
+    values_[index].address = address;
+    values_[index].known = 1;
+  }
+}
+void PfdGraphicsState::descriptor_heaps(UINT count, ID3D12DescriptorHeap* const* heaps) noexcept {
+  if (count > heaps_.size() || (count && !heaps) || (count && !heaps[0]) || (count == 2 && (!heaps[1] || heaps[0] == heaps[1]))) {
+    heaps_known_ = false;
+    descriptor_heaps_changed();
+    invalidate("descriptor_heap_arguments_invalid");
+    return;
+  }
+  // Microsoft: redundant same-heap binding does not make table settings
+  // undefined. Compare the complete set without dereferencing heap objects;
+  // the order of the two distinct shader-visible heap types is immaterial.
+  // https://learn.microsoft.com/windows/win32/direct3d12/setting-descriptor-heaps
+  const bool same =
+      heaps_known_ && heap_count_ == count &&
+      (!count || (count == 1 ? heaps_[0] == heaps[0]
+                             : ((heaps_[0] == heaps[0] && heaps_[1] == heaps[1]) || (heaps_[0] == heaps[1] && heaps_[1] == heaps[0]))));
+  if (!same) {
+    descriptor_heaps_changed();
+    if (native_root_observed_)
+      for (UINT n = 0; n < layout_.count; ++n)
+        if (layout_.parameters[n].kind == PfdRootKind::table)
+          undefined_tables_[n] = true;
+  }
+  heaps_known_ = true;
+  heap_count_ = count;
+  heaps_ = {};
+  for (UINT n = 0; n < count; ++n)
+    heaps_[n] = heaps[n];
+}
+void PfdGraphicsState::descriptor_heaps_changed() noexcept {
+  for (UINT n = 0; n < layout_.count; ++n)
+    if (layout_.parameters[n].kind == PfdRootKind::table) {
+      values_[n].known = 0;
+      undefined_tables_[n] = false;
+    }
+}
+void PfdGraphicsState::viewports(UINT first, UINT count, const D3D12_VIEWPORT* data) noexcept {
+  // D3D12 replaces the entire array, including when it shrinks. Nonzero first
+  // would be another API's semantics and cannot establish a native snapshot.
+  if (first || !count || count > 16 || !data) {
+    invalidate("viewport_array_bounds");
+    return;
+  }
+  for (UINT n = 0; n < count; ++n) {
+    const auto& v = data[n];
+    if (!std::isfinite(v.TopLeftX) || !std::isfinite(v.TopLeftY) || !std::isfinite(v.Width) || !std::isfinite(v.Height) ||
+        !std::isfinite(v.MinDepth) || !std::isfinite(v.MaxDepth)) {
+      invalidate("viewport_nonfinite");
+      return;
+    }
+  }
+  viewport_count_ = count;
+  std::copy_n(data, count, viewports_.begin());
+}
+void PfdGraphicsState::scissors(UINT first, UINT count, const D3D12_RECT* data) noexcept {
+  if (first || !count || count > 16 || !data) {
+    invalidate("scissor_array_bounds");
+    return;
+  }
+  scissor_count_ = count;
+  std::copy_n(data, count, scissors_.begin());
+}
+bool PfdGraphicsState::complete() const noexcept {
+  return incomplete_reason() == nullptr;
+}
+const char* PfdGraphicsState::incomplete_reason() const noexcept {
+  if (invalid_reason_)
+    return invalid_reason_;
+  if (!observed_)
+    return "native_observations_missing";
+  if (!generation_)
+    return "recording_generation_missing";
+  if (!pipeline_)
+    return "pipeline_missing";
+  if (!root_ || !layout_generation_ || !layout_.valid)
+    return "root_layout_missing";
+  if (topology_ == D3D_PRIMITIVE_TOPOLOGY_UNDEFINED)
+    return "topology_missing";
+  if (!viewport_count_)
+    return "viewport_missing";
+  if (!scissor_count_)
+    return "scissor_missing";
+  for (UINT n = 0; n < layout_.count; ++n)
+    if (values_[n].known != mask(layout_.parameters[n].count)) {
+      if (layout_.parameters[n].kind == PfdRootKind::table && undefined_tables_[n])
+        continue;
+      switch (layout_.parameters[n].kind) {
+        case PfdRootKind::constants:
+          return "root_constants_incomplete";
+        case PfdRootKind::table:
+          return "root_table_missing_or_invalidated";
+        case PfdRootKind::cbv:
+          return "root_cbv_missing";
+        case PfdRootKind::srv:
+          return "root_srv_missing";
+        case PfdRootKind::uav:
+          return "root_uav_missing";
+      }
+    }
+  return nullptr;
+}
+UINT PfdGraphicsState::undefined_table_count() const noexcept {
+  UINT count = 0;
+  for (UINT n = 0; n < layout_.count; ++n)
+    if (layout_.parameters[n].kind == PfdRootKind::table && !values_[n].known && undefined_tables_[n])
+      ++count;
+  return count;
+}
+void PfdGraphicsState::restore(ID3D12GraphicsCommandList* list) const noexcept {
+  list->SetPipelineState(pipeline_);
+  list->SetGraphicsRootSignature(root_);
+  for (UINT n = 0; n < layout_.count; ++n) {
+    const auto& value = values_[n];
+    switch (layout_.parameters[n].kind) {
+      case PfdRootKind::constants:
+        list->SetGraphicsRoot32BitConstants(n, layout_.parameters[n].count, constants_.data() + constant_offsets_[n], 0);
+        break;
+      case PfdRootKind::table:
+        // SetGraphicsRootSignature restored all argument slots to undefined.
+        // Preserve that prior state for a positively undefined table; never
+        // invent a null or stale descriptor handle. All known tables replay.
+        if (value.known)
+          list->SetGraphicsRootDescriptorTable(n, {value.address});
+        break;
+      case PfdRootKind::cbv:
+        list->SetGraphicsRootConstantBufferView(n, value.address);
+        break;
+      case PfdRootKind::srv:
+        list->SetGraphicsRootShaderResourceView(n, value.address);
+        break;
+      case PfdRootKind::uav:
+        list->SetGraphicsRootUnorderedAccessView(n, value.address);
+        break;
+    }
+  }
+  list->IASetPrimitiveTopology(topology_);
+  list->RSSetViewports(viewport_count_, viewports_.data());
+  list->RSSetScissorRects(scissor_count_, scissors_.data());
+}
+}  // namespace taxi_camera

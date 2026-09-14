@@ -1,0 +1,22 @@
+{
+  "reshade": {
+    "version": "6.8.0",
+    "commit": "18deaa52de0c425a78b329e9cb3c497281cd00ec",
+    "url": "https://codeload.github.com/crosire/reshade/zip/18deaa52de0c425a78b329e9cb3c497281cd00ec",
+    "sha256": "a448aa39bcd8be70e533b41dfd8e15f5a06660ddf824039e2530bcde9febb1d4",
+    "directory": "reshade/reshade-18deaa52de0c425a78b329e9cb3c497281cd00ec"
+  },
+  "imgui": {
+    "version": "1.92.5",
+    "commit": "3912b3d9a9c1b3f17431aebafd86d2f40ee6e59c",
+    "url": "https://codeload.github.com/ocornut/imgui/zip/3912b3d9a9c1b3f17431aebafd86d2f40ee6e59c",
+    "sha256": "943c3c8f6ef87c2616ff5545d4c50d941f29f20d23d783a8ff2f46c8a3bcfdf6",
+    "directory": "imgui/imgui-3912b3d9a9c1b3f17431aebafd86d2f40ee6e59c"
+  },
+  "llvm-mingw": {
+    "version": "20260908 / LLVM 23.1.1",
+    "url": "https://github.com/mstorsjo/llvm-mingw/releases/download/20260908/llvm-mingw-20260908-ucrt-x86_64.zip",
+    "sha256": "1bcf74d06b724aeecaa6412ca85f5b26fb1da770e7cdcefa9263c9c5c3ad34b6",
+    "directory": "llvm-mingw/llvm-mingw-20260908-ucrt-x86_64"
+  }
+}
