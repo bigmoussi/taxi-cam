@@ -3,13 +3,15 @@ param(
     [switch]$Bootstrap,
     [switch]$Validate,
     [string]$ReShadeDll,
-    [switch]$LegacyReShade
+    [switch]$LegacyReShade,
+    [switch]$WarpOnly
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+if ($WarpOnly -and ($LegacyReShade -or $ReShadeDll -or -not $Validate)) { throw '-WarpOnly requires native -Validate.' }
 if (-not $LegacyReShade -and -not $ReShadeDll) {
-    & (Join-Path $PSScriptRoot 'build-native.ps1') -Bootstrap:$Bootstrap -Validate:$Validate
+    & (Join-Path $PSScriptRoot 'build-native.ps1') -Bootstrap:$Bootstrap -Validate:$Validate -WarpOnly:$WarpOnly
     return
 }
 if ($Bootstrap) {

@@ -72,6 +72,10 @@ Legacy development commands remain available:
 .\install.ps1 -LegacyReShade -SimulatorDirectory '<MSFS Content directory>'
 ```
 
+## Automated releases
+
+Every push to `main` builds and validates a Windows package in GitHub Actions, then publishes a versioned release with a ZIP, checksums and release notes. Hosted validation uses software D3D12 (WARP); hardware and live simulator checks remain separate. See [release automation](docs/releases.md) for naming, assets and reruns.
+
 ## Technical documentation
 
 - [Working architecture](docs/architecture.md): process boundaries, native camera lifecycle, GPU capture and PFD delivery, routing, recovery and validation limits.

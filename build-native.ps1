@@ -1,7 +1,8 @@
 [CmdletBinding()]
-param([switch]$Validate, [switch]$Bootstrap)
+param([switch]$Validate, [switch]$Bootstrap, [switch]$WarpOnly)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+if ($WarpOnly -and -not $Validate) { throw '-WarpOnly requires -Validate.' }
 $taskRoot = $PSScriptRoot
 $deps = Get-Content -Raw -LiteralPath (Join-Path $taskRoot 'dependencies.json') | ConvertFrom-Json
 $compiler = Join-Path $taskRoot ('build/deps/' + $deps.'llvm-mingw'.directory + '/bin/clang++.exe')
@@ -51,8 +52,10 @@ if ($Validate) {
     $gpu = Join-Path $out 'native-graphics-validation.exe'
     & $compiler @common '-municode' (Join-Path $taskRoot 'standalone/graphics_validation.cpp') @($objects | Select-Object -First $graphics.Count) @libs '-o' $gpu
     if ($LASTEXITCODE -ne 0) { throw 'Native validation compilation failed.' }
-    & $gpu
-    if ($LASTEXITCODE -ne 0) { throw 'Hardware native graphics validation failed.' }
+    if (-not $WarpOnly) {
+        & $gpu
+        if ($LASTEXITCODE -ne 0) { throw 'Hardware native graphics validation failed.' }
+    } else { Write-Output 'Hardware GPU validation not run: explicit WARP-only CI mode.' }
     & $gpu --warp
     if ($LASTEXITCODE -ne 0) { throw 'WARP native graphics validation failed.' }
 
@@ -103,12 +106,15 @@ if ($Validate) {
         $closure += $dependencyList
     }
     $closure | Set-Content -LiteralPath (Join-Path $out 'native-dependencies.txt')
+    $gpuTests = @('WARP GPU')
+    if (-not $WarpOnly) { $gpuTests = @('hardware GPU') + $gpuTests }
     [ordered]@{
         passed=$true; version='0.8.0'; createdUtc=[DateTime]::UtcNow.ToString('o'); files=$hashes;
-        tests=@('hardware GPU','WARP GPU','pre-existing graphics objects','graphics state replay','exact DLL smoke',
+        tests=@($gpuTests + @('pre-existing graphics objects','graphics state replay','exact DLL smoke',
             'settings persistence and IPC','native COM slots','TAXI routing','PFD detector','exposure','calibration','write budget',
             'queue submit','render boundary','engine hook','camera telemetry and lifecycle','exe.xml preservation',
-            'native imports and header dependency closure');
+            'native imports and header dependency closure'));
+        gpuValidation=[ordered]@{hardware=$(if ($WarpOnly) { 'not-run' } else { 'passed' });warp='passed'};
         simulatorVerified=$false
     } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $out 'validation.json') -Encoding utf8
 
