@@ -16,7 +16,7 @@ struct ActivationMaskInventory {
   std::array<std::uint64_t, 2> words{};
 };
 
-// Exact1.8.16.0 profile only. Read the16-byte flag pair at fixed RVA130434096
+// Read the 16-byte flag pair at the integration profile's fixed RVA130434096
 // from declared readable, nonwritable, nonexecutable, nondiscardable image data.
 // Require the complete pair {1,0} and an identical full reread (32B maximum).
 // Caller separately verifies the current code contract before using the native

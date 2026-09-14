@@ -46,6 +46,15 @@ discovery::Inventory image() {
   return result;
 }
 void tests() {
+  {
+    Reader reader;
+    auto metadata = image();
+    ++metadata.timestamp;
+    metadata.image_size += 4096;
+    ++metadata.section_count;
+    require(native_camera::inspect_activation_disable_mask(reader, metadata).valid,
+            "Compatible activation data was rejected solely for changed build metadata");
+  }
   for (unsigned window = 1; window <= 16; ++window) {
     Reader reader;
     reader.window = window;
@@ -80,11 +89,11 @@ void tests() {
     if (failure == 1)
       metadata.machine = 0;
     if (failure == 2)
-      ++metadata.timestamp;
+      metadata.section_count = 97;
     if (failure == 3)
-      ++metadata.image_size;
+      metadata.image_size = 0;
     if (failure == 4)
-      ++metadata.section_count;
+      metadata.section_count = 0;
     if (failure == 5)
       metadata.sections.clear();
     if (failure == 6)

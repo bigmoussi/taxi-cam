@@ -10,10 +10,10 @@ ActivationMaskInventory inspect_activation_disable_mask(discovery::ImageReader& 
   constexpr std::uint32_t size = 16;
   constexpr std::uint32_t required = 0x40000000;
   constexpr std::uint32_t excluded = 0xa2000000;
-  if (!image.valid_image || image.machine != 0x8664 || image.timestamp != 1787653788 || image.image_size != 235963904 ||
-      image.section_count != 14 || image.sections.empty() || image.sections.size() > 14 || rva > image.image_size ||
-      size > image.image_size - rva) {
-    result.error = "The activation-mask image identity or bounds do not match the fixed profile.";
+  if (!image.valid_image || image.machine != 0x8664 || image.image_size == 0 || image.image_size > 0x80000000u ||
+      image.section_count == 0 || image.section_count > 96 || image.sections.empty() || image.sections.size() > image.section_count ||
+      rva > image.image_size || size > image.image_size - rva) {
+    result.error = "The activation-mask image metadata or bounds are invalid.";
     return result;
   }
   const auto section = std::find_if(image.sections.begin(), image.sections.end(), [&](const auto& item) {

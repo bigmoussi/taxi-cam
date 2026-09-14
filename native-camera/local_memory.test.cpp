@@ -13,6 +13,10 @@
 namespace {
 using namespace taxi_camera::native_camera;
 
+constexpr std::uint32_t kVerifiedImageTimestamp = 1787653788;
+constexpr std::uint32_t kVerifiedImageSize = 235963904;
+constexpr std::uint16_t kVerifiedImageSections = 14;
+
 unsigned checks = 0;
 void require(bool value, const char* message) {
   ++checks;
@@ -518,9 +522,9 @@ void main_image_reads() {
   LocalImageReader impostor(reinterpret_cast<HMODULE>(private_image.data), 4096);
   require(!impostor.read(0, output.data(), 2), "Private allocation was accepted as the main executable");
   const auto self_result = parse_verified_main_image();
-  require(!self_result.valid_image && !self_result.error.empty() && self_result.sections.empty() && self_result.records.empty() &&
-              self_result.scanned_bytes == 0 && self_result.metadata_bytes <= 88,
-          "Header wrapper accepted or scanned the unrelated test executable");
+  require(self_result.valid_image && self_result.error.empty() && !self_result.sections.empty() && self_result.records.empty() &&
+              self_result.scanned_bytes == 0 && self_result.metadata_bytes <= 8192,
+          "Structural header inspection failed or scanned code in the test executable");
 }
 
 struct HeaderFixture final : taxi_camera::discovery::ImageReader {
@@ -613,6 +617,22 @@ void synthetic_headers() {
                 fixture.largest_end == HeaderFixture::Sections + 14 * 40,
             "Exact supported synthetic headers did not yield bounded loaded-image metadata");
   }
+  for (const auto sections : {13u, 15u, 96u}) {
+    HeaderFixture fixture;
+    fixture.put(HeaderFixture::Pe + 8, kVerifiedImageTimestamp + 123);
+    fixture.put(HeaderFixture::Optional + 56, kVerifiedImageSize + 4096);
+    fixture.put(HeaderFixture::Pe + 6, sections, 2);
+    fixture.put(HeaderFixture::Optional + 60, 8192);
+    const auto result = fixture.run();
+    require(result.valid_image && result.timestamp == kVerifiedImageTimestamp + 123 && result.image_size == kVerifiedImageSize + 4096 &&
+                result.sections.size() == sections,
+            "Changed build metadata with valid bounds was rejected");
+  }
+  {
+    HeaderFixture fixture;
+    fixture.put(HeaderFixture::Optional + 56, 0x80000001u);
+    require(!fixture.run().valid_image, "Excessive image extent was accepted");
+  }
   for (unsigned scenario = 0; scenario < 26; ++scenario) {
     HeaderFixture fixture;
     const auto optional = HeaderFixture::Optional;
@@ -637,10 +657,10 @@ void synthetic_headers() {
         fixture.put(HeaderFixture::Pe + 4, 0x14c, 2);
         break;
       case 6:
-        fixture.put(HeaderFixture::Pe + 6, 13, 2);
+        fixture.put(HeaderFixture::Pe + 6, 0, 2);
         break;
       case 7:
-        fixture.put(HeaderFixture::Pe + 8, kVerifiedImageTimestamp + 1);
+        fixture.put(HeaderFixture::Pe + 6, 97, 2);
         break;
       case 8:
         fixture.put(HeaderFixture::Pe + 20, 111, 2);
@@ -652,7 +672,7 @@ void synthetic_headers() {
         fixture.put(optional, 0x10b, 2);
         break;
       case 11:
-        fixture.put(optional + 56, kVerifiedImageSize - 1);
+        fixture.put(optional + 56, 0);
         break;
       case 12:
         fixture.put(optional + 60, 0);

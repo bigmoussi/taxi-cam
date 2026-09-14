@@ -17,9 +17,6 @@ namespace taxi_camera::native_camera {
 
 inline constexpr std::uint32_t kLocalObjectReadLimit = 131072;
 inline constexpr std::uint32_t kLocalObjectFieldLimit = 32768;
-inline constexpr std::uint32_t kVerifiedImageTimestamp = 1787653788;
-inline constexpr std::uint32_t kVerifiedImageSize = 235963904;
-inline constexpr std::uint16_t kVerifiedImageSections = 14;
 
 // Optional, thread-local CPU diagnostics. These count real OS queries/reads,
 // including failed calls and image reads; ticks use QueryPerformanceCounter.
@@ -114,11 +111,11 @@ class LocalImageReader final : public discovery::ImageReader {
 };
 
 // Testable header-only core: at most 8192 requested metadata bytes, all within
-// the first 65536 image bytes. Validates AMD64 PE32+, the exact tuple above,
-// optional/directory/section bounds and nonoverlapping loaded sections. Reads
-// no section body, exports, code or strings beyond the fixed 8-byte names.
-// Inventory is valid only for the exact tuple; this is not cryptographic
-// identity, process-name verification, code proof or a lifetime guarantee.
+// the first 65536 image bytes. Validates AMD64 PE32+, at most 96 sections,
+// an image extent of at most 2 GiB, directory bounds and nonoverlapping sections.
+// Timestamp, checksum, image size and section count are observed metadata,
+// never a build allowlist. Reads no section body, exports or code.
+// This is structural validation, not process identity or callable code proof.
 discovery::Inventory parse_verified_image_headers(discovery::ImageReader& reader);
 
 // Supplies GetModuleHandleW(nullptr) to the bounded core. No module enumeration,

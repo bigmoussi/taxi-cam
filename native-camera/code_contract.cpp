@@ -1,5 +1,7 @@
 #include "code_contract.hpp"
 
+#include <cstdio>
+
 #include <algorithm>
 #include <array>
 #include <utility>
@@ -321,7 +323,10 @@ CodeContractInventory verify_code_contract(discovery::ImageReader& reader,
     const auto& required = expected[index];
     if (actual.rva != required.rva || actual.size != required.size || actual.hash != required.hash) {
       observed.valid = false;
-      observed.error = "A required code fingerprint differs from the observed loaded bytes.";
+      char detail[192]{};
+      std::snprintf(detail, sizeof(detail), "Private code signature changed or moved at RVA 0x%08X (%u bytes). Update Taxi Cam.",
+                    static_cast<unsigned>(required.rva), static_cast<unsigned>(required.size));
+      observed.error = detail;
       return observed;
     }
   }

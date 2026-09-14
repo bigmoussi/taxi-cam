@@ -62,7 +62,7 @@ void require_inert(const nc::ProbeSnapshot& snapshot) {
 void require_refused() {
   const auto snapshot = nc::scene_snapshot();
   require_inert(snapshot);
-  require(snapshot.message == "Native scene test requires FlightSimulator2024.exe build 1.8.16.0.",
+  require(snapshot.message == "Native camera access requires the FlightSimulator2024.exe process.",
           "The public start request did not refuse at the actual executable-name guard");
 }
 

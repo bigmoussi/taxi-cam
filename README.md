@@ -5,7 +5,7 @@ Nose-wheel and tail cameras for Microsoft Flight Simulator 2024, controlled by t
 The camera image occupies the upper part of the Primary Flight Display (PFD): nose-wheel view above, tail view below, with ground speed, magenta reference marks and a black divider. The lower trim display remains visible.
 
 - **Aircraft:** FlyByWire A380X
-- **Platform:** Windows x64, MSFS 2024 **1.8.16.0**
+- **Platform:** Windows x64, MSFS 2024
 - **Delivery:** Windows tray application and an in-simulator DLL. ReShade is not required.
 
 ## How it works
@@ -18,6 +18,8 @@ The camera image occupies the upper part of the Primary Flight Display (PFD): no
 4. **The GPU combines the images.** The bridge copies the rendered views, adds the divider, reference marks and ground speed, then draws the result into the enabled PFD texture.
 
 Left TAXI enables the left PFD; right TAXI enables the right PFD. Both displays share the same pair of cameras. Images remain on the GPU throughout capture and display.
+
+Compatibility is checked against the required private code and memory layout. Simulator updates are allowed when these checks pass. If a required signature changes or moves, the camera stays disabled and the app reports the failed check; an updated Taxi Cam integration may be needed.
 
 See [How the camera reaches the PFD](docs/architecture.md) for the complete explanation.
 

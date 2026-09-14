@@ -181,9 +181,8 @@ inline LaunchResult load_bridge(DWORD pid,
     if (same_path(m.path, dll))
       bridge = m;
   }
-  DWORD stamp{};
-  if (!main.base || !amd64_image(process, main, &stamp) || stamp != 1787653788 || main.bytes != 235963904)
-    return {false, ERROR_REVISION_MISMATCH, L"This simulator build is not verified for native camera access."};
+  if (!main.base || !amd64_image(process, main))
+    return {false, ERROR_BAD_EXE_FORMAT, L"Could not validate the running MSFS executable. Camera access is disabled."};
   if (!bridge.base) {
     const auto loader = remote_export(process, pid, GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "LoadLibraryW"));
     if (!loader)

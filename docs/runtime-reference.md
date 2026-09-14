@@ -149,11 +149,14 @@ Use the counters in pipeline order:
 | `composed` | Paired compositions submitted |
 | `stamps` | Camera draws recorded into PFD command lists |
 
+Private-code mismatch diagnostics include the failed RVA and byte count. Code that moves also fails the current fixed-address profile; the runtime does not guess a new address or call an unverified match.
+
 A counter measures work at its stage, not frames visibly presented. For example, increasing compositions with zero stamps points to display routing or PFD draw eligibility.
 
 | Symptom | Inspect |
 | --- | --- |
-| No bridge status | Companion connection, executable identity and bridge startup |
+| No bridge status | Companion connection, executable path/structure and bridge startup |
+| Camera compatibility check failed | Reported code RVA, image bounds, activation data or manager layout; the camera remains disabled |
 | Scenes not ready | Camera lifecycle and fresh aircraft/camera telemetry |
 | Scenes ready, zero captures | Scene-to-texture match, source state and queue observation |
 | Captures increase, no compositions | Both feeds, current scene identity and GPU completion |

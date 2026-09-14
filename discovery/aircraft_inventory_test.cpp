@@ -309,6 +309,14 @@ void valid_paths() {
 }
 
 void build_refusal() {
+  {
+    Fixture fixture;
+    ++fixture.info.timestamp;
+    fixture.info.image_size += 4096;
+    ++fixture.info.section_count;
+    const auto result = fixture.run();
+    require(result.valid && result.available, "Compatible aircraft layout was rejected solely for changed build metadata");
+  }
   for (unsigned scenario = 0; scenario < 10; ++scenario) {
     Fixture fixture;
     auto base = Base;
@@ -317,11 +325,11 @@ void build_refusal() {
     if (scenario == 1)
       fixture.info.machine = 0x14c;
     if (scenario == 2)
-      ++fixture.info.timestamp;
+      fixture.info.section_count = 97;
     if (scenario == 3)
-      ++fixture.info.image_size;
+      fixture.info.image_size = 0;
     if (scenario == 4)
-      --fixture.info.section_count;
+      fixture.info.section_count = 0;
     if (scenario == 5)
       fixture.info.sections[1].rva = Vtable + 4;
     if (scenario == 6)
@@ -1061,7 +1069,7 @@ void borrowed_aircraft_output() {
     Fixture fixture;
     fixture.add_components();
     if (scenario == 0)
-      ++fixture.info.timestamp;
+      fixture.info.section_count = 97;
     if (scenario == 1)
       fixture.objects.memory.integer(SelectedObject + 368, 0);
     if (scenario == 2)

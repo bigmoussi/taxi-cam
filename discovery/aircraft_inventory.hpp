@@ -74,8 +74,8 @@ struct AircraftInventory {
   std::int32_t first_gear_match_index = -1;
 };
 
-// Exact captured AMD64 build only: timestamp 1787653788, image size 235963904,
-// declared section count 14. Reads the fixed cached world container, at most 64
+// Bounded AMD64 image metadata; the runtime separately verifies the private
+// code contract before using this fixed layout. Reads the world container, at most 64
 // generation-checked world handles and their single viewport predicates, then
 // user0 and its facade. No names, other object fields or target code are read.
 // The chosen chain is reread before success. This detects observed changes; it

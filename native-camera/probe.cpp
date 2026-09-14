@@ -13,6 +13,7 @@
 #include "source_view.hpp"
 #include "view_resize.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstring>
@@ -139,7 +140,7 @@ bool word(LocalMemoryReader& reader, std::uint64_t address, T& output) noexcept 
 }
 
 bool image_word(Runtime& runtime, std::uint32_t rva, std::uint64_t& output) {
-  LocalImageReader reader(reinterpret_cast<HMODULE>(runtime.base), kVerifiedImageSize);
+  LocalImageReader reader(reinterpret_cast<HMODULE>(runtime.base), runtime.image.image_size);
   return reader.read(rva, &output, sizeof(output));
 }
 
@@ -202,7 +203,7 @@ bool capture_pose(Runtime& runtime) {
     // a fresh public CameraGet WORLD sample. Aircraft position and orientation
     // subsequently come from independent public aircraft telemetry.
     LocalMemoryReader objects;
-    LocalImageReader image(reinterpret_cast<HMODULE>(runtime.base), kVerifiedImageSize);
+    LocalImageReader image(reinterpret_cast<HMODULE>(runtime.base), runtime.image.image_size);
     std::uint64_t source = 0;
     const auto aircraft = inspected(runtime, [&] {
       return discovery::inspect_aircraft_metadata(image, objects, runtime.image, runtime.base, 133538936, true, true, false, &source);
@@ -811,16 +812,17 @@ void request_scene_test(bool reuse_calibration) noexcept {
       const auto* basename = std::wcsrchr(path, L'\\');
       if (!length || length >= 32768 || _wcsicmp(basename ? basename + 1 : path, L"FlightSimulator2024.exe") != 0) {
         const std::lock_guard lock(runtime.mutex);
-        runtime.published.message = "Native scene test requires FlightSimulator2024.exe build 1.8.16.0.";
+        runtime.published.message = "Native camera access requires the FlightSimulator2024.exe process.";
         return;
       }
       runtime.image = parse_verified_main_image();
       runtime.base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
-      LocalImageReader reader(reinterpret_cast<HMODULE>(runtime.base), kVerifiedImageSize);
+      LocalImageReader reader(reinterpret_cast<HMODULE>(runtime.base), runtime.image.image_size);
       const auto contract = verify_code_contract(reader, runtime.image, verified_profile());
       if (!runtime.image.valid_image || !contract.valid) {
         const std::lock_guard lock(runtime.mutex);
-        runtime.published.message = "Native code verification refused: " + runtime.image.error + " " + contract.error;
+        runtime.published.message =
+            "Camera compatibility check failed: " + (runtime.image.valid_image ? contract.error : runtime.image.error);
         return;
       }
       const auto disable_mask = inspect_activation_disable_mask(reader, runtime.image);
@@ -837,7 +839,14 @@ void request_scene_test(bool reuse_calibration) noexcept {
       // while the Xbox loader maps its page executable/write-copy. The hook
       // rechecks the bounds and preserves execute permission through Windows'
       // copy-on-write promotion. Anonymous/executable PE sections are refused.
-      const engine_hook::ImageDataSlotProof image_data{reinterpret_cast<HMODULE>(runtime.base), kVerifiedImageSize, 127889408, 31555072};
+      const auto section = std::find_if(runtime.image.sections.begin(), runtime.image.sections.end(), [](const auto& item) {
+        return (item.flags & 0x40000000u) && !(item.flags & 0xa2000000u) && kUpdateSlot >= item.rva &&
+               kUpdateSlot - item.rva <= item.size && sizeof(void*) <= item.size - (kUpdateSlot - item.rva);
+      });
+      if (section == runtime.image.sections.end())
+        throw std::runtime_error("Camera compatibility check failed: manager update slot moved outside static image data.");
+      const engine_hook::ImageDataSlotProof image_data{reinterpret_cast<HMODULE>(runtime.base), runtime.image.image_size, section->rva,
+                                                       section->size};
       const auto hook = engine_hook::install(reinterpret_cast<void**>(runtime.base + kUpdateSlot),
                                              reinterpret_cast<void*>(runtime.base + kUpdate), observer, &image_data);
       runtime.hooked.store(hook.pointer_changed, std::memory_order_release);

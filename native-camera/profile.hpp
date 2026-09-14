@@ -4,8 +4,10 @@
 
 namespace taxi_camera::native_camera {
 
-// Fixed reviewed instruction ranges for the 1.8.16.0 experiment. This manifest
-// is also used by the read-only discovery helper; no scanned hit is callable.
+// Required instruction ranges for the current private-camera integration.
+// Code bytes, layout and live pointer checks decide compatibility; a simulator
+// version number does not. Moved ranges require an updated integration profile.
+// This manifest also supports read-only discovery; no scanned hit is callable.
 inline std::vector<CodeRange> profile_ranges() {
   return {{17640240, 130}, {17641776, 253}, {17642240, 2323}, {17646000, 961}, {17646976, 578}, {17648544, 4050},
           {66864720, 182}, {55910592, 149}, {55910752, 882},  {70721312, 5},   {4195952, 393},  {66324928, 284},

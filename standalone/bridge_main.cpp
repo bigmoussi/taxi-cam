@@ -181,6 +181,7 @@ DWORD run_impl() {
     const char* message = !connected                     ? "Waiting for Windows companion heartbeat."
                           : !settings.enabled            ? "Camera service paused."
                           : cutoff.inhibited             ? "Above 60 knots: TAXI buttons commanded off."
+                          : failed                       ? scene.message.c_str()
                           : !buttons.valid               ? buttons.error
                           : (!targets[0] || !targets[1]) ? "Detecting the two PFD textures; load the A380."
                           : !active                      ? "Ready. Use the aircraft's left or right TAXI button."

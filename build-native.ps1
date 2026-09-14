@@ -66,6 +66,7 @@ if ($Validate) {
     if ($LASTEXITCODE -ne 0) { throw 'Exact native DLL smoke failed.' }
     foreach ($entry in @(
         @{Name='native-launcher-path'; Sources=@('standalone/launcher_path_test.cpp')},
+        @{Name='aircraft-layout'; Sources=@('discovery/aircraft_inventory.cpp','discovery/aircraft_inventory_test.cpp')},
         @{Name='native-slots'; Sources=@('standalone/native_slots_test.cpp')},
         @{Name='native-root-state'; Sources=@('standalone/root_state_test.cpp','src/pfd_stamp_state.cpp')},
         @{Name='taxi-routes'; Sources=@('tests/taxi_button_routes_test.cpp')},
@@ -113,7 +114,7 @@ if ($Validate) {
         passed=$true; version='0.8.0'; createdUtc=[DateTime]::UtcNow.ToString('o'); files=$hashes;
         tests=@($gpuTests + @('pre-existing graphics objects','graphics state replay','exact DLL smoke',
             'settings persistence and IPC','launcher file identity','native COM slots','TAXI routing','PFD detector','exposure','calibration','write budget',
-            'queue submit','render boundary','engine hook','camera telemetry and lifecycle','exe.xml preservation',
+            'queue submit','render boundary','engine hook','camera telemetry and lifecycle','aircraft layout compatibility','exe.xml preservation',
             'native imports and header dependency closure'));
         gpuValidation=[ordered]@{hardware=$(if ($WarpOnly) { 'not-run' } else { 'passed' });warp='passed'};
         simulatorVerified=$false

@@ -213,10 +213,10 @@ AircraftInventory inspect_aircraft_metadata(ImageReader& reader,
     result.error = "The accessor extension permits only the fixed captured facade vtable identity.";
     return result;
   }
-  if (!image.valid_image || image.machine != 0x8664 || image.timestamp != 1787653788 || image.image_size != 235963904 ||
-      image.section_count != 14 || !valid_sections(image) || loaded_image_base == 0 ||
-      image.image_size > std::numeric_limits<std::uint64_t>::max() - loaded_image_base) {
-    result.error = "The exact validated AMD64 build, section metadata and non-overflowing loaded-image bounds are required.";
+  if (!image.valid_image || image.machine != 0x8664 || image.image_size == 0 || image.image_size > 0x80000000u ||
+      image.section_count == 0 || image.section_count > 96 || image.sections.size() > image.section_count || !valid_sections(image) ||
+      loaded_image_base == 0 || image.image_size > std::numeric_limits<std::uint64_t>::max() - loaded_image_base) {
+    result.error = "Validated AMD64 section metadata and non-overflowing loaded-image bounds are required.";
     return result;
   }
 

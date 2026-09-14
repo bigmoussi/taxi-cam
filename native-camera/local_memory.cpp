@@ -294,9 +294,9 @@ discovery::Inventory parse_verified_image_headers(discovery::ImageReader& reader
   result.section_count = u16(coff.data() + 6);
   result.timestamp = u32(coff.data() + 8);
   const auto optional_size = u16(coff.data() + 20);
-  if (u32(coff.data()) != 0x4550 || result.machine != 0x8664 || result.section_count != kVerifiedImageSections ||
-      result.timestamp != kVerifiedImageTimestamp || optional_size < 112 || optional_size > 4096) {
-    result.error = "The main PE header does not match the supported AMD64 build or has invalid bounds.";
+  if (u32(coff.data()) != 0x4550 || result.machine != 0x8664 || result.section_count == 0 || result.section_count > 96 ||
+      optional_size < 112 || optional_size > 4096) {
+    result.error = "The main PE header is not bounded AMD64 executable metadata.";
     return result;
   }
   std::array<std::uint8_t, 4096> optional{};
@@ -308,10 +308,11 @@ discovery::Inventory parse_verified_image_headers(discovery::ImageReader& reader
   const auto headers_size = u32(optional.data() + 60);
   const auto directory_count = u32(optional.data() + 108);
   const auto section_table = pe + 24 + optional_size;
-  constexpr std::uint32_t section_bytes = kVerifiedImageSections * 40;
-  if (u16(optional.data()) != 0x20b || result.image_size != kVerifiedImageSize || headers_size == 0 || headers_size > kHeaderExtent ||
-      !within(section_table, section_bytes, headers_size) || directory_count > (optional_size - 112u) / 8u) {
-    result.error = "The optional header, exact image size or section-table bounds are invalid.";
+  const std::uint32_t section_bytes = result.section_count * 40;
+  if (u16(optional.data()) != 0x20b || result.image_size == 0 || result.image_size > kMaximumImageSize || headers_size == 0 ||
+      headers_size > result.image_size || headers_size > kHeaderExtent || !within(section_table, section_bytes, headers_size) ||
+      directory_count > (optional_size - 112u) / 8u) {
+    result.error = "The optional header, image extent or section-table bounds are invalid.";
     return result;
   }
   if (directory_count > 3) {
@@ -322,10 +323,10 @@ discovery::Inventory parse_verified_image_headers(discovery::ImageReader& reader
     result.load_config_rva = u32(optional.data() + 112 + 10 * 8);
     result.load_config_size = u32(optional.data() + 116 + 10 * 8);
   }
-  std::array<std::uint8_t, section_bytes> table{};
-  if (!source.read(section_table, table.data(), table.size()))
+  std::array<std::uint8_t, 96 * 40> table{};
+  if (!source.read(section_table, table.data(), section_bytes))
     return result;
-  for (std::uint32_t index = 0; index < kVerifiedImageSections; ++index) {
+  for (std::uint32_t index = 0; index < result.section_count; ++index) {
     const auto* entry = table.data() + index * 40;
     std::string name;
     for (unsigned character = 0; character < 8 && entry[character] != 0; ++character)
@@ -341,7 +342,7 @@ discovery::Inventory parse_verified_image_headers(discovery::ImageReader& reader
   }
   std::sort(result.sections.begin(), result.sections.end(), [](const auto& left, const auto& right) { return left.rva < right.rva; });
   if (std::none_of(result.sections.begin(), result.sections.end(), [](const auto& section) { return section.size != 0; })) {
-    result.error = "The supported image has no nonempty loaded sections.";
+    result.error = "The image has no nonempty loaded sections.";
     return result;
   }
   std::uint32_t previous_end = headers_size;
@@ -364,7 +365,7 @@ discovery::Inventory parse_verified_image_headers(discovery::ImageReader& reader
 }
 
 discovery::Inventory parse_verified_main_image() {
-  LocalImageReader reader(GetModuleHandleW(nullptr), kVerifiedImageSize);
+  LocalImageReader reader(GetModuleHandleW(nullptr), kHeaderExtent);
   return parse_verified_image_headers(reader);
 }
 

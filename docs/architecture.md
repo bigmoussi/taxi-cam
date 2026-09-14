@@ -41,7 +41,7 @@ The EXE and DLL communicate through a small Windows shared-memory block protecte
 
 The installer adds an `exe.xml` entry that starts the companion in background mode when MSFS launches.
 
-The companion checks the simulator's executable path, Windows user/session and supported executable identity. Different paths are accepted only when Windows identifies them as the same file, allowing the Xbox installation path and its WindowsApps alias to match. It then loads the bridge using Windows `LoadLibraryW` in the simulator process and calls the DLL's `TaxiCameraStart` export. The bridge starts its control worker after the loader has finished.
+The companion checks the simulator's executable path, Windows user/session and AMD64 executable structure. Different paths are accepted only when Windows identifies them as the same file, allowing the Xbox installation path and its WindowsApps alias to match. It then loads the bridge using Windows `LoadLibraryW` in the simulator process and calls the DLL's `TaxiCameraStart` export. The bridge starts its control worker after the loader has finished.
 
 The bridge sets up observation of Direct3D calls and starts its SimConnect telemetry worker. Camera creation is requested when at least one enabled TAXI side has an assigned PFD, or when the explicit scene test is active.
 
@@ -70,7 +70,7 @@ Source: [aircraft profile](../profiles/catalog.hpp), [PFD detector](../src/pfd_t
 
 ## 3. Position and render the two cameras
 
-The bridge calls internal MSFS camera functions to create two scene views. These functions are outside the public camera SDK. The supported executable identity and function code are checked before they are called.
+The bridge calls internal MSFS camera functions to create two scene views. These functions are outside the public camera SDK. Before any private call, the bridge verifies the loaded image structure, 29 required code fingerprints, activation data and manager update pointer. It uses the observed image size and section bounds. Simulator version, timestamp and section count are not allowlists.
 
 Camera operations run during the simulator's observed camera-manager update. The tray app submits requests; it does not manipulate camera objects from its UI thread. The bridge tracks the IDs of the views it creates so that it can update and remove its own pair.
 
@@ -172,7 +172,7 @@ The control loop checks companion heartbeat, aircraft telemetry, display identit
 | Camera output changes identity | Discard the old image pairing and wait for current captures |
 | Capture stalls while source draws continue in a qualifying state | Request camera recreation, with a bounded retry budget |
 | Companion exits or its heartbeat expires | Suppress delivery and request camera stop |
-| Unsupported simulator build or invalid GPU state | Refuse the affected operation |
+| Changed private code/layout or invalid GPU state | Refuse the affected operation and report the failed check |
 
 Recovery is conditional. It does not infer a valid camera image from a non-null pointer, and a ready flag does not mean a frame has reached the PFD. The [diagnostic reference](runtime-reference.md#diagnostics) explains how to distinguish each stage.
 
@@ -184,7 +184,7 @@ Windows startup, settings transport, private camera integration and GPU capture 
 
 ## Runtime limits
 
-- Private camera calls are bound to MSFS **1.8.16.0**.
+- The integration has fixed private-function addresses and layout expectations. Compatible simulator updates are allowed; changed or relocated functions require an updated integration. Fingerprint matches do not guarantee future compatibility or prove every ABI assumption.
 - PFD detection uses an activity heuristic and can need manual assignment.
 - Camera motion follows received aircraft telemetry; increasing the rate limit does not remove telemetry timing differences.
 - Scene content and lighting depend on what MSFS renders for these views.

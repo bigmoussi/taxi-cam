@@ -168,6 +168,25 @@ void hash_and_verification() {
   }
 }
 
+void compatible_build_metadata() {
+  auto reader = fixture();
+  auto image = metadata();
+  const auto baseline = inspect_code_contract(reader, image, {{Code, 5}, {Code + 16, 6}});
+  require(baseline.valid, "Reference contract fixture");
+  ++image.timestamp;
+  image.image_size += 4096;
+  reader.bytes.resize(image.image_size);
+  reader.word(0x88, image.timestamp);
+  reader.word(Optional + 56, image.image_size);
+  auto result = verify_code_contract(reader, image, baseline.records);
+  require(result.valid, "Unchanged private signatures were rejected for changed build metadata");
+  reader.bytes[Code + 1] ^= 1;
+  result = verify_code_contract(reader, image, baseline.records);
+  require(!result.valid && result.error.find("RVA 0x00001100") != std::string::npos &&
+              result.error.find("changed or moved") != std::string::npos,
+          "Changed private signature was accepted or its failed address was not reported");
+}
+
 void range_limits() {
   const auto image = metadata();
   const std::vector<std::vector<CodeRange>> bad = {{},
@@ -472,6 +491,7 @@ void read_failures() {
 int main() {
   try {
     hash_and_verification();
+    compatible_build_metadata();
     range_limits();
     header_failures();
     relocation_overlap();
