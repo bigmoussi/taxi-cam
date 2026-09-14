@@ -25,7 +25,8 @@ if ($LASTEXITCODE -ne 0 -or $head -ne $Commit) { throw 'Release target must be t
 $info = Get-Content -Raw -LiteralPath (Join-Path (Split-Path -Parent $packagePath) ([IO.Path]::GetFileNameWithoutExtension($packagePath) + '/build-info.json')) | ConvertFrom-Json
 if ($info.sourceCommit -ne $Commit -or $info.build -ne "build.$BuildNumber") { throw 'Package provenance does not match this workflow.' }
 
-$releases = @(Invoke-Gh -Arguments @('api',"repos/$Repository/releases?per_page=100",'--paginate','--slurp','--jq','add') | ConvertFrom-Json)
+$pages = Invoke-Gh -Arguments @('api',"repos/$Repository/releases?per_page=100",'--paginate','--slurp') | ConvertFrom-Json -NoEnumerate
+$releases = @(foreach ($page in $pages) { foreach ($release in $page) { $release } })
 $existing = $releases | Where-Object { $_.tag_name -eq $tag } | Select-Object -First 1
 if ($existing) {
     if ($existing.target_commitish -ne $Commit) { throw 'Existing release targets a different commit.' }
