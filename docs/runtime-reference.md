@@ -113,6 +113,7 @@ The mapping carries values, IDs and bounded text. It carries no camera pixels or
 | Operation | Interval or bound |
 | --- | --- |
 | Companion connection/settings loop | 200 ms delay |
+| Startup header/Windows-loader preflight retry | 1 second; at most 60 attempts; no retry after a remote load/start may have begun |
 | Bridge control/output-service loop | 25 ms delay |
 | Companion heartbeat acceptance | At most 5000 ms old |
 | Aircraft pose and GS updates | SimConnect `SIM_FRAME` |

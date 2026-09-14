@@ -142,6 +142,24 @@ struct LaunchResult {
   bool ok{};
   DWORD error{};
   std::wstring message;
+  // Only a preflight read can be retried. Once a remote load/start may have
+  // begun, every result remains terminal for this companion session.
+  bool retry_before_load = false;
+};
+class LaunchRetry {
+ public:
+  bool ready(std::uint64_t now) const noexcept { return now >= next_; }
+  bool schedule(const LaunchResult& result, std::uint64_t now) noexcept {
+    if (result.ok || !result.retry_before_load || retries_ >= 59 || now > UINT64_MAX - 1000)
+      return false;
+    ++retries_;
+    next_ = now + 1000;
+    return true;
+  }
+
+ private:
+  unsigned retries_{};
+  std::uint64_t next_{};
 };
 inline DWORD wait_for_loader(HANDLE thread, const std::atomic<bool>* running) {
   const auto deadline = GetTickCount64() + 30000;
@@ -182,11 +200,11 @@ inline LaunchResult load_bridge(DWORD pid,
       bridge = m;
   }
   if (!main.base || !amd64_image(process, main))
-    return {false, ERROR_BAD_EXE_FORMAT, L"Could not validate the running MSFS executable. Camera access is disabled."};
+    return {false, ERROR_BAD_EXE_FORMAT, L"Waiting for readable, valid MSFS executable headers.", true};
   if (!bridge.base) {
     const auto loader = remote_export(process, pid, GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "LoadLibraryW"));
     if (!loader)
-      return {false, ERROR_INVALID_ADDRESS, L"Could not verify the Windows DLL loader in MSFS."};
+      return {false, ERROR_INVALID_ADDRESS, L"Waiting for the verified Windows DLL loader in MSFS.", true};
     const SIZE_T bytes = (dll.size() + 1) * sizeof(wchar_t);
     void* memory = VirtualAllocEx(process, nullptr, bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (!memory)

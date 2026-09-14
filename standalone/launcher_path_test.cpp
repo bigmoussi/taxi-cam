@@ -37,7 +37,25 @@ int main() {
     require(DeleteFileW(files.alias.c_str()) != FALSE, "Remove test alias");
     require(CopyFileW(files.copy.c_str(), files.alias.c_str(), TRUE) != FALSE, "Replace alias with a distinct file");
     require(!same_path(files.original, files.alias), "Replaced path must not retain stale identity");
-    std::puts("PASS launcher paths: aliases accepted; copies, missing and replaced files rejected.");
+    using taxi_camera::standalone::LaunchResult;
+    using taxi_camera::standalone::LaunchRetry;
+    const LaunchResult pending{false, ERROR_BAD_EXE_FORMAT, L"Headers not ready", true};
+    LaunchRetry retry;
+    require(retry.ready(1000), "First startup attempt immediate");
+    require(retry.schedule(pending, 1000) && !retry.ready(1999) && retry.ready(2000), "Preflight retry waits one second");
+    for (unsigned i = 1; i < 59; ++i)
+      require(retry.schedule(pending, 1000 + i * 1000), "Bounded preflight retry available");
+    require(!retry.schedule(pending, 61000), "No more than 60 total load attempts");
+    for (const auto error : {WAIT_TIMEOUT, ERROR_ACCESS_DENIED, ERROR_MOD_NOT_FOUND, ERROR_INVALID_ADDRESS}) {
+      LaunchRetry terminal;
+      require(!terminal.schedule({false, static_cast<DWORD>(error), L"Load or start may have begun"}, 1000),
+              "Never repeat remote load/start, timeout, identity or other terminal errors");
+    }
+    LaunchRetry complete;
+    require(!complete.schedule({true, 0, L"Loaded"}, 1000), "Successful load never retried");
+    LaunchRetry overflow;
+    require(!overflow.schedule(pending, UINT64_MAX), "Retry deadline cannot overflow");
+    std::puts("PASS launcher paths and startup: aliases, replaced files, bounded preflight retries and terminal remote-load failures.");
     return 0;
   } catch (const std::exception& error) {
     std::fprintf(stderr, "FAIL launcher paths: %s\n", error.what());

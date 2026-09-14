@@ -446,6 +446,7 @@ DWORD WINAPI connection_worker(void*) {
   win::Mailbox mailbox;
   DWORD attached{};
   bool attempted = false;
+  win::LaunchRetry startup_retry;
   HANDLE process{};
   while (running.load()) {
     if (preview_ui) {
@@ -476,9 +477,10 @@ DWORD WINAPI connection_worker(void*) {
       attached = pid;
       simulator_pid = pid;
       attempted = false;
+      startup_retry = {};
       process = OpenProcess(SYNCHRONIZE, FALSE, pid);
     }
-    if (attached && !attempted) {
+    if (attached && !attempted && startup_retry.ready(GetTickCount64())) {
       attempted = true;
       if (!mailbox.open(attached, true)) {
         const std::lock_guard lock(app_mutex);
@@ -492,9 +494,15 @@ DWORD WINAPI connection_worker(void*) {
           mailbox.unlock();
         }
         const auto loaded = win::load_bridge(attached, expected_simulator, installation + L"\\taxi-camera-bridge.dll", &running);
+        const bool retrying = startup_retry.schedule(loaded, GetTickCount64());
+        attempted = !retrying;
         {
           const std::lock_guard lock(app_mutex);
           connection = loaded.message;
+          if (retrying)
+            connection += L" Retrying startup preflight.";
+          else if (loaded.retry_before_load && !loaded.ok)
+            connection += L" Startup retries exhausted; restart Taxi Cam to retry.";
         }
         PostMessageW(window, StatusMessage, 0, 0);
       }
