@@ -27,6 +27,7 @@
 #include "scene_handoff.hpp"
 #include "scene_runtime.hpp"
 #include "taxi_button_routes.hpp"
+#include "capture_progress.hpp"
 #include "pfd_target_detector.hpp"
 #include "write_budget.hpp"
 
@@ -277,6 +278,8 @@ struct DeviceData {
   bool taxi_start_failed = false;
   bool taxi_auto_detect = true;
   bool taxi_telemetry_started = false;
+  taxi_camera::CaptureProgress capture_progress;
+  std::uint64_t next_capture_check_ms = 0, last_composed_frames = 0;
   std::uint64_t next_telemetry_retry_ms = 0;
   taxi_camera::PfdTargetDetector pfd_detector;
   std::uint64_t next_detection_ms = 0;
@@ -1367,11 +1370,12 @@ void service_taxi_buttons(api::device* device, DeviceData& data, std::uint64_t n
     return;
   }
   const auto buttons = taxi_camera::native_camera::get_taxi_buttons();
+  const auto cutoff = taxi_camera::native_camera::get_taxi_cutoff();
   bool start = false, stop = false;
   {
     const std::lock_guard lock(data.mutex);
     data.taxi_intent_state = data.taxi_intent.observe(now, buttons.valid, buttons.left_on, buttons.right_on);
-    const auto mask = data.taxi_routes.active_mask(true, (data.taxi_intent_state.buttons & 1u) != 0,
+    const auto mask = data.taxi_routes.active_mask(!cutoff.inhibited, (data.taxi_intent_state.buttons & 1u) != 0,
                                                   (data.taxi_intent_state.buttons & 2u) != 0);
     if (!mask)
       data.taxi_start_failed = false;
@@ -1409,6 +1413,43 @@ void service_display_exposure(api::device* device, DeviceData& data, std::uint64
   taxi_camera::scene_runtime::set_display_exposure(reinterpret_cast<std::uintptr_t>(device), data.exposure_state.applied_ev);
 }
 
+void service_capture_recovery(api::device* device, DeviceData& data, std::uint64_t now) {
+  const std::lock_guard control_lock(data.control_mutex);
+  const auto cutoff = taxi_camera::native_camera::get_taxi_cutoff();
+  bool manual_mode = false;
+  {
+    const std::lock_guard lock(data.mutex);
+    // Automatic mode already follows the cutoff mask. Apply the same limit
+    // to a manually started diagnostic scene, retaining telemetry afterwards.
+    manual_mode = !data.taxi_button_control;
+    if (cutoff.inhibited && manual_mode) {
+      data.camera_enabled.store(false, std::memory_order_release);
+    }
+  }
+  if (cutoff.inhibited && manual_mode && taxi_camera::native_camera::scene_snapshot().accepting_requests)
+    stop_camera_scene(device, true);
+  if (now < data.next_capture_check_ms)
+    return;
+  data.next_capture_check_ms = now + 250;
+  const auto scene = taxi_camera::native_camera::scene_snapshot();
+  const auto feed = taxi_camera::scene_runtime::snapshot(reinterpret_cast<std::uintptr_t>(device));
+  const bool eligible = !cutoff.inhibited && data.camera_enabled.load(std::memory_order_acquire) && !feed.failed &&
+      scene.pair.state == taxi_camera::engine_camera::State::active && scene.requested_feeds == 2 &&
+      !scene.pose_waiting && taxi_camera::native_camera::sample_body_pose(now).valid;
+  if (eligible && feed.frames != data.last_composed_frames)
+    taxi_camera::native_camera::note_scene_capture_progress(now);
+  data.last_composed_frames = feed.frames;
+  if (data.capture_progress.observe(now, eligible, feed.frames, feed.capture.source_draws,
+                                   std::strcmp(feed.capture.tail_status, "unknown_source_state") == 0)) {
+    const bool queued = taxi_camera::native_camera::request_capture_recovery();
+    if (queued)
+      taxi_camera::scene_runtime::reset_feed(reinterpret_cast<std::uintptr_t>(device));
+    reshade::log::message(reshade::log::level::info, queued ?
+        "Taxi Camera capture stall: guarded scene recreation queued; TAXI intent retained." :
+        "Taxi Camera capture stall: recovery refused by native lifecycle or retry limit.");
+  }
+}
+
 void on_present(api::command_queue* queue, api::swapchain*, const api::rect*, const api::rect*, std::uint32_t, const api::rect*) {
   const auto speed = taxi_camera::native_camera::get_ground_speed();
   taxi_camera::scene_runtime::set_ground_speed(reinterpret_cast<std::uintptr_t>(queue->get_device()), static_cast<float>(speed.knots),
@@ -1421,10 +1462,16 @@ void on_present(api::command_queue* queue, api::swapchain*, const api::rect*, co
   }
   const auto now = GetTickCount64();
   service_taxi_buttons(device, *data, now);
+  service_capture_recovery(device, *data, now);
   service_display_exposure(device, *data, now);
   taxi_camera::scene_runtime::service();
   auto next_log = data->next_feed_log_ms.load(std::memory_order_relaxed);
   if (now >= next_log && data->next_feed_log_ms.compare_exchange_strong(next_log, now + 5000)) {
+    const auto cutoff = taxi_camera::native_camera::get_taxi_cutoff();
+    char cutoff_message[192];
+    std::snprintf(cutoff_message, sizeof(cutoff_message), "Taxi Camera speed cutoff: inhibited=%d pending_off=%u status=%s",
+                  cutoff.inhibited, cutoff.pending_off, cutoff.status);
+    reshade::log::message(reshade::log::level::info, cutoff_message);
     const auto lighting = taxi_camera::native_camera::get_lighting();
     const auto body_timing = taxi_camera::native_camera::get_body_telemetry_timing();
     {
@@ -1634,7 +1681,7 @@ void on_present(api::command_queue* queue, api::swapchain*, const api::rect*, co
 
 void draw_overlay(api::effect_runtime* runtime) {
   auto* data = private_data<DeviceData>(runtime->get_device());
-  ImGui::TextWrapped("Native camera probe 0.7.11. EFIS TAXI control and upper-PFD cameras.");
+  ImGui::TextWrapped("Native camera probe 0.7.12. EFIS TAXI control and upper-PFD cameras.");
   if (data == nullptr) {
     ImGui::TextUnformatted("D3D12 is required.");
     return;
@@ -1710,6 +1757,8 @@ void draw_overlay(api::effect_runtime* runtime) {
   const auto buttons = taxi_camera::native_camera::get_taxi_buttons();
   ImGui::Text("TAXI signals: %s | left %s | right %s", buttons.valid ? "live" : buttons.error,
               buttons.left_on ? "ON" : "off", buttons.right_on ? "ON" : "off");
+  const auto cutoff = taxi_camera::native_camera::get_taxi_cutoff();
+  ImGui::Text("GS > 60 kt cutoff: %s | pending OFF %u", cutoff.status, cutoff.pending_off);
   ImGui::Text("PFD assignment: left %llu | right %llu", static_cast<unsigned long long>(assigned[0]),
               static_cast<unsigned long long>(assigned[1]));
   ImGui::TextWrapped("%s", detection_status);
@@ -2212,7 +2261,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
     taxi_camera::pfd_adapter::register_events();
     reshade::register_overlay("Taxi Camera Native Probe", draw_overlay);
     reshade::log::message(reshade::log::level::info,
-                          "Taxi Camera Native Probe 0.7.11: default 15 Hz per camera, maximum 60 Hz; "
+                          "Taxi Camera Native Probe 0.7.12: default 15 Hz per camera, maximum 60 Hz; "
                           "EFIS TAXI recovery, automatic A380 PFD detection, ambient-light exposure with -8.8 EV day baseline.");
   } else if (reason == DLL_PROCESS_DETACH) {
     reshade::unregister_addon(module);

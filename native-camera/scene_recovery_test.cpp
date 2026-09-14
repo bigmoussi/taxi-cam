@@ -49,7 +49,8 @@ int main() {
     require(!recovery.pending() && !recovery.retry(99999, clean, true), "Fatal failure cannot retry");
   }
   for (const auto reason :
-       {SceneStopReason::inspection_unavailable, SceneStopReason::owned_entry_absent, SceneStopReason::resolution_changed}) {
+       {SceneStopReason::inspection_unavailable, SceneStopReason::owned_entry_absent, SceneStopReason::resolution_changed,
+        SceneStopReason::capture_stalled}) {
     recovery.start();
     recovery.failed(reason, 100);
     require(recovery.pending() && recovery.reason() == reason, "Recoverable reason is recorded");
@@ -121,5 +122,19 @@ int main() {
   require(!recovery.pending() && !recovery.retry(99999, clean, true), "Retry storm is bounded");
   recovery.start();
   require(recovery.attempts() == 0 && recovery.reason() == SceneStopReason::none, "Explicit new Start resets retry budget");
+  recovery.failed(SceneStopReason::capture_stalled, 1000);
+  require(recovery.retry(3000, clean, true), "Capture stall uses confirmed cleanup policy");
+  recovery.capture_progress(4000);
+  recovery.capture_progress(20000);
+  require(recovery.attempts() == 1, "Long capture gaps cannot refill the retry budget");
+  for (std::uint64_t time = 21000; time < 30000; time += 1000)
+    recovery.capture_progress(time);
+  require(recovery.attempts() == 1, "Healthy interval must complete before refill");
+  recovery.capture_progress(30000);
+  require(recovery.attempts() == 0, "Ten seconds of advancing captures refill recovery budget");
+  recovery.failed(SceneStopReason::identity_refused, 31000);
+  for (std::uint64_t time = 32000; time < 50000; time += 1000)
+    recovery.capture_progress(time);
+  require(recovery.reason() == SceneStopReason::identity_refused && !recovery.pending(), "Capture progress cannot clear identity failure");
   std::printf("Scene recovery: PASS %u checks\n", checks);
 }

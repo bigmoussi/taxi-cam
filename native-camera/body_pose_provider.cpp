@@ -7,6 +7,7 @@
 #include <cstring>
 #include <cwchar>
 #include "body_pose_math.hpp"
+#include "taxi_speed_cutoff.hpp"
 
 namespace taxi_camera::native_camera {
 namespace {
@@ -17,6 +18,8 @@ using Request = HRESULT(WINAPI*)(HANDLE, DWORD, DWORD, DWORD, DWORD, DWORD, DWOR
 using Dispatch = HRESULT(WINAPI*)(HANDLE, void**, DWORD*);
 using CameraGet = HRESULT(WINAPI*)(HANDLE, DWORD);
 using LastPacket = HRESULT(WINAPI*)(HANDLE, DWORD*);
+using MapEvent = HRESULT(WINAPI*)(HANDLE, DWORD, const char*);
+using TransmitEvent = HRESULT(WINAPI*)(HANDLE, DWORD, DWORD, DWORD, DWORD, DWORD);
 // Public SDK SIMCONNECT_DATA_CAMERA is packed: XYZ24, references/object IDs,
 // XYZ24, FLOAT32 PBH12, references/object IDs, FOVdouble. Confirmed current
 // 1.8.16.0 CameraGet response ID40, total96 bytes, including SIMCONNECT_RECV12.
@@ -51,6 +54,8 @@ struct State {
   bool taxi_left = false, taxi_right = false;
   std::uint64_t taxi_ms = 0;
   const char* taxi_error = "not_initialized";
+  TaxiSpeedCutoff speed_cutoff;
+  const char* cutoff_status = "below_speed_limit";
   double ambient = 0, brightness = 0;
   std::uint64_t lighting_ms = 0;
   const char* lighting_error = "not_initialized";
@@ -221,6 +226,8 @@ DWORD WINAPI worker(void*) noexcept {
   const auto dispatch = reinterpret_cast<Dispatch>(GetProcAddress(dll, "SimConnect_GetNextDispatch"));
   const auto get = reinterpret_cast<CameraGet>(GetProcAddress(dll, "SimConnect_CameraGet"));
   const auto last_packet = reinterpret_cast<LastPacket>(GetProcAddress(dll, "SimConnect_GetLastSentPacketID"));
+  const auto map_event = reinterpret_cast<MapEvent>(GetProcAddress(dll, "SimConnect_MapClientEventToSimEvent"));
+  const auto transmit_event = reinterpret_cast<TransmitEvent>(GetProcAddress(dll, "SimConnect_TransmitClientEvent"));
   if (!open || !close || !define || !request || !dispatch || !get) {
     failure("simconnect_exports");
     FreeLibrary(dll);
@@ -278,6 +285,20 @@ DWORD WINAPI worker(void*) noexcept {
   }
   if (!taxi_defined)
     taxi_failure("taxi_definition_unavailable");
+  std::array<bool, 2> taxi_events{};
+  // Isolated telemetry readers never control the aircraft. Production sends
+  // the aircraft's real input event; its own controller updates the light.
+#if !defined(TAXI_BODY_POSE_PROVIDER_VALIDATION) && !defined(TAXI_BODY_POSE_PROVIDER_EXTERNAL_VALIDATION)
+  if (map_event && transmit_event) {
+    for (unsigned side = 0; side < 2; ++side) {
+      taxi_events[side] = SUCCEEDED(map_event(session, 10 + side,
+          side == 0 ? "A32NX.FCU_EFIS_L_TAXI_PUSH" : "A32NX.FCU_EFIS_R_TAXI_PUSH"));
+      remember_taxi_packet();
+    }
+  }
+#else
+  (void)map_event;
+#endif
   // Both public Number values were observed through separate requests in the
   // parked simulator. Official Asobo Emissive.xml maps ambient1..4000; the
   // documented glass-cockpit brightness is0..1. This is optional display data.
@@ -406,6 +427,28 @@ DWORD WINAPI worker(void*) noexcept {
         break;
       }
     }
+    const auto speed = get_ground_speed();
+    const auto buttons = get_taxi_buttons();
+    AcquireSRWLockExclusive(&state.lock);
+    const auto commands = state.speed_cutoff.update(GetTickCount64(), speed.valid, speed.knots, buttons.valid,
+        (buttons.left_on ? 1u : 0u) | (buttons.right_on ? 2u : 0u), buttons.sample_ms);
+    state.cutoff_status = state.speed_cutoff.pending() ? "waiting_for_taxi_off" :
+        state.speed_cutoff.inhibited() ? "ground_speed_above_60_knots" : "below_speed_limit";
+    ReleaseSRWLockExclusive(&state.lock);
+    for (unsigned side = 0; side < 2; ++side) {
+      if (!(commands & (1u << side)))
+        continue;
+      // Public SimConnect priority flag: GroupID is an explicit priority.
+      // https://docs.flightsimulator.com/msfs2024/retail/programming-apis/simconnect/api-reference/events-and-data/simconnect_transmitclientevent/
+      const bool accepted = taxi_events[side] && transmit_event &&
+          SUCCEEDED(transmit_event(session, 0, 10 + side, 0, 1, 16));
+      if (taxi_events[side])
+        remember_taxi_packet();
+      AcquireSRWLockExclusive(&state.lock);
+      state.speed_cutoff.sent(side, accepted);
+      state.cutoff_status = accepted ? "waiting_for_taxi_off" : "taxi_off_event_unavailable";
+      ReleaseSRWLockExclusive(&state.lock);
+    }
   }
   taxi_failure("taxi_session_closed");
   lighting_failure("lighting_session_closed");
@@ -508,6 +551,8 @@ void shutdown_body_pose_provider() noexcept {
   state.lighting_ms = 0;
   state.lighting_error = "not_initialized";
   state.taxi_left = state.taxi_right = false;
+  state.speed_cutoff = {};
+  state.cutoff_status = "below_speed_limit";
   state.calibrated = false;
   state.error = "not_initialized";
   ReleaseSRWLockExclusive(&state.lock);
@@ -607,6 +652,12 @@ TaxiButtonSample get_taxi_buttons() noexcept {
 LightingSample get_lighting() noexcept {
   AcquireSRWLockShared(&state.lock);
   const auto out = lighting_locked(GetTickCount64());
+  ReleaseSRWLockShared(&state.lock);
+  return out;
+}
+TaxiCutoffStatus get_taxi_cutoff() noexcept {
+  AcquireSRWLockShared(&state.lock);
+  const TaxiCutoffStatus out{state.speed_cutoff.inhibited(), state.speed_cutoff.pending(), state.cutoff_status};
   ReleaseSRWLockShared(&state.lock);
   return out;
 }

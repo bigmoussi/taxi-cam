@@ -6,15 +6,15 @@ The current prototype is a ReShade add-on. A native Windows companion with a sma
 
 ## Current state
 
-The source baseline is **0.7.11**. Earlier live testing confirmed colour camera feeds on both PFDs through their EFIS TAXI buttons. The latest changes add recovery after temporary telemetry/scene loss, preserve surviving left/right target assignments, stream aircraft pose per simulation frame and adjust exposure for ambient light. Those latest behavior changes have passed local validation but still need in-simulator confirmation.
+The current source version is **0.7.12**, migrated from the 0.7.11 baseline. Earlier live testing confirmed colour camera feeds on both PFDs through their EFIS TAXI buttons. The latest changes add recovery after temporary telemetry/scene loss, preserve surviving left/right target assignments, stream aircraft pose per simulation frame and adjust exposure for ambient light. Version 0.7.12 additionally detects the observed capture-state stall and retires/recreates the camera pair through the existing guarded recovery path. Above 60 knots ground speed, it inhibits camera delivery and requests OFF through each active aircraft TAXI input, awaiting the actual light feedback. Local validation is separate from live confirmation; the new recovery and cutoff still need an in-simulator check.
 
 - Each camera renders at its pane dimensions, with a selectable 15-60 fps activation/capture limit. This limit is not a measurement of completed frames.
 - Camera capture, composition and PFD delivery stay on the GPU; pixel readback is used only in validation.
 - The lower PFD trim area is preserved. Mounts are editable through `taxi-camera-mounts.cfg`.
-- The current integration reads the A380X variables `L:A32NX_FCU_EFIS_L_TAXI_LIGHT_ON` and `L:A32NX_FCU_EFIS_R_TAXI_LIGHT_ON`. These are external aircraft compatibility identifiers. They are not written by the add-on.
+- The current integration reads the A380X variables `L:A32NX_FCU_EFIS_L_TAXI_LIGHT_ON` and `L:A32NX_FCU_EFIS_R_TAXI_LIGHT_ON`. These are external aircraft compatibility identifiers. The add-on does not write those output variables. For the speed cutoff it sends the corresponding `A32NX.FCU_EFIS_L_TAXI_PUSH` / `A32NX.FCU_EFIS_R_TAXI_PUSH` custom events to the aircraft controller.
 - Private camera calls are guarded against the inspected MSFS **1.8.16.0** build. Unexpected code or object identities refuse startup.
 
-Remaining live checks are time-of-day recovery, nose-wheel motion stability, continuous flicker and lower-camera framing. Missing runway/taxiway lights remain unresolved. Initial PFD selection without debug labels uses an activity heuristic; losing both established targets can require manual assignment.
+The user reports improved but occasional nose-wheel motion artifacts with 0.7.11. Remaining live checks are automatic recovery after a time-of-day change, the 60-knot cutoff and button feedback, nose-wheel motion stability, continuous flicker and lower-camera framing. Missing runway/taxiway lights remain unresolved. Initial PFD selection without debug labels uses an activity heuristic; losing both established targets can require manual assignment.
 
 ## Build and validate
 
@@ -45,6 +45,10 @@ Close MSFS before replacing a loaded add-on. Use the same ReShade binary that pa
 ```
 
 The installer verifies the exact smoke-tested binary and backs up the preceding installed add-on. On first setup, copy `taxi-camera-mounts.cfg` beside it; retain an existing configuration if you have tuned the mounts. Load the supported aircraft and allow its pose to settle while parked. EFIS TAXI buttons control the two PFD feeds. Press Home to open the ReShade overlay and use **Taxi Camera Native Probe** for diagnostics, manual PFD assignment, camera rate and exposure controls.
+
+## Multiple aircraft
+
+The renderer is a shared MSFS integration, but current display dimensions, target detection, controls and mounts are A380X-specific. The intended package separates these into aircraft profiles. An iniBuilds A350 profile is a requested future target, not verified support. See the [aircraft profile design](docs/aircraft-profiles.md) for the required boundaries and validation.
 
 ## Source map
 

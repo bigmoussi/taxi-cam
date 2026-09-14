@@ -56,6 +56,12 @@ GroundSpeedSample get_ground_speed() noexcept;
 // Cached FCU TAXI light levels; independent of body calibration. Invalid or
 // older-than-500ms telemetry must not be interpreted as an authoritative OFF.
 TaxiButtonSample get_taxi_buttons() noexcept;
+struct TaxiCutoffStatus {
+  bool inhibited = false;
+  unsigned pending_off = 0;
+  const char* status = "below_speed_limit";
+};
+TaxiCutoffStatus get_taxi_cutoff() noexcept;
 // Optional public lighting values sampled at2Hz, independent of pose/TAXI.
 // AMBIENT LIGHT SENSOR is a Number, not a claimed radiometric/lux measurement.
 LightingSample get_lighting() noexcept;

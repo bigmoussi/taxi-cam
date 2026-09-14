@@ -17,6 +17,12 @@ foreach ($component in @('local_memory', 'code_contract', 'source_view', 'activa
 }
 & (Join-Path $PSScriptRoot 'validate-abi.ps1')
 $scheduleTest = Join-Path $outputDirectory 'render-schedule-test.exe'
+$controlTest = Join-Path $outputDirectory 'control-policy-test.exe'
+& $compiler @common (Join-Path $PSScriptRoot 'control_policy_test.cpp') `
+    (Join-Path $nativeRoot 'src/scene_source_state.cpp') '-o' $controlTest
+if ($LASTEXITCODE -ne 0) { throw 'Control policy test compilation failed.' }
+& $controlTest
+if ($LASTEXITCODE -ne 0) { throw 'Control policy test failed.' }
 & $compiler @common (Join-Path $PSScriptRoot 'render_schedule_test.cpp') '-o' $scheduleTest
 if ($LASTEXITCODE -ne 0) { throw 'Render schedule test compilation failed.' }
 & $scheduleTest

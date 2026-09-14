@@ -895,6 +895,28 @@ void request_scene_stop(bool keep_telemetry) noexcept {
     shutdown_body_pose_provider();
 }
 
+bool request_capture_recovery() noexcept {
+  auto& runtime = state();
+  const std::lock_guard start_lock(runtime.start_mutex);
+  const std::lock_guard lock(runtime.mutex);
+  if (!runtime.recovery.requested() || runtime.recovery.pending() || runtime.requested_start ||
+      runtime.recovery.attempts() >= SceneRecovery::maximum_retries ||
+      (runtime.recovery.reason() != SceneStopReason::none && !retryable_scene_stop(runtime.recovery.reason())) ||
+      runtime.pair.snapshot().state != ec::State::active)
+    return false;
+  runtime.recovery.failed(SceneStopReason::capture_stalled, GetTickCount64());
+  runtime.stop_detail = "Source draws continued but capture state stayed unknown; retiring owned views for fresh allocation.";
+  scene_handoff().stop_scene();
+  runtime.pair.request_disable();
+  return true;
+}
+
+void note_scene_capture_progress(std::uint64_t now_ms) noexcept {
+  auto& runtime = state();
+  const std::lock_guard lock(runtime.mutex);
+  runtime.recovery.capture_progress(now_ms);
+}
+
 void request_scene_rate(unsigned rate, unsigned feeds) noexcept {
   const auto settings = std::clamp(rate, 15u, 60u) | (std::clamp(feeds, 1u, 2u) << 8);
   state().requested_settings.store(settings, std::memory_order_release);
