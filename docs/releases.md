@@ -1,6 +1,6 @@
 # Automated Windows releases
 
-Every push to `main` starts the [Windows release workflow](../.github/workflows/release.yml). A successful run builds a Windows x64 package and publishes it with release notes at [GitHub Releases](https://github.com/rthomson83/taxi-cam/releases).
+Every push to `main` starts the [Windows release workflow](../.github/workflows/release.yml). A successful run builds a Windows x64 package and publishes it with release notes at [GitHub Releases](https://github.com/rthoms334/taxi-cam/releases).
 
 The workflow can also be started manually from GitHub Actions on `main`.
 

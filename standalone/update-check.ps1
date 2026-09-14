@@ -3,7 +3,7 @@ param([string]$OutputDirectory, [string]$CurrentVersion, [uint32]$CurrentBuild =
 # Embedded in the companion; never executes release-provided code or command text.
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-$script:Repository = 'rthomson83/taxi-cam'
+$script:Repository = 'rthoms334/taxi-cam'
 $script:DownloadLimit = 256MB
 
 function ConvertTo-UpdateVersion([string]$Tag) {

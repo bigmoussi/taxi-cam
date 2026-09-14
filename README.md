@@ -10,7 +10,7 @@ The app does **not** adjust the simulator's graphics-quality or performance sett
 
 ## Install
 
-Download the Windows x64 **setup EXE** from [Releases](https://github.com/rthomson83/taxi-cam/releases/latest). Close MSFS and exit any running Taxi Cam instance, then open setup.
+Download the Windows x64 **setup EXE** from [Releases](https://github.com/rthoms334/taxi-cam/releases/latest). Close MSFS and exit any running Taxi Cam instance, then open setup.
 
 Choose the folder containing `FlightSimulator2024.exe` and the simulator's `exe.xml` launch configuration. Setup attempts to find the configuration and reuses existing installation choices on updates.
 
