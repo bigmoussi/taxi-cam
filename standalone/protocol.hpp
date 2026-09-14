@@ -89,9 +89,11 @@ class Mailbox {
       close();
     return valid;
   }
-  bool lock(DWORD timeout = 0) noexcept {
+  enum class LockResult { acquired, busy, invalid };
+  bool lock(DWORD timeout = 0) noexcept { return try_lock(timeout) == LockResult::acquired; }
+  LockResult try_lock(DWORD timeout = 0) noexcept {
     if (!mutex_)
-      return false;
+      return LockResult::invalid;
     const auto result = WaitForSingleObject(mutex_, timeout);
     if (result == WAIT_ABANDONED) {
       // The previous writer died; don't consume its possibly partial message.
@@ -100,9 +102,9 @@ class Mailbox {
         memory_->owner_heartbeat = 0;
       }
       ReleaseMutex(mutex_);
-      return false;
+      return LockResult::invalid;
     }
-    return result == WAIT_OBJECT_0;
+    return result == WAIT_OBJECT_0 ? LockResult::acquired : result == WAIT_TIMEOUT ? LockResult::busy : LockResult::invalid;
   }
   void unlock() noexcept { ReleaseMutex(mutex_); }
   Shared* data() const noexcept { return memory_; }

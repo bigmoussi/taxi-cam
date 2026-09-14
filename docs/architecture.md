@@ -171,6 +171,7 @@ The control loop checks companion heartbeat, aircraft telemetry, display identit
 | TAXI telemetry briefly disappears | Hold the last accepted button state for a bounded interval; continue checking camera-pose freshness separately |
 | Camera output changes identity | Discard the old image pairing and wait for current captures |
 | Capture stalls while source draws continue in a qualifying state | Request camera recreation, with a bounded retry budget |
+| Companion settings mutex is briefly busy | Retain the last validated settings within the existing heartbeat deadline |
 | Companion exits or its heartbeat expires | Suppress delivery and request camera stop |
 | Changed private code/layout or invalid GPU state | Refuse the affected operation and report the failed check |
 

@@ -484,8 +484,8 @@ DWORD WINAPI connection_worker(void*) {
         const std::lock_guard lock(app_mutex);
         connection = L"Could not open the camera control channel.";
       } else {
+        const auto settings = draft();
         if (mailbox.lock(100)) {
-          const auto settings = draft();
           mailbox.data()->owner_pid = GetCurrentProcessId();
           mailbox.data()->owner_heartbeat = GetTickCount64();
           mailbox.data()->settings = settings;
@@ -499,8 +499,8 @@ DWORD WINAPI connection_worker(void*) {
         PostMessageW(window, StatusMessage, 0, 0);
       }
     }
+    const auto settings = draft();
     if (mailbox.data() && running.load() && mailbox.lock()) {
-      auto settings = draft();
       mailbox.data()->settings = settings;
       mailbox.data()->owner_pid = GetCurrentProcessId();
       mailbox.data()->owner_heartbeat = GetTickCount64();
@@ -710,7 +710,10 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         build_controls();
         return 0;
       }
-      if (id == 602) { PostMessageW(hwnd, TrayMessage, 0, WM_CONTEXTMENU); return 0; }
+      if (id == 602) {
+        PostMessageW(hwnd, TrayMessage, 0, WM_CONTEXTMENU);
+        return 0;
+      }
       if (id == 500) {
         apply();
         return 0;

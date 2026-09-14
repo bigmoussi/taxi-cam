@@ -8,6 +8,7 @@
 #include "../src/display_exposure.hpp"
 #include "../src/taxi_button_routes.hpp"
 #include "d3d12_bridge.hpp"
+#include "companion_control.hpp"
 #include "native_hooks.hpp"
 #include "protocol.hpp"
 
@@ -15,7 +16,7 @@ namespace {
 using namespace taxi_camera;
 namespace win = standalone;
 std::atomic<bool> started{};
-void log_status(const win::Status& s) {
+void log_status(const win::Status& s, const char* detail = "") {
   wchar_t directory[32768]{};
   const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", directory, 32768);
   if (!n || n >= 32700)
@@ -28,14 +29,15 @@ void log_status(const win::Status& s) {
       CreateFileW(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
   if (file == INVALID_HANDLE_VALUE)
     return;
-  char line[1024];
-  const auto length = std::snprintf(
-      line, sizeof(line),
-      "%llu native=%u scene=%u mask=%u left=%llu right=%llu captured=%llu composed=%llu stamps=%llu hooks_failed=%llu cutoff=%u | %s\r\n",
-      static_cast<unsigned long long>(GetTickCount64()), s.graphics_ready, s.scene_ready, s.taxi_mask,
-      static_cast<unsigned long long>(s.left_id), static_cast<unsigned long long>(s.right_id), static_cast<unsigned long long>(s.captures),
-      static_cast<unsigned long long>(s.composed), static_cast<unsigned long long>(s.stamps),
-      static_cast<unsigned long long>(s.hook_failures), s.speed_inhibited, s.message);
+  char line[2048];
+  const auto length = std::snprintf(line, sizeof(line),
+                                    "%llu native=%u scene=%u mask=%u left=%llu right=%llu captured=%llu composed=%llu stamps=%llu "
+                                    "hooks_failed=%llu cutoff=%u | %s | %s\r\n",
+                                    static_cast<unsigned long long>(GetTickCount64()), s.graphics_ready, s.scene_ready, s.taxi_mask,
+                                    static_cast<unsigned long long>(s.left_id), static_cast<unsigned long long>(s.right_id),
+                                    static_cast<unsigned long long>(s.captures), static_cast<unsigned long long>(s.composed),
+                                    static_cast<unsigned long long>(s.stamps), static_cast<unsigned long long>(s.hook_failures),
+                                    s.speed_inhibited, s.message, detail);
   DWORD wrote{};
   if (length > 0 && static_cast<size_t>(length) < sizeof(line))
     WriteFile(file, line, static_cast<DWORD>(length), &wrote, nullptr);
@@ -66,17 +68,16 @@ DWORD run_impl() {
   bool requested = false, failed = false;
   std::uint64_t next_telemetry{}, next_discovery{}, next_recovery{}, next_log{}, route_request{}, last_frames{};
   unsigned rate{}, feeds{};
+  win::CompanionControl control;
+  win::Status last_logged{};
+  bool logged = false, last_connected = false, last_requested = false;
+  std::uint64_t last_stop_sequence{};
   std::array<std::array<double, 6>, 2> applied_mounts{};
   for (;;) {
+    control.refresh(mailbox);
     const auto now = GetTickCount64();
-    win::Settings settings;
-    bool connected = false;
-    if (mailbox.lock()) {
-      settings = mailbox.data()->settings;
-      const auto beat = mailbox.data()->owner_heartbeat;
-      connected = beat && now >= beat && now - beat <= 5000 && win::valid_settings(settings);
-      mailbox.unlock();
-    }
+    const auto& settings = control.settings();
+    const bool connected = control.connected(now);
     if (now >= next_telemetry) {
       native_camera::initialize_body_pose_provider();
       next_telemetry = now + 2000;
@@ -192,8 +193,25 @@ DWORD run_impl() {
       mailbox.data()->status = status;
       mailbox.unlock();
     }
-    if (now >= next_log) {
-      log_status(status);
+    const bool changed = !logged || connected != last_connected || requested != last_requested ||
+                         status.taxi_mask != last_logged.taxi_mask || status.left_id != last_logged.left_id ||
+                         status.right_id != last_logged.right_id || status.speed_inhibited != last_logged.speed_inhibited ||
+                         scene.stop_sequence != last_stop_sequence;
+    if (changed || now >= next_log) {
+      char detail[1024];
+      std::snprintf(detail, sizeof(detail),
+                    "connected=%u requested=%u ipc_busy=%llu buttons_valid=%u held=%u expired=%u output=%u stop_seq=%llu stop=%s "
+                    "retry=%u pending=%u pose_wait=%u tail=%s | %.256s",
+                    connected, requested, static_cast<unsigned long long>(control.busy_reads()), buttons.valid, desired.held,
+                    desired.timed_out, output.output, static_cast<unsigned long long>(scene.stop_sequence),
+                    native_camera::scene_stop_reason_name(scene.stop_reason), scene.recovery_attempts, scene.recovery_pending,
+                    scene.pose_waiting, output.capture.tail_status, scene.stop_detail.c_str());
+      log_status(status, detail);
+      last_logged = status;
+      last_connected = connected;
+      last_requested = requested;
+      last_stop_sequence = scene.stop_sequence;
+      logged = true;
       next_log = now + 5000;
     }
     Sleep(25);

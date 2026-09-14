@@ -108,7 +108,7 @@ Mapping: Local\380TaxiCamera.Data.<MSFS_PID>
 
 The header contains `magic`, `version`, `bytes`, `owner_pid` and `owner_heartbeat`. Magic is `0x54415849`, protocol version is `1` and size must equal `sizeof(Shared)`. The payload is the native C++ `Settings` and `Status` layout, so the EXE and DLL must be shipped as a compatible pair.
 
-The mapping carries values, IDs and bounded text. It carries no camera pixels or native object pointers. Routine access tries the mutex without blocking; an abandoned mutex clears enable and heartbeat rather than consuming a partial write.
+The mapping carries values, IDs and bounded text. It carries no camera pixels or native object pointers. Routine access tries the mutex without blocking. A busy mutex retains the last validated settings only until their original heartbeat expires; a failed read never extends that deadline. Heartbeat age is measured after the read. An abandoned mutex immediately invalidates the bridge cache and clears enable and heartbeat rather than consuming a partial write.
 
 | Operation | Interval or bound |
 | --- | --- |
@@ -121,7 +121,7 @@ The mapping carries values, IDs and bounded text. It carries no camera pixels or
 | Held TAXI intent after an invalid gap starts | Less than 2000 ms |
 | PFD discovery | 1000 ms; three qualifying windows to confirm |
 | Capture-recovery check | 250 ms |
-| Diagnostic log snapshot | 5000 ms |
+| Diagnostic log snapshot | 5000 ms and each control/scene-stop transition |
 
 Camera scheduling alternates activation pulses and closed intervals. These loop delays and the rate setting do not guarantee completed image FPS.
 
@@ -138,6 +138,8 @@ The bridge writes a status snapshot to the companion and appends metadata to:
 ~~~text
 %LOCALAPPDATA%\380 Taxi Cam\bridge.log
 ~~~
+
+Control-transition logs include companion connectivity, cached-read contention count, requested scene state, TAXI validity/grace expiry, scene stop reason and recovery attempts. This distinguishes a control disconnect from capture recreation without relying on a five-second snapshot.
 
 Use the counters in pipeline order:
 
