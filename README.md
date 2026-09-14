@@ -90,15 +90,15 @@ To build locally with the pinned compiler and run validation:
 ~~~powershell
 .\build.ps1 -Bootstrap -Validate
 .\smoke-test.ps1
-.\package-native.ps1
+.\installer\package.ps1
 ~~~
 
 To build a local setup after validation:
 
 ~~~powershell
-.\bootstrap-installer.ps1
-$zip = .\package-native.ps1 -BuildLabel build.0 -SourceCommit (git rev-parse HEAD)
-.\build-installer.ps1 -Package $zip
+.\installer\bootstrap.ps1
+$zip = .\installer\package.ps1 -BuildLabel build.0 -SourceCommit (git rev-parse HEAD)
+.\installer\build.ps1 -Package $zip
 ~~~
 
 Local builds use build number zero; release builds use the GitHub workflow run number. Packages are immutable, so move an earlier local candidate out of the output location before building another with the same label. PowerShell scripts for development, validation and installation remain in the source repository; setup embeds the integration scripts it needs internally.
@@ -115,5 +115,6 @@ Every push to `main` runs the [Windows release workflow](.github/workflows/relea
 | [Runtime reference](docs/runtime-reference.md) | Setting values, timing, IPC and diagnostics |
 | [Aircraft integration](docs/aircraft-profiles.md) | The A380 controls, display identification and camera geometry |
 | [Releases](docs/releases.md) | Automated builds, package contents and publication |
+| [Repository structure](docs/repository-structure.md) | Source modules, tests, tools and build entry points |
 
 This project is maintained independently of the aircraft package. Dependency notices are in [Third-party notices](THIRD_PARTY_NOTICES.md).

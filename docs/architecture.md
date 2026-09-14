@@ -47,7 +47,7 @@ The bridge sets up observation of Direct3D calls and starts its SimConnect telem
 
 Closing the settings window hides it. Exiting the companion clears camera delivery. The bridge and its installed hooks stay loaded until MSFS exits because recorded GPU commands may still refer to their resources.
 
-Source: [launcher](../standalone/launcher.hpp), [bridge startup and control loop](../standalone/bridge_main.cpp).
+Source: [launcher](../src/app/launcher.hpp), [bridge startup and control loop](../src/bridge/bridge_main.cpp).
 
 ## 2. Read the TAXI buttons and select the displays
 
@@ -66,7 +66,7 @@ Initial assignment treats the higher ID of that pair as left. This is a heuristi
 
 Each resource gets an ID for its current lifetime. If one PFD is replaced, routing keeps the surviving side's identity. If both assigned textures disappear, manual reassignment can be required. Texture IDs are never saved between simulator sessions.
 
-Source: [aircraft profile](../profiles/catalog.hpp), [PFD detector](../src/pfd_target_detector.hpp), [side routing](../src/taxi_button_routes.hpp).
+Source: [aircraft profile](../src/profiles/catalog.hpp), [PFD detector](../src/graphics/pfd_target_detector.hpp), [side routing](../src/graphics/taxi_button_routes.hpp).
 
 ## 3. Position and render the two cameras
 
@@ -97,7 +97,7 @@ MSFS renders each view at its pane size. The image does not need to be rendered 
 
 The rate setting limits activation opportunities to **15–60 per camera per second**. Activations alternate between views, with a closed interval after each pulse. Actual image delivery also depends on simulator update cadence, GPU completion and the availability of both images.
 
-Source: [camera integration](../native-camera/probe.cpp), [pose conversion](../native-camera/body_pose_math.hpp), [mounts](../native-camera/aircraft_mounts.hpp), [schedule](../native-camera/render_schedule.hpp).
+Source: [camera integration](../src/camera/probe.cpp), [pose conversion](../src/camera/body_pose_math.hpp), [mounts](../src/camera/aircraft_mounts.hpp), [schedule](../src/camera/render_schedule.hpp).
 
 ## 4. Capture rendered images from the GPU
 
@@ -117,7 +117,7 @@ The copy goes into a texture owned by Taxi Cam. This gives the compositor an ima
 
 A **GPU fence** marks completion of submitted work. Taxi Cam waits for the relevant fence and recording-lifetime conditions before using a captured image. If the resource identity or state is unknown, that capture is refused.
 
-Source: [scene/resource matching](../src/scene_handoff.hpp), [capture manager](../src/scene_capture_manager.hpp), [resource-state tracking](../src/scene_source_state.hpp).
+Source: [scene/resource matching](../src/graphics/scene_handoff.hpp), [capture manager](../src/graphics/scene_capture_manager.hpp), [resource-state tracking](../src/graphics/scene_source_state.hpp).
 
 ## 5. Combine the views and display information
 
@@ -136,7 +136,7 @@ Exposure controls operate in the compositor. For the HDR `R11G11B10_FLOAT` camer
 
 The result is copied into a GPU buffer with a stable address. This buffer is the image source used by PFD drawing commands.
 
-Source: [compositor](../src/camera_compositor_d3d12.hpp), [output buffer](../src/scene_frame_output.hpp), [exposure](../src/display_exposure.hpp).
+Source: [compositor](../src/graphics/camera_compositor_d3d12.hpp), [output buffer](../src/graphics/scene_frame_output.hpp), [exposure](../src/graphics/display_exposure.hpp).
 
 ## 6. Draw the result into the PFD
 
@@ -159,7 +159,7 @@ A shared per-device fence timeline orders output writes and PFD reads, including
 
 Turning off one TAXI side stops further camera draws to that PFD. Normal aircraft drawing restores its display. The other side can continue using the same camera pair. When neither side nor the scene test requires a view, the bridge requests removal of its cameras.
 
-Source: [native graphics adapter](../standalone/d3d12_bridge.cpp), [PFD draw](../src/pfd_stamp_d3d12.hpp), [graphics-state restoration](../src/pfd_stamp_state.hpp), [runtime coordination](../src/scene_runtime.cpp).
+Source: [native graphics adapter](../src/bridge/d3d12_bridge.cpp), [PFD draw](../src/graphics/pfd_stamp_d3d12.hpp), [graphics-state restoration](../src/graphics/pfd_stamp_state.hpp), [runtime coordination](../src/graphics/scene_runtime.cpp).
 
 ## Behaviour during interruptions
 

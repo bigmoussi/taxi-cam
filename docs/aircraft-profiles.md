@@ -1,6 +1,6 @@
 # Aircraft integration
 
-Taxi Cam uses an aircraft profile to connect cockpit controls, camera geometry and display layout. The active profile is **FlyByWire A380X**, defined in [profiles/catalog.hpp](../profiles/catalog.hpp).
+Taxi Cam uses an aircraft profile to connect cockpit controls, camera geometry and display layout. The active profile is **FlyByWire A380X**, defined in [profiles/catalog.hpp](../src/profiles/catalog.hpp).
 
 ## A380 controls
 

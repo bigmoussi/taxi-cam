@@ -21,8 +21,8 @@ The validation step runs:
 ~~~powershell
 ./build.ps1 -Validate -WarpOnly
 ./smoke-test.ps1
-./standalone/install_test.ps1
-./standalone/package_test.ps1
+./tests/installer/install_test.ps1
+./tests/installer/package_test.ps1
 ~~~
 
 `-WarpOnly` uses Windows' software Direct3D 12 renderer to exercise GPU capture, composition and PFD drawing. The receipt records WARP as `passed`, hardware GPU validation as `not-run` and `simulatorVerified: false`. Local `build.ps1 -Validate` runs both hardware and WARP tests.

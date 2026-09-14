@@ -76,7 +76,7 @@ try {
     }
     if ($Mode -eq 'CheckClosed') { exit 0 }
     if ($Mode -eq 'Uninstall') {
-        & (Join-Path $PSScriptRoot 'uninstall-native.ps1') -Installation $Destination
+        & (Join-Path $PSScriptRoot 'uninstall.ps1') -Installation $Destination
         exit 0
     }
     if (Test-Path -LiteralPath $statePath) { throw 'A previous installation transaction has not finished.' }
@@ -104,7 +104,7 @@ try {
     $state | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $statePath -Encoding utf8
     $nativeSucceeded = $false
     try {
-        & (Join-Path $payloadFull 'install-native.ps1') -SimulatorDirectory $SimulatorDirectory -ExeXml $ExeXml -Destination $destFull -PayloadDirectory $payloadFull -NoShortcut
+        & (Join-Path $payloadFull 'install.ps1') -SimulatorDirectory $SimulatorDirectory -ExeXml $ExeXml -Destination $destFull -PayloadDirectory $payloadFull -NoShortcut
         $nativeSucceeded = $true
         $installedRecord = Get-Content -Raw -LiteralPath (Join-Path $destFull 'installation.json') | ConvertFrom-Json
         if ($installedRecord.legacyBackup -and $installedRecord.legacyBackup -notin $legacyBackups) {
@@ -134,7 +134,7 @@ try {
             } finally { if (Test-Path -LiteralPath $noticeTemp) { Remove-Item -LiteralPath $noticeTemp } }
         }
     } catch {
-        # install-native owns its own failure rollback. Never undo its concurrent XML edit guard.
+        # install.ps1 owns its own failure rollback. Never undo its concurrent XML edit guard.
         if ($nativeSucceeded) { Restore-Transaction } else { Remove-Item -LiteralPath $statePath }
         throw
     }

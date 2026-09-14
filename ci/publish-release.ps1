@@ -10,7 +10,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:GITHUB_REF -ne 'refs/heads/main') { throw 'Release publication runs only in the main-branch workflow.' }
 $root = Split-Path -Parent $PSScriptRoot
-. (Join-Path $root 'standalone/validation_receipt.ps1')
+. (Join-Path $root 'installer/validation_receipt.ps1')
 $receiptPath = Join-Path $root 'build/native/validation.json'
 $receipt = Assert-TaxiNativeReceipt (Split-Path -Parent $receiptPath)
 $packagePath = (Resolve-Path -LiteralPath $Package).Path

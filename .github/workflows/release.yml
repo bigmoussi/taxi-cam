@@ -34,7 +34,7 @@ jobs:
           key: windows-2025-llvm-${{ hashFiles('dependencies.json') }}
 
       - name: Bootstrap pinned compiler
-        run: ./bootstrap-native.ps1
+        run: ./bootstrap.ps1
 
       - name: Build and validate with software D3D12
         run: |
@@ -42,8 +42,8 @@ jobs:
           try {
             ./build.ps1 -Validate -WarpOnly
             ./smoke-test.ps1
-            ./standalone/install_test.ps1
-            ./standalone/package_test.ps1
+            ./tests/installer/install_test.ps1
+            ./tests/installer/package_test.ps1
           } finally {
             Stop-Transcript
           }
@@ -54,7 +54,7 @@ jobs:
           SOURCE_COMMIT: ${{ github.sha }}
           BUILD_NUMBER: ${{ github.run_number }}
         run: |
-          $zip = ./package-native.ps1 -BuildLabel "build.$env:BUILD_NUMBER" -SourceCommit $env:SOURCE_COMMIT
+          $zip = ./installer/package.ps1 -BuildLabel "build.$env:BUILD_NUMBER" -SourceCommit $env:SOURCE_COMMIT
           if (-not (Test-Path -LiteralPath $zip -PathType Leaf)) { throw 'Release ZIP missing.' }
           "zip=$zip" >> $env:GITHUB_OUTPUT
 
@@ -63,11 +63,11 @@ jobs:
         env:
           RELEASE_ZIP: ${{ steps.package.outputs.zip }}
         run: |
-          ./bootstrap-installer.ps1
-          $setup = ./build-installer.ps1 -Package $env:RELEASE_ZIP
+          ./installer/bootstrap.ps1
+          $setup = ./installer/build.ps1 -Package $env:RELEASE_ZIP
           if (-not (Test-Path -LiteralPath $setup -PathType Leaf)) { throw 'Release installer missing.' }
           "setup=$setup" >> $env:GITHUB_OUTPUT
-          ./installer/test-installer.ps1 -Installer $setup
+          ./tests/installer/test-installer.ps1 -Installer $setup
 
       - name: Keep package and validation diagnostics
         if: always()

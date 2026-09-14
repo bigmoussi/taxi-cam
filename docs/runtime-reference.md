@@ -42,7 +42,7 @@ Side masks are **0 off, 1 left, 2 right, 3 both**. Using manual preview disables
 
 Calibration identifies the destination texture using an animated pattern. Its write allowance renews every 50 ms in the native adapter. Reaching the limit skips additional pattern writes for that window without disabling calibration.
 
-Source: [settings schema](../standalone/protocol.hpp), [persistence](../standalone/settings_store.hpp), [write budget](../src/write_budget.hpp).
+Source: [settings schema](../src/shared/protocol.hpp), [persistence](../src/app/settings_store.hpp), [write budget](../src/graphics/write_budget.hpp).
 
 ## Camera mounts
 
@@ -57,7 +57,7 @@ Positions are relative to the aircraft datum. Positive pitch looks up; positive 
 
 Position components are bounded to ±500 m, pitch to ±89°, yaw to ±180° and lens to 0.05–1.55 radians. Both mounts are saved in the profile.
 
-Source: [aircraft defaults](../profiles/catalog.hpp), [mount transforms](../native-camera/aircraft_mounts.hpp).
+Source: [aircraft defaults](../src/profiles/catalog.hpp), [mount transforms](../src/camera/aircraft_mounts.hpp).
 
 ## Display geometry
 
@@ -80,7 +80,7 @@ Nose reference dots are at 14% and 86% of image width, 48% of nose-pane height, 
 
 Ground speed is rounded to whole knots in the range 0–999. Invalid or stale data displays `--`.
 
-Source: [compositor and guides](../src/camera_compositor_d3d12.hpp), [output buffer](../src/scene_frame_output.hpp).
+Source: [compositor and guides](../src/graphics/camera_compositor_d3d12.hpp), [output buffer](../src/graphics/scene_frame_output.hpp).
 
 ## Exposure
 
@@ -95,7 +95,7 @@ Automatic adjustment moves toward the target at one EV per second. Stale lightin
 
 The shader applies exposure and tone mapping to `R11G11B10_FLOAT` camera inputs. Other supported formats use their sampled-colour path.
 
-Source: [exposure controller](../src/display_exposure.hpp), [colour shader](../src/camera_compositor_d3d12.hpp).
+Source: [exposure controller](../src/graphics/display_exposure.hpp), [colour shader](../src/graphics/camera_compositor_d3d12.hpp).
 
 ## IPC and timing
 
@@ -130,7 +130,7 @@ Capture recovery requires at least two seconds without composition progress, con
 
 The above-60-knots cutoff remains inhibited while an OFF acknowledgement is pending. An accepted push event is not repeated while waiting for that acknowledgement.
 
-Source: [IPC](../standalone/protocol.hpp), [control loop](../standalone/bridge_main.cpp), [recovery policy](../native-camera/scene_recovery.hpp), [speed cutoff](../native-camera/taxi_speed_cutoff.hpp).
+Source: [IPC](../src/shared/protocol.hpp), [control loop](../src/bridge/bridge_main.cpp), [recovery policy](../src/camera/scene_recovery.hpp), [speed cutoff](../src/camera/taxi_speed_cutoff.hpp).
 
 ## Diagnostics
 
