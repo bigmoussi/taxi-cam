@@ -1,14 +1,8 @@
 #pragma once
 
-#define TAXI_CAM_VERSION "0.8.0"
-#define TAXI_CAM_VERSION_MAJOR 0
-#define TAXI_CAM_VERSION_MINOR 8
-#define TAXI_CAM_VERSION_PATCH 0
+// Generated from version.json and Git history by build.ps1.
+#include "taxi-cam-version.hpp"
 
-#ifndef TAXI_CAM_BUILD_NUMBER
-#define TAXI_CAM_BUILD_NUMBER 0
-#endif
-
-#define TAXI_CAM_STRINGIFY_IMPL(value) #value
-#define TAXI_CAM_STRINGIFY(value) TAXI_CAM_STRINGIFY_IMPL(value)
-#define TAXI_CAM_RELEASE_VERSION TAXI_CAM_VERSION "-build." TAXI_CAM_STRINGIFY(TAXI_CAM_BUILD_NUMBER)
+#define TAXI_CAM_WIDEN_IMPL(value) L##value
+#define TAXI_CAM_WIDEN(value) TAXI_CAM_WIDEN_IMPL(value)
+#define TAXI_CAM_VERSION_WIDE TAXI_CAM_WIDEN(TAXI_CAM_VERSION)

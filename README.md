@@ -103,6 +103,8 @@ $zip = .\package-native.ps1 -BuildLabel build.0 -SourceCommit (git rev-parse HEA
 
 Local builds use build number zero; release builds use the GitHub workflow run number. Packages are immutable, so move an earlier local candidate out of the output location before building another with the same label. PowerShell scripts for development, validation and installation remain in the source repository; setup embeds the integration scripts it needs internally.
 
+The application version advances automatically: each new commit on `main` increments the patch version, for example `0.8.1` to `0.8.2`. Rerunning the same commit keeps its version. The app, Windows installer and release title share that semantic version; workflow build numbers identify the release artifacts.
+
 Every push to `main` runs the [Windows release workflow](.github/workflows/release.yml). A successful run publishes an installer, runtime ZIP, checksums and release notes. Hosted checks use software D3D12 (WARP); live simulator verification is a separate check.
 
 ## Documentation

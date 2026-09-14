@@ -362,7 +362,7 @@ void draw_page(HDC dc) {
   text(dc, L"TAXI CAM", 68, 33, 134, 22, heading);
   text(dc, L"Native camera service", 24, 84, 176, 22, small, Muted);
   text(dc, L"WINDOWS COMPANION", 24, 120, 182, 22, small, Muted);
-  text(dc, L"v0.8.0", 24, 692, 155, 22, small, Muted);
+  text(dc, L"v" TAXI_CAM_VERSION_WIDE, 24, 692, 155, 22, small, Muted);
   const wchar_t* titles[]{L"Taxi camera", L"Camera views", L"Display", L"PFD routing", L"Diagnostics"};
   const wchar_t* subtitles[]{L"Your taxi cameras, controlled from the flight deck.",
                              L"Fine-tune each camera independently. Changes stay with this aircraft.",

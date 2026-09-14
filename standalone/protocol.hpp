@@ -6,10 +6,11 @@
 #include <cstdio>
 #include <cwchar>
 #include "../profiles/catalog.hpp"
+#include "version.hpp"
 
 namespace taxi_camera::standalone {
 constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 1;
-constexpr const wchar_t* Version = L"0.8.0";
+constexpr const wchar_t* Version = TAXI_CAM_VERSION_WIDE;
 struct Settings {
   std::uint32_t enabled = 1, camera_rate = 15, automatic_exposure = 1;
   float exposure = -8.8f, night_boost = 4.f;

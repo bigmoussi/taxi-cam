@@ -16,6 +16,7 @@ function Release {
 }
 $current = ConvertTo-UpdateVersion 'v0.8.0-build.9'
 Assert (Test-NewerUpdate (ConvertTo-UpdateVersion 'v0.8.0-build.10') $current) 'Numeric build ordering'
+Assert (Test-NewerUpdate (ConvertTo-UpdateVersion 'v0.8.1-build.1') $current) 'Patch version before build'
 Assert (Test-NewerUpdate (ConvertTo-UpdateVersion 'v0.9.0-build.1') $current) 'Version before build'
 Assert (-not (Test-NewerUpdate $current $current)) 'No reinstall'
 foreach ($tag in @('v0.8.0-build.01','v0.8.0-build.-1','v0.8.0-build.4294967296','v0.8.0-build.10;calc','v0.8.0-build.10-preview')) {

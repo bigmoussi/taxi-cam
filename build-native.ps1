@@ -4,26 +4,40 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 if ($WarpOnly -and -not $Validate) { throw '-WarpOnly requires -Validate.' }
 $taskRoot = $PSScriptRoot
-$versionHeader = Get-Content -Raw -LiteralPath (Join-Path $taskRoot 'standalone/version.hpp')
-if ($versionHeader -notmatch '(?m)^#define TAXI_CAM_VERSION "(\d+\.\d+\.\d+)"') { throw 'Application version missing.' }
-$version = $Matches[1]
+. (Join-Path $taskRoot 'ci/version.ps1')
 $buildNumber = 0
 if ($env:GITHUB_RUN_NUMBER) {
     if ($env:GITHUB_RUN_NUMBER -notmatch '^[1-9][0-9]{0,9}$' -or
         -not [int]::TryParse($env:GITHUB_RUN_NUMBER, [ref]$buildNumber)) { throw 'Invalid GitHub build number.' }
 }
+$releaseVersion = Get-TaxiVersion -Repository $taskRoot -BuildNumber $buildNumber
+$version = $releaseVersion.Version
+Write-Output "Building Taxi Cam $version (build $buildNumber; $($releaseVersion.CommitsSinceBase) commits since version baseline)."
 $deps = Get-Content -Raw -LiteralPath (Join-Path $taskRoot 'dependencies.json') | ConvertFrom-Json
 $compiler = Join-Path $taskRoot ('build/deps/' + $deps.'llvm-mingw'.directory + '/bin/clang++.exe')
 if ($Bootstrap -and -not (Test-Path -LiteralPath $compiler)) { & (Join-Path $taskRoot 'bootstrap-native.ps1') }
 if (-not (Test-Path -LiteralPath $compiler)) { throw 'Pinned LLVM-MinGW compiler missing. Run build-native.ps1 -Bootstrap.' }
 $out = Join-Path $taskRoot 'build/native'
 New-Item -ItemType Directory -Force -Path $out | Out-Null
+$generated = Join-Path $out 'generated'
+New-Item -ItemType Directory -Force -Path $generated | Out-Null
+@(
+    '#pragma once',
+    "#define TAXI_CAM_VERSION `"$version`"",
+    "#define TAXI_CAM_VERSION_MAJOR $($releaseVersion.Major)",
+    "#define TAXI_CAM_VERSION_MINOR $($releaseVersion.Minor)",
+    "#define TAXI_CAM_VERSION_PATCH $($releaseVersion.Patch)",
+    "#define TAXI_CAM_BUILD_NUMBER $buildNumber"
+) | Set-Content -LiteralPath (Join-Path $generated 'taxi-cam-version.hpp') -Encoding ascii
+$manifest = Get-Content -Raw -LiteralPath (Join-Path $taskRoot 'standalone/app.manifest')
+$manifest.Replace('@TAXI_CAM_VERSION@', $version) | Set-Content -LiteralPath (Join-Path $generated 'taxi-cam.manifest') -Encoding utf8
+$releaseVersion | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $out 'version.json') -Encoding utf8
 $receipt = Join-Path $out 'validation.json'
 if (Test-Path -LiteralPath $receipt) { Remove-Item -LiteralPath $receipt }
 $common = @('-std=c++20','-O2','-Wall','-Wextra','-Werror','-fms-extensions','-static',
     '-DNOMINMAX','-DWIN32_LEAN_AND_MEAN','-D_WIN32_WINNT=0x0A00',
     '-mno-avx','-mno-avx2','-mno-avx512f')
-$common += "-DTAXI_CAM_BUILD_NUMBER=$buildNumber"
+$common += @('-I', $generated)
 $graphics = @(
  'standalone/d3d12_bridge.cpp',
  'src/scene_handoff.cpp','src/scene_capture_d3d12.cpp','src/scene_capture_manager.cpp','src/scene_source_state.cpp',
@@ -52,10 +66,15 @@ if (Test-Path -LiteralPath (Join-Path $taskRoot 'standalone/bridge_main.cpp')) {
 if (Test-Path -LiteralPath (Join-Path $taskRoot 'standalone/companion.cpp')) {
     $windres = Join-Path (Split-Path -Parent $compiler) 'llvm-windres.exe'
     $resource = Join-Path $out 'app.res.o'
-    & $windres "-DTAXI_CAM_BUILD_NUMBER=$buildNumber" '-I' (Join-Path $taskRoot 'standalone') '-i' (Join-Path $taskRoot 'standalone/app.rc') '-O' 'coff' '-o' $resource
+    & $windres '-I' $generated '-I' (Join-Path $taskRoot 'standalone') '-i' (Join-Path $taskRoot 'standalone/app.rc') '-O' 'coff' '-o' $resource
     if ($LASTEXITCODE -ne 0) { throw 'Windows application manifest compilation failed.' }
     & $compiler @common '-municode' '-mwindows' (Join-Path $taskRoot 'standalone/companion.cpp') (Join-Path $taskRoot 'standalone/updater.cpp') $resource '-lbcrypt' '-lshell32' '-lcomctl32' '-ladvapi32' '-ldwmapi' '-luxtheme' '-Wl,--no-insert-timestamp' '-o' (Join-Path $out 'taxi-cam.exe')
     if ($LASTEXITCODE -ne 0) { throw 'Windows companion build failed.' }
+    $binaryVersion = (Get-Item -LiteralPath (Join-Path $out 'taxi-cam.exe')).VersionInfo
+    if ($binaryVersion.FileVersion -ne $version -or $binaryVersion.ProductVersion -ne $version -or
+        "$($binaryVersion.FileMajorPart).$($binaryVersion.FileMinorPart).$($binaryVersion.FileBuildPart)" -ne $version) {
+        throw 'Windows executable version differs from the release version.'
+    }
 }
 if ($Validate) {
     $gpu = Join-Path $out 'native-graphics-validation.exe'

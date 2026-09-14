@@ -42,7 +42,13 @@ Provenance and manifests remain beside the ZIP in the ignored build directory as
 
 ## Tags and release notes
 
-Tags use `v<application-version>-build.<workflow-run-number>`, such as `v0.8.0-build.2`. `standalone/version.hpp` defines the application version; the workflow run number is compiled into the EXE and recorded in the validation receipt. Local builds use build number zero. Packaging refuses a `build.N` label that differs from the compiled build number.
+`version.json` defines the semantic version baseline, starting at `0.8.1`. The commit introducing that value uses the baseline exactly. Each subsequent first-parent commit on `main` adds one to its patch component: `0.8.1`, `0.8.2`, `0.8.3`, and so on. A merge counts once; a push containing several direct commits advances by their count. Documentation commits also advance the patch version. Formatting the configuration without changing its version value does not reset the baseline.
+
+For a minor or major release, deliberately change the baseline in `version.json` to the required version, such as `0.9.0` or `1.0.0`. That commit establishes a new baseline. Local builds and GitHub Actions calculate the same semantic version from the same complete Git history. A local, uncommitted baseline change uses its configured version. Shallow checkouts are refused because they cannot establish the version reliably.
+
+The generated header and Windows manifest live under `build/native/generated/`; the resolved version and baseline commit are recorded in `build/native/version.json`. The app UI, executable version resources, installer and release title all use this resolved semantic version.
+
+Tags retain `v<application-version>-build.<workflow-run-number>`, such as `v0.8.1-build.13`, so existing updaters continue to recognize releases. The build suffix identifies an artifact; it does not replace the advancing semantic version. The workflow run number is recorded in the validation receipt, while local builds use build number zero. Packaging refuses a `build.N` label that differs from the compiled build number.
 
 Installer assets use `taxi-cam-<version>-build.<number>-windows-x64-setup.exe`. The updater compares version components and build numbers numerically, ignores drafts and prereleases, and requires the matching installer asset from the fixed project release repository. Downloads are bounded and verified before execution. Automatic checks run off the UI thread, with a manual tray action available; installing requires user confirmation and a closed simulator.
 

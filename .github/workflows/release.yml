@@ -24,6 +24,9 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Test semantic version progression
+        run: ./ci/version_test.ps1
+
       - name: Cache verified compiler archive
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -81,6 +84,7 @@ jobs:
             build/packages/*-setup.exe.json
             build/ci-validation.log
             build/native/validation.json
+            build/native/version.json
             build/native/*.imports.txt
             build/native/native-dependencies.txt
             build/installer/**/compiler.log

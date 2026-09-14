@@ -21,7 +21,7 @@ if ([IO.Path]::GetFileName($installerPath) -cne "$expectedBase-setup.exe" -or
     throw 'Release asset names and validated application must match the release build.'
 }
 $tag = "v$($receipt.version)-build.$BuildNumber"
-$title = "Taxi Cam $($receipt.version) - Build $BuildNumber"
+$title = "Taxi Cam $($receipt.version)"
 function Invoke-Gh([string[]]$Arguments) {
     $result = @(& gh @Arguments)
     if ($LASTEXITCODE -ne 0) { throw "GitHub operation failed: $($Arguments[0])" }

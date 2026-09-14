@@ -23,7 +23,7 @@ AppId={{C8581992-5605-46CA-AF6F-60E44477C023}
 #endif
 AppName=Taxi Cam
 AppVersion={#AppVersion}
-AppVerName=Taxi Cam {#AppVersion} (build {#BuildNumber})
+AppVerName=Taxi Cam {#AppVersion}
 VersionInfoVersion={#AppVersion}
 DefaultDirName={localappdata}\Taxi Cam\app
 DefaultGroupName=Taxi Cam

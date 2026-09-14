@@ -15,6 +15,7 @@ int main() {
   UpdateVersion current{}, latest{};
   check(parse_update_version(L"v0.8.0-build.7", current), "current version");
   check(parse_update_version(L"v0.8.0-build.10", latest) && newer_update(latest, current), "numeric build ordering");
+  check(parse_update_version(L"v0.8.1-build.1", latest) && newer_update(latest, current), "patch version takes priority over build");
   check(parse_update_version(L"v0.9.0-build.1", latest) && newer_update(latest, current), "version takes priority over build");
   check(!newer_update(current, current), "no reinstall same release");
   check(!newer_update(current, latest), "no downgrade");
