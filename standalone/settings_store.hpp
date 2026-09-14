@@ -7,6 +7,15 @@
 
 namespace taxi_camera::standalone {
 inline std::wstring settings_override;
+inline std::wstring legacy_settings_path(const std::wstring& path) {
+  if (!settings_override.empty())
+    return {};
+  wchar_t local[32768]{};
+  const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", local, 32768);
+  if (!n || n > 32000)
+    return {};
+  return std::wstring(local) + L"\\380 Taxi Cam\\profiles\\" + path.substr(path.find_last_of(L"\\") + 1);
+}
 inline std::wstring settings_directory() {
   if (!settings_override.empty()) {
     CreateDirectoryW(settings_override.c_str(), nullptr);
@@ -16,7 +25,7 @@ inline std::wstring settings_directory() {
   const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", local, 32768);
   if (!n || n > 32000)
     return {};
-  std::wstring folder = std::wstring(local) + L"\\380 Taxi Cam";
+  std::wstring folder = std::wstring(local) + L"\\Taxi Cam";
   CreateDirectoryW(folder.c_str(), nullptr);
   return folder;
 }
@@ -32,7 +41,16 @@ inline std::wstring settings_path(const Settings& s) {
 }
 inline bool load_settings(Settings& s, const std::wstring& installation) {
   Settings value;
-  const auto path = settings_path(value);
+  auto path = settings_path(value);
+  if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+    const auto legacy = legacy_settings_path(path);
+    if (!legacy.empty() && GetFileAttributesW(legacy.c_str()) != INVALID_FILE_ATTRIBUTES) {
+      // Import without replacing a newer profile or deleting the original.
+      // If migration fails, read the original so calibration is not reset.
+      if (!CopyFileW(legacy.c_str(), path.c_str(), TRUE) && GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES)
+        path = legacy;
+    }
+  }
   if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
     // Import the user's existing camera calibration once. The companion becomes
     // the settings owner; stale installer defaults never override later UI edits.

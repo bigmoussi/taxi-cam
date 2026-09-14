@@ -60,6 +60,7 @@ class Mailbox {
   bool open(DWORD pid, bool create) {
     close();
     wchar_t name[128];
+    // Keep IPC names stable across branding changes; ProtocolVersion guards layout compatibility.
     std::swprintf(name, 128, L"Local\\380TaxiCamera.Control.%lu", pid);
     mutex_ = create ? CreateMutexW(nullptr, FALSE, name) : OpenMutexW(SYNCHRONIZE | MUTEX_MODIFY_STATE, FALSE, name);
     if (!mutex_)

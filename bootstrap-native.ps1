@@ -14,4 +14,4 @@ if (-not (Test-Path -LiteralPath $archive)) {
 if ((Get-FileHash -LiteralPath $archive).Hash -ne $dependency.sha256) { throw 'Cached compiler hash mismatch.' }
 $destination = Join-Path $root $dependency.directory
 if (-not (Test-Path -LiteralPath $destination)) { Expand-Archive -LiteralPath $archive -DestinationPath (Split-Path -Parent $destination) }
-Write-Output 'Pinned compiler ready. The native build does not download ReShade or ImGui.'
+Write-Output 'Pinned compiler ready. Only the native compiler is required.'

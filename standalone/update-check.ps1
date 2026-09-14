@@ -3,7 +3,7 @@ param([string]$OutputDirectory, [string]$CurrentVersion, [uint32]$CurrentBuild =
 # Embedded in the companion; never executes release-provided code or command text.
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-$script:Repository = 'rthomson83/380-taxi-cam'
+$script:Repository = 'rthomson83/taxi-cam'
 $script:DownloadLimit = 256MB
 
 function ConvertTo-UpdateVersion([string]$Tag) {
@@ -38,7 +38,7 @@ function Select-UpdateAsset($Release, [uint32[]]$Current) {
     $tag = [string]$Release.tag_name
     $version = ConvertTo-UpdateVersion $tag
     if (-not (Test-NewerUpdate $version $Current)) { return $null }
-    $name = '380-taxi-cam-' + $tag.Substring(1) + '-windows-x64-setup.exe'
+    $name = 'taxi-cam-' + $tag.Substring(1) + '-windows-x64-setup.exe'
     $assets = @($Release.assets | Where-Object { $_.name -ceq $name })
     if ($assets.Count -ne 1) { throw 'Expected one exact Windows installer asset.' }
     $asset = $assets[0]
@@ -84,7 +84,7 @@ function Receive-BoundedDownload([string]$Url, [long]$Limit, [string]$Path = '')
     $handler.AllowAutoRedirect = $false
     $client = [System.Net.Http.HttpClient]::new($handler)
     $client.Timeout = [TimeSpan]::FromSeconds(30)
-    $client.DefaultRequestHeaders.UserAgent.ParseAdd('380-Taxi-Cam-Updater/1.0')
+    $client.DefaultRequestHeaders.UserAgent.ParseAdd('Taxi-Cam-Updater/1.0')
     $client.DefaultRequestHeaders.Accept.ParseAdd('application/vnd.github+json')
     $cancel = [Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds(120))
     $response = $null

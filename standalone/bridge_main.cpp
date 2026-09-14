@@ -22,7 +22,7 @@ void log_status(const win::Status& s, const char* detail = "") {
   if (!n || n >= 32700)
     return;
   std::wstring path(directory);
-  path += L"\\380 Taxi Cam";
+  path += L"\\Taxi Cam";
   CreateDirectoryW(path.c_str(), nullptr);
   path += L"\\bridge.log";
   HANDLE file =

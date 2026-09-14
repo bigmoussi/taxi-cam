@@ -21,7 +21,7 @@ New-Item -ItemType Directory -Force -Path $out | Out-Null
 $receipt = Join-Path $out 'validation.json'
 if (Test-Path -LiteralPath $receipt) { Remove-Item -LiteralPath $receipt }
 $common = @('-std=c++20','-O2','-Wall','-Wextra','-Werror','-fms-extensions','-static',
-    '-DNOMINMAX','-DWIN32_LEAN_AND_MEAN','-DTAXI_NATIVE_RUNTIME','-D_WIN32_WINNT=0x0A00',
+    '-DNOMINMAX','-DWIN32_LEAN_AND_MEAN','-D_WIN32_WINNT=0x0A00',
     '-mno-avx','-mno-avx2','-mno-avx512f')
 $common += "-DTAXI_CAM_BUILD_NUMBER=$buildNumber"
 $graphics = @(
@@ -54,7 +54,7 @@ if (Test-Path -LiteralPath (Join-Path $taskRoot 'standalone/companion.cpp')) {
     $resource = Join-Path $out 'app.res.o'
     & $windres "-DTAXI_CAM_BUILD_NUMBER=$buildNumber" '-I' (Join-Path $taskRoot 'standalone') '-i' (Join-Path $taskRoot 'standalone/app.rc') '-O' 'coff' '-o' $resource
     if ($LASTEXITCODE -ne 0) { throw 'Windows application manifest compilation failed.' }
-    & $compiler @common '-municode' '-mwindows' (Join-Path $taskRoot 'standalone/companion.cpp') (Join-Path $taskRoot 'standalone/updater.cpp') $resource '-lbcrypt' '-lshell32' '-lcomctl32' '-ladvapi32' '-ldwmapi' '-luxtheme' '-Wl,--no-insert-timestamp' '-o' (Join-Path $out '380-taxi-cam.exe')
+    & $compiler @common '-municode' '-mwindows' (Join-Path $taskRoot 'standalone/companion.cpp') (Join-Path $taskRoot 'standalone/updater.cpp') $resource '-lbcrypt' '-lshell32' '-lcomctl32' '-ladvapi32' '-ldwmapi' '-luxtheme' '-Wl,--no-insert-timestamp' '-o' (Join-Path $out 'taxi-cam.exe')
     if ($LASTEXITCODE -ne 0) { throw 'Windows companion build failed.' }
 }
 if ($Validate) {
@@ -100,16 +100,23 @@ if ($Validate) {
     & $updaterTest
     if ($LASTEXITCODE -ne 0) { throw 'Updater tests failed.' }
     & (Join-Path $taskRoot 'standalone/updater_test.ps1')
+    $observerTest = Join-Path $out 'pfd-state-observer-test.exe'
+    & $compiler @common '-DTAXI_PFD_STATE_OBSERVER_VALIDATION' (Join-Path $taskRoot 'validation/pfd_state_observer_test.cpp') (Join-Path $taskRoot 'engine-hook/pfd_state_observer.cpp') '-o' $observerTest
+    if ($LASTEXITCODE -ne 0) { throw 'PFD state observer test compilation failed.' }
+    & $observerTest
+    if ($LASTEXITCODE -ne 0) { throw 'PFD state observer lifecycle tests failed.' }
+    & $observerTest --optional
+    if ($LASTEXITCODE -ne 0) { throw 'PFD state observer optional callback tests failed.' }
     & (Join-Path $taskRoot 'validation/render_boundary_test.ps1') -Compiler $compiler
     & (Join-Path $taskRoot 'engine-hook/build.ps1')
     & (Join-Path $taskRoot 'native-camera/build.ps1')
     $readobj = Join-Path (Split-Path -Parent $compiler) 'llvm-readobj.exe'
     $hashes = [ordered]@{}
-    foreach ($name in @('380-taxi-cam.exe','taxi-camera-bridge.dll')) {
+    foreach ($name in @('taxi-cam.exe','taxi-camera-bridge.dll')) {
         $path = Join-Path $out $name
         $imports = & $readobj '--coff-imports' $path
         if ($LASTEXITCODE -ne 0) { throw "Import audit failed: $name" }
-        if (($imports -join "`n") -match '(?i)(reshade|imgui|libc\+\+|libunwind|libwinpthread).*\.dll') {
+        if (($imports -join "`n") -match '(?i)(libc\+\+|libunwind|libwinpthread).*\.dll') {
             throw "Non-native runtime dependency found in $name."
         }
         $imports | Set-Content -LiteralPath (Join-Path $out ($name+'.imports.txt'))
@@ -120,7 +127,7 @@ if ($Validate) {
         if ($source.EndsWith('.S')) { continue }
         $dependencyList = & $compiler @common '-MM' (Join-Path $taskRoot $source)
         if ($LASTEXITCODE -ne 0) { throw "Native dependency audit failed: $source" }
-        if (($dependencyList -join ' ') -match '(?i)(reshade[^\s]*\.hpp|imgui[^\s]*\.h)') { throw "ReShade/ImGui header dependency remains: $source" }
+        if (($dependencyList -join ' ') -match '(?i)[\\/]build[\\/]deps[\\/]') { throw "Unexpected external header dependency: $source" }
         $closure += $dependencyList
     }
     $closure | Set-Content -LiteralPath (Join-Path $out 'native-dependencies.txt')
@@ -130,11 +137,11 @@ if ($Validate) {
         passed=$true; version=$version; buildNumber=$buildNumber; createdUtc=[DateTime]::UtcNow.ToString('o'); files=$hashes;
         tests=@($gpuTests + @('pre-existing graphics objects','graphics state replay','exact DLL smoke',
             'settings persistence and IPC','companion contention and watchdog','launcher file identity','native COM slots','TAXI routing','PFD detector','exposure','calibration','write budget',
-            'queue submit','render boundary','engine hook','camera telemetry and lifecycle','aircraft layout compatibility','exe.xml preservation',
+            'queue submit','PFD state observer lifecycle','render boundary','engine hook','camera telemetry and lifecycle','aircraft layout compatibility','exe.xml preservation and rename migration',
             'native imports and header dependency closure','release selection, download integrity and updater handoff guards'));
         gpuValidation=[ordered]@{hardware=$(if ($WarpOnly) { 'not-run' } else { 'passed' });warp='passed'};
         simulatorVerified=$false
     } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $out 'validation.json') -Encoding utf8
 
 }
-Write-Output "Native build complete: $out (no ReShade or ImGui build inputs)"
+Write-Output "Native build complete: $out "

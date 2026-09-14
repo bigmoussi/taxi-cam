@@ -1,6 +1,6 @@
 # How the camera reaches the PFD
 
-380 Taxi Cam creates two additional camera views inside MSFS and draws their images into the aircraft's Primary Flight Display (PFD) screen texture. MSFS supplies the scene rendering: aircraft geometry, airport surfaces and lighting. Taxi Cam controls where the cameras look and how their images are presented.
+Taxi Cam creates two additional camera views inside MSFS and draws their images into the aircraft's Primary Flight Display (PFD) screen texture. MSFS supplies the scene rendering: aircraft geometry, airport surfaces and lighting. Taxi Cam controls where the cameras look and how their images are presented.
 
 A texture is an image held in GPU memory. MSFS renders each camera into a texture, and the cockpit model displays its PFD using another texture. Taxi Cam connects them by combining the camera images and drawing the result into the PFD texture.
 
@@ -29,7 +29,7 @@ SimConnect carries data and control events. The camera images come from MSFS's r
 
 ## What runs where
 
-**The Windows application — `380-taxi-cam.exe`** runs outside MSFS. It provides the tray icon, settings window and saved aircraft settings. Its connection worker finds the simulator, loads the bridge and exchanges settings and status with it.
+**The Windows application — `taxi-cam.exe`** runs outside MSFS. It provides the tray icon, settings window and saved aircraft settings. Its connection worker finds the simulator, loads the bridge and exchanges settings and status with it.
 
 **The bridge — `taxi-camera-bridge.dll`** runs inside `FlightSimulator2024.exe`. It needs this position because both the internal camera objects and the simulator's Direct3D resources belong to that process. It manages the camera views, reads SimConnect data and records the GPU work that places images on the PFD.
 

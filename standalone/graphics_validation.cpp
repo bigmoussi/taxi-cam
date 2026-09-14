@@ -4,25 +4,12 @@
 #define wmain compositor_test_not_called
 #include "../validation/compositor_main.cpp"
 #undef wmain
-#include <tlhelp32.h>
 #include <d3d11on12.h>
 #include "d3d12_bridge.hpp"
 #include "native_hooks.hpp"
 namespace {
 namespace win = taxi_camera::standalone;
 namespace runtime = taxi_camera::scene_runtime;
-void ensure_no_reshade() {
-  HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, GetCurrentProcessId());
-  require(snapshot != INVALID_HANDLE_VALUE, "Enumerate validation modules");
-  MODULEENTRY32W module{};
-  module.dwSize = sizeof(module);
-  if (Module32FirstW(snapshot, &module))
-    do {
-      HMODULE handle = GetModuleHandleW(module.szModule);
-      require(!GetProcAddress(handle, "ReShadeRegisterAddon"), "ReShade present in native validation");
-    } while (Module32NextW(snapshot, &module));
-  CloseHandle(snapshot);
-}
 void copy_with_11on12(ID3D12Device* device, ID3D12CommandQueue* queue) {
   const auto module = LoadLibraryExW(L"d3d11.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
   require(module != nullptr, "Load system D3D11 for capture interop regression");
@@ -34,12 +21,35 @@ void copy_with_11on12(ID3D12Device* device, ID3D12CommandQueue* queue) {
   check(create(device, 0, nullptr, 0, queues, 1, 0, device11.put(), context.put(), nullptr), "Create capture interop device");
   Reference<ID3D11On12Device> interop;
   check(device11->QueryInterface(IID_PPV_ARGS(interop.put())), "Interop device");
+  // Capture wraps a real swap-chain buffer. A plain committed texture lacks
+  // DXGI's compatibility metadata and triggers ReflectSharedProperties errors
+  // when the D3D12 debug layer validates the D3D11On12 resource open.
+  struct HiddenWindow {
+    HWND handle = CreateWindowExW(0, L"STATIC", L"Taxi Cam capture validation", WS_OVERLAPPEDWINDOW, 0, 0, 1920, 1080,
+                                  nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+    ~HiddenWindow() {
+      if (handle)
+        DestroyWindow(handle);
+    }
+  } window;
+  require(window.handle != nullptr, "Create hidden capture window");
+  Reference<IDXGIFactory2> factory;
+  check(CreateDXGIFactory1(IID_PPV_ARGS(factory.put())), "Capture swap-chain factory");
+  DXGI_SWAP_CHAIN_DESC1 desc{};
+  desc.Width = 1920;
+  desc.Height = 1080;
+  desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+  desc.SampleDesc.Count = 1;
+  desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+  desc.BufferCount = 2;
+  desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+  Reference<IDXGISwapChain1> swap_chain;
+  check(factory->CreateSwapChainForHwnd(queue, window.handle, &desc, nullptr, nullptr, swap_chain.put()), "Capture swap chain");
   Reference<ID3D12Resource> source;
-  auto desc = texture_description(1920, 1080, DXGI_FORMAT_R8G8B8A8_UNORM);
-  create_texture(device, desc, source.put());
+  check(swap_chain->GetBuffer(0, IID_PPV_ARGS(source.put())), "Capture backbuffer");
   Reference<ID3D11Resource> wrapped;
   D3D11_RESOURCE_FLAGS flags{};
-  check(interop->CreateWrappedResource(source.get(), &flags, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET,
+  check(interop->CreateWrappedResource(source.get(), &flags, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_PRESENT,
                                        IID_PPV_ARGS(wrapped.put())),
         "Wrap unrelated backbuffer");
   D3D11_TEXTURE2D_DESC output{};
@@ -87,7 +97,6 @@ void native_case(bool warp) {
   check(list->Close(), "Close pre-existing list");
   require(win::initialize_graphics(device.get()), win::graphics_status().error);
   check(list->Reset(allocator.get(), nullptr), "Observe first actual Reset of pre-existing list");
-  ensure_no_reshade();
   const auto key = win::graphics_status().device;
   require(runtime::prepare(key), "Native compositor prepare");
   runtime::manager().begin_source_tracking();
@@ -284,14 +293,14 @@ void native_case(bool warp) {
       auto* msg = reinterpret_cast<D3D12_MESSAGE*>(memory.data());
       if (SUCCEEDED(messages->GetMessage(i, msg, &size)) && msg->Severity <= D3D12_MESSAGE_SEVERITY_ERROR) {
         ++errors;
-        std::fprintf(stderr, "D3D12: %s\n", msg->pDescription);
+        std::fprintf(stderr, "D3D12 error %u: %s\n", static_cast<unsigned>(msg->ID), msg->pDescription);
       }
     }
   }
   require(errors == 0, "D3D12 validation errors");
   std::printf(
       "PASS native %s: two GPU feeds, two PFDs, pre-existing root/list/queue, partial state restoration, lower trim, descriptor copies, "
-      "OFF, D3D11On12 capture coexistence, predicate guards; %llu pixels; debug=%d errors=%llu; ReShade absent\n",
+      "OFF, D3D11On12 capture coexistence, predicate guards; %llu pixels; debug=%d errors=%llu\n",
       warp ? "WARP" : "hardware", static_cast<unsigned long long>(pixels), debug_enabled, static_cast<unsigned long long>(errors));
 }
 }  // namespace

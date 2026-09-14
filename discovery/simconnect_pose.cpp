@@ -24,7 +24,7 @@ int main() {
   const auto dispatch = reinterpret_cast<Dispatch>(GetProcAddress(dll, "SimConnect_GetNextDispatch"));
   if (!open || !close || !define || !request || !dispatch) { FreeLibrary(dll); return 2; }
   HANDLE session = nullptr;
-  HRESULT hr = open(&session, "380 Taxi Cam read-only aircraft pose comparison", nullptr, 0, nullptr, 0);
+  HRESULT hr = open(&session, "Taxi Cam read-only aircraft pose comparison", nullptr, 0, nullptr, 0);
   const char* names[]{"PLANE LATITUDE", "PLANE LONGITUDE", "PLANE ALTITUDE", "PLANE PITCH DEGREES", "PLANE BANK DEGREES", "PLANE HEADING DEGREES TRUE"};
   for (unsigned i = 0; SUCCEEDED(hr) && i < 6; ++i)
     hr = define(session, 1, names[i], i == 2 ? "meters" : "degrees", 4, 0, 0xffffffffu);

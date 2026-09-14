@@ -14,7 +14,7 @@ try {
         if ($entries.ContainsKey($relative)) { throw 'Duplicate ZIP entry.' }
         $entries[$relative] = $entry
     }
-    $requiredFiles = @('380-taxi-cam.exe','taxi-camera-bridge.dll','taxi-camera-mounts.cfg','THIRD_PARTY_NOTICES.txt')
+    $requiredFiles = @('taxi-cam.exe','taxi-camera-bridge.dll','taxi-camera-mounts.cfg','THIRD_PARTY_NOTICES.txt')
     foreach ($required in $requiredFiles) {
         if (-not $entries.ContainsKey($required)) { throw "Package entry missing: $required" }
     }

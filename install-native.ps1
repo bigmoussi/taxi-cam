@@ -2,7 +2,7 @@
 param(
     [Parameter(Mandatory=$true)][string]$SimulatorDirectory,
     [string]$ExeXml,
-    [string]$Destination = (Join-Path $env:LOCALAPPDATA '380 Taxi Cam\app'),
+    [string]$Destination = (Join-Path $env:LOCALAPPDATA 'Taxi Cam\app'),
     [string]$PayloadDirectory,
     [switch]$NoShortcut
 )
@@ -30,11 +30,12 @@ if (-not $ExeXml) {
 $ExeXml = [IO.Path]::GetFullPath($ExeXml)
 $dest = [IO.Path]::GetFullPath($Destination)
 if ($dest -eq [IO.Path]::GetPathRoot($dest) -or $dest -eq $sim) { throw 'Use a dedicated companion installation directory.' }
-$exe = Join-Path $dest '380-taxi-cam.exe'
+$exe = Join-Path $dest 'taxi-cam.exe'
+$oldExe = Join-Path $dest '380-taxi-cam.exe'
 function Assert-Closed {
     if (Get-Process -Name FlightSimulator2024 -ErrorAction SilentlyContinue) { throw 'Close MSFS before replacing its native camera bridge.' }
-    foreach ($p in @(Get-Process -Name 380-taxi-cam -ErrorAction SilentlyContinue)) {
-        if ($p.Path -and [string]::Equals($p.Path,$exe,[StringComparison]::OrdinalIgnoreCase)) { throw 'Exit 380 Taxi Cam from its tray menu before updating it.' }
+    foreach ($p in @(Get-Process -Name taxi-cam,380-taxi-cam -ErrorAction SilentlyContinue)) {
+        if ($p.Path -and $p.Path -in @($exe,$oldExe)) { throw 'Exit the taxi camera app from its tray menu before updating it.' }
     }
 }
 Assert-Closed
@@ -49,9 +50,9 @@ if (($globalDisabled -and $globalDisabled.InnerText -ieq 'True') -or
 Set-TaxiStartupEntry $document $exe $simExe
 $tag = [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss-fff')
 New-Item -ItemType Directory -Force -Path $dest | Out-Null
-$staging = Join-Path ([IO.Path]::GetTempPath()) ('380-taxi-cam-install-' + [Guid]::NewGuid().ToString('N'))
+$staging = Join-Path ([IO.Path]::GetTempPath()) ('taxi-cam-install-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $staging | Out-Null
-foreach ($name in @('380-taxi-cam.exe','taxi-camera-bridge.dll')) {
+foreach ($name in @('taxi-cam.exe','taxi-camera-bridge.dll')) {
     Copy-Item -LiteralPath (Join-Path $payload $name) -Destination (Join-Path $staging $name)
     if ((Get-FileHash -LiteralPath (Join-Path $staging $name)).Hash -ne $receipt.files.PSObject.Properties[$name].Value) { throw "Staging verification failed: $name" }
 }
@@ -77,10 +78,17 @@ $mount = Join-Path $dest 'taxi-camera-mounts.cfg'
 $hadMount = Test-Path -LiteralPath $mount
 $recordBackup = Join-Path $staging 'installation.json'
 if (Test-Path -LiteralPath $previousRecordPath) { Copy-Item -LiteralPath $previousRecordPath -Destination $recordBackup }
-$startMenu = if ($NoShortcut) { $null } else { Join-Path $env:APPDATA 'Microsoft/Windows/Start Menu/Programs/380 Taxi Cam.lnk' }
+$startMenu = if ($NoShortcut) { $null } else { Join-Path $env:APPDATA 'Microsoft/Windows/Start Menu/Programs/Taxi Cam.lnk' }
 try {
     Assert-Closed
-    foreach ($name in @('380-taxi-cam.exe','taxi-camera-bridge.dll')) {
+    if (Test-Path -LiteralPath $oldExe -PathType Leaf) {
+        $oldBackup = Join-Path $staging '380-taxi-cam.exe.backup'
+        Copy-Item -LiteralPath $oldExe -Destination $oldBackup
+        $prior['380-taxi-cam.exe'] = $oldBackup
+        $installed += '380-taxi-cam.exe'
+        Remove-Item -LiteralPath $oldExe
+    }
+    foreach ($name in @('taxi-cam.exe','taxi-camera-bridge.dll')) {
         $target = Join-Path $dest $name
         if (Test-Path -LiteralPath $target) {
             $backup = Join-Path $staging ($name + '.backup')
@@ -144,10 +152,14 @@ try {
     if ($NoShortcut) { $startMenu = $null } else {
     $shell = New-Object -ComObject WScript.Shell
     $shortcut = $shell.CreateShortcut($startMenu); $shortcut.TargetPath=$exe
-    $shortcut.WorkingDirectory=$dest; $shortcut.Description='380 Taxi Cam settings'; $shortcut.Save()
+    $shortcut.WorkingDirectory=$dest; $shortcut.Description='Taxi Cam settings'; $shortcut.Save()
+    $oldShortcut = Join-Path $env:APPDATA 'Microsoft/Windows/Start Menu/Programs/380 Taxi Cam.lnk'
+    if ((Test-Path -LiteralPath $oldShortcut) -and $shell.CreateShortcut($oldShortcut).TargetPath -eq $oldExe) {
+        Remove-Item -LiteralPath $oldShortcut
+    }
     }
 } catch { Write-Warning 'Installed successfully, but the Start menu shortcut could not be created.' }
-Write-Output "Installed 380 Taxi Cam: $exe"
+Write-Output "Installed Taxi Cam: $exe"
 Write-Output "Automatic tray startup: $ExeXml"
 Write-Output "Legacy taxi add-on retained: $disabled"
-Write-Output 'Existing ReShade files and other startup entries were preserved.'
+Write-Output 'Unrelated simulator files and startup entries were preserved.'

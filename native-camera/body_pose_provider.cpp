@@ -241,7 +241,7 @@ DWORD WINAPI worker(void*) noexcept {
     FreeLibrary(dll);
     return 0;
   }
-  HRESULT hr = open(&session, "380 Taxi Cam aircraft mount telemetry", nullptr, 0, notification, 0);
+  HRESULT hr = open(&session, "Taxi Cam aircraft mount telemetry", nullptr, 0, notification, 0);
   const char* names[]{"PLANE LATITUDE",      "PLANE LONGITUDE",    "PLANE ALTITUDE",
                       "PLANE PITCH DEGREES", "PLANE BANK DEGREES", "PLANE HEADING DEGREES TRUE",
                       "GROUND VELOCITY"};

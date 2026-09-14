@@ -9,7 +9,7 @@ struct ViewBitmapMetadata {
   std::uint32_t handle_generation = 0, current_generation = 0;
   std::uint32_t bitmap_width = 0, bitmap_height = 0;
   // Equality ordinal valid ONLY within this snapshot. No pointer/COM identity
-  // or ReShade lifetime generation is published by this read-only inspector.
+  // or graphics lifetime generation is published by this read-only inspector.
   std::uint32_t resource_ordinal = 0;
   std::uint32_t dimension = 0, height = 0, format = 0, samples = 0, flags = 0;
   std::uint64_t width = 0;

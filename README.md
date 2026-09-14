@@ -1,4 +1,28 @@
-# 380 Taxi Cam
+# Taxi Cam
+
+## Important notice — unsupported integration
+
+Taxi Cam uses an **unsupported method** to add taxi-camera views to Microsoft Flight Simulator 2024. It calls undocumented internal camera and renderer interfaces and installs graphics hooks inside the simulator process. These calls are outside the supported public SDK and are not supported or endorsed by Microsoft or Asobo.
+
+The app does **not** adjust the simulator's graphics-quality or performance settings. It does interact with internal camera and rendering state to produce its views. Compatibility checks cannot guarantee safety: simulator updates or other add-ons may cause failures, instability or crashes.
+
+**Use at your own risk.** The application is provided as is, without a guarantee of stability, compatibility or continued operation. Close the simulator before installing, updating or uninstalling it.
+
+## Install
+
+Download the Windows x64 **setup EXE** from [Releases](https://github.com/rthomson83/taxi-cam/releases/latest). Close MSFS and exit any running Taxi Cam instance, then open setup.
+
+Choose the folder containing `FlightSimulator2024.exe` and the simulator's `exe.xml` launch configuration. Setup attempts to find the configuration and reuses existing installation choices on updates.
+
+The installer places the EXE and bridge DLL together in `%LOCALAPPDATA%\Taxi Cam\app`; the wizard lets you choose another folder. Open `taxi-cam.exe` to launch the app; the DLL is loaded by the app and is not launched directly.
+
+The installer adds automatic startup to `exe.xml` and creates a Start menu shortcut. It backs up the launch configuration and preserves other add-ons.
+
+Upgrading from **380 Taxi Cam**: download and run the new setup once. Setup reuses the existing installation directory and replaces the old startup entry. Saved profiles are imported into the new settings directory without deleting the originals or overwriting newer settings. The former updater may require this manual installation after the repository rename.
+
+Release files contain no loose PowerShell scripts, documentation folders or license folders. A single `THIRD_PARTY_NOTICES.txt` retains the notices required by the statically linked runtime. The optional ZIP contains the runtime files only; use setup to configure startup and uninstallation.
+
+## About the application
 
 Nose-wheel and tail cameras for Microsoft Flight Simulator 2024, controlled by the aircraft's EFIS **TAXI** buttons.
 
@@ -6,13 +30,13 @@ The camera image occupies the upper part of the Primary Flight Display (PFD): no
 
 - **Aircraft:** FlyByWire A380X
 - **Platform:** Windows x64, MSFS 2024
-- **Delivery:** Windows tray application and an in-simulator DLL. ReShade is not required.
+- **Delivery:** Windows tray application and an in-simulator DLL.
 
 ## How it works
 
-380 Taxi Cam asks MSFS to render two additional views of the aircraft and its surroundings. It then draws those images into the texture that the cockpit model uses for its PFD screen.
+Taxi Cam asks MSFS to render two additional views of the aircraft and its surroundings. It then draws those images into the texture that the cockpit model uses for its PFD screen.
 
-1. **MSFS starts the tray app.** An `exe.xml` entry launches `380-taxi-cam.exe`, which loads `taxi-camera-bridge.dll` into the simulator.
+1. **MSFS starts the tray app.** An `exe.xml` entry launches `taxi-cam.exe`, which loads `taxi-camera-bridge.dll` into the simulator.
 2. **The bridge reads the aircraft.** SimConnect supplies TAXI-button state, aircraft position and orientation, ground speed and ambient lighting.
 3. **MSFS renders the cameras.** The bridge calls the simulator's internal camera functions to position independent nose and tail views relative to the aircraft.
 4. **The GPU combines the images.** The bridge copies the rendered views, adds the divider, reference marks and ground speed, then draws the result into the enabled PFD texture.
@@ -22,18 +46,6 @@ Left TAXI enables the left PFD; right TAXI enables the right PFD. Both displays 
 Compatibility is checked against the required private code and memory layout. Simulator updates are allowed when these checks pass. If a required signature changes or moves, the camera stays disabled and the app reports the failed check; an updated Taxi Cam integration may be needed.
 
 See [How the camera reaches the PFD](docs/architecture.md) for the complete explanation.
-
-## Install
-
-Download the Windows x64 **setup EXE** from [Releases](https://github.com/rthomson83/380-taxi-cam/releases/latest). Close MSFS and exit any running 380 Taxi Cam instance, then open setup.
-
-Choose the folder containing `FlightSimulator2024.exe` and the simulator's `exe.xml` launch configuration. Setup attempts to find the configuration and reuses existing installation choices on updates.
-
-The installer places the EXE and bridge DLL together in `%LOCALAPPDATA%\380 Taxi Cam\app`; the wizard lets you choose another folder. Open `380-taxi-cam.exe` to launch the app; the DLL is loaded by the app and is not launched directly.
-
-The installer adds automatic startup to `exe.xml` and creates a Start menu shortcut. It backs up the launch configuration and preserves other add-ons.
-
-Release files contain no loose PowerShell scripts, documentation folders or license folders. A single `THIRD_PARTY_NOTICES.txt` retains the notices required by the statically linked runtime. The optional ZIP contains the runtime files only; use setup to configure startup and uninstallation.
 
 ## Updates
 
@@ -65,13 +77,13 @@ If the camera appears on the wrong display, open **PFD routing** to identify, as
 | PFD routing | Left/right display assignment, preview and target identification |
 | Diagnostics | Scene test, single-camera test and runtime counters |
 
-Select **Save changes** to keep adjustments. Settings are stored in `%LOCALAPPDATA%\380 Taxi Cam\profiles\fbw-a380x.ini`.
+Select **Save changes** to keep adjustments. Settings are stored in `%LOCALAPPDATA%\Taxi Cam\profiles\fbw-a380x.ini`.
 
 The camera rate can be set from **15 to 60**. It limits how often each camera is requested to render; achieved frame rate depends on simulator updates and rendering load. Camera size is **768 × 255** for the nose and **768 × 504** for the tail.
 
 ## Uninstall
 
-With MSFS and 380 Taxi Cam closed, uninstall **380 Taxi Cam** from Windows Installed apps. Setup removes its startup entry and application files. Saved settings and calibration are retained.
+With MSFS and Taxi Cam closed, uninstall **Taxi Cam** from Windows Installed apps. Setup removes its startup entry and application files. Saved settings and calibration are retained.
 
 ## Build and releases
 
@@ -91,7 +103,7 @@ $zip = .\package-native.ps1 -BuildLabel build.0 -SourceCommit (git rev-parse HEA
 .\build-installer.ps1 -Package $zip
 ~~~
 
-Local builds use build number zero; release builds use the GitHub workflow run number. Packages are immutable, so move an earlier local candidate out of the output location before building another with the same label. PowerShell scripts for development, validation and legacy rollback remain in the source repository; setup embeds the integration scripts it needs internally.
+Local builds use build number zero; release builds use the GitHub workflow run number. Packages are immutable, so move an earlier local candidate out of the output location before building another with the same label. PowerShell scripts for development, validation and installation remain in the source repository; setup embeds the integration scripts it needs internally.
 
 Every push to `main` runs the [Windows release workflow](.github/workflows/release.yml). A successful run publishes an installer, runtime ZIP, checksums and release notes. Hosted checks use software D3D12 (WARP); live simulator verification is a separate check.
 

@@ -8,7 +8,7 @@ function Assert-TaxiNativeReceipt([string]$Directory) {
         $receipt.buildNumber -lt 0 -or $receipt.buildNumber -gt [int]::MaxValue) {
         throw 'A successful native validation receipt with a build number is required.'
     }
-    foreach ($name in @('380-taxi-cam.exe','taxi-camera-bridge.dll')) {
+    foreach ($name in @('taxi-cam.exe','taxi-camera-bridge.dll')) {
         $file = Join-Path $Directory $name
         $expected = $receipt.files.PSObject.Properties[$name].Value
         if (-not $expected -or (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash -ne $expected) { throw "Native binary differs from the validated build: $name" }

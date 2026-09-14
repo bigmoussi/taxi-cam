@@ -23,9 +23,9 @@ int main(int argc, char** argv) {
   auto dispatch = reinterpret_cast<Dispatch>(GetProcAddress(dll, "SimConnect_GetNextDispatch"));
   if (!open || !close || !take || !release || !get || !dispatch) { FreeLibrary(dll); return 2; }
   HANDLE session = nullptr;
-  HRESULT hr = open(&session, "380 Taxi Cam bounded public camera read", nullptr, 0, nullptr, 0);
+  HRESULT hr = open(&session, "Taxi Cam bounded public camera read", nullptr, 0, nullptr, 0);
   if (FAILED(hr)) { std::printf("{\"open_error\":%ld}\n", hr); FreeLibrary(dll); return 1; }
-  if (acquire) { hr = take(session, "380 Taxi Cam bounded camera calibration"); std::printf("{\"acquire_hr\":%ld}\n", hr); }
+  if (acquire) { hr = take(session, "Taxi Cam bounded camera calibration"); std::printf("{\"acquire_hr\":%ld}\n", hr); }
   unsigned packets = 0;
   for (DWORD reference = 1; SUCCEEDED(hr) && reference <= 3; ++reference) {
     if (acquire && reference == 1) Sleep(300);

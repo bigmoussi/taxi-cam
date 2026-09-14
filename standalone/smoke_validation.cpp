@@ -80,6 +80,25 @@ int wmain(int argc, wchar_t** argv) {
     saved.camera_rate = 999;
     require(!save_settings(saved), "Reject invalid save");
     require(load_settings(loaded, install) && loaded.camera_rate == 60, "Invalid save must preserve previous settings");
+    // Exercise the actual rename migration with process-local environment paths.
+    const auto migration = settings_override + L"\\migration";
+    require(CreateDirectoryW(migration.c_str(), nullptr) != FALSE, "Create isolated migration directory");
+    wchar_t original_local[32768]{};
+    const DWORD local_size = GetEnvironmentVariableW(L"LOCALAPPDATA", original_local, 32768);
+    require(local_size && local_size < 32768, "Read original local app data path");
+    settings_override = migration + L"\\380 Taxi Cam";
+    saved.camera_rate = 45;
+    require(save_settings(saved), "Save old application profile");
+    const auto legacy = settings_path(saved);
+    settings_override.clear();
+    require(SetEnvironmentVariableW(L"LOCALAPPDATA", migration.c_str()) != FALSE, "Isolate migration environment");
+    require(load_settings(loaded, install) && loaded.camera_rate == 45 && loaded.mounts[0][2] == 27.25,
+            "Rename imports existing calibration");
+    require(GetFileAttributesW(legacy.c_str()) != INVALID_FILE_ATTRIBUTES, "Rename preserves original profile");
+    loaded.camera_rate = 30;
+    require(save_settings(loaded), "Save new application profile");
+    require(load_settings(loaded, install) && loaded.camera_rate == 30, "Old profile cannot overwrite newer settings");
+    require(SetEnvironmentVariableW(L"LOCALAPPDATA", original_local) != FALSE, "Restore local app data environment");
     HMODULE dll = LoadLibraryExW(argv[1], nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
     require(dll != nullptr, "Load exact standalone bridge DLL");
     auto start = reinterpret_cast<DWORD(WINAPI*)(void*)>(GetProcAddress(dll, "TaxiCameraStart"));

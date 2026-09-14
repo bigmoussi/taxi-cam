@@ -29,7 +29,7 @@ int main() {
     return 1;
   }
   HANDLE session = nullptr;
-  const auto opened = open(&session, "380 Taxi Cam bounded public lighting sample", nullptr, 0, nullptr, 0);
+  const auto opened = open(&session, "Taxi Cam bounded public lighting sample", nullptr, 0, nullptr, 0);
   if (FAILED(opened)) {
     std::printf("{\"error\":\"open\",\"hresult\":%lu}\n", static_cast<unsigned long>(opened));
     FreeLibrary(module);

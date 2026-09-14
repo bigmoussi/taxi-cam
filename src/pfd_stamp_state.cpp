@@ -5,95 +5,11 @@
 
 namespace taxi_camera {
 namespace {
-#ifndef TAXI_NATIVE_RUNTIME
-bool descriptor_kind(reshade::api::descriptor_type type, PfdRootKind& kind) noexcept {
-  using Type = reshade::api::descriptor_type;
-  switch (type) {
-    case Type::constant_buffer:
-      kind = PfdRootKind::cbv;
-      return true;
-    case Type::buffer_shader_resource_view:
-      kind = PfdRootKind::srv;
-      return true;
-    case Type::buffer_unordered_access_view:
-      kind = PfdRootKind::uav;
-      return true;
-    default:
-      return false;
-  }
-}
-#endif
 std::uint64_t mask(UINT count) noexcept {
   return count == 64 ? UINT64_MAX : ((std::uint64_t{1} << count) - 1);
 }
 }  // namespace
 
-#ifndef TAXI_NATIVE_RUNTIME
-PfdRootLayout parse_pfd_root_layout(std::uint32_t count, const reshade::api::pipeline_layout_param* params) noexcept {
-  PfdRootLayout result;
-  if (count > 65 || (count && !params))
-    return result;
-  using Type = reshade::api::pipeline_layout_param_type;
-  if (count && params[count - 1].type == Type::push_descriptors_with_ranges_and_flags) {
-    const auto& table = params[count - 1].descriptor_table_with_flags;
-    bool samplers = table.count > 0 && table.count <= 2048 && table.ranges;
-    if (samplers)
-      for (UINT n = 0; n < table.count; ++n)
-        samplers = samplers && table.ranges[n].type == reshade::api::descriptor_type::sampler && table.ranges[n].static_samplers;
-    if (samplers)
-      --count;
-  }
-  if (count > 64)
-    return result;
-  UINT cost = 0;
-  for (UINT n = 0; n < count; ++n) {
-    auto& output = result.parameters[n];
-    const auto& param = params[n];
-    switch (param.type) {
-      case Type::push_constants:
-        output = {PfdRootKind::constants, param.push_constants.count};
-        if (!output.count || output.count > 64)
-          return {};
-        cost += output.count;
-        break;
-      case Type::descriptor_table:
-        if (!param.descriptor_table.count || !param.descriptor_table.ranges)
-          return {};
-        output = {PfdRootKind::table, 1};
-        ++cost;
-        break;
-      case Type::descriptor_table_with_flags:
-        if (!param.descriptor_table_with_flags.count || !param.descriptor_table_with_flags.ranges)
-          return {};
-        output = {PfdRootKind::table, 1};
-        ++cost;
-        break;
-      case Type::push_descriptors:
-        if (param.push_descriptors.count != 1 || !descriptor_kind(param.push_descriptors.type, output.kind))
-          return {};
-        output.count = 1;
-        cost += 2;
-        break;
-      case Type::push_descriptors_with_ranges_and_flags:
-        if (param.descriptor_table_with_flags.count != 1 || !param.descriptor_table_with_flags.ranges ||
-            param.descriptor_table_with_flags.ranges[0].count != 1 || param.descriptor_table_with_flags.ranges[0].static_samplers ||
-            !descriptor_kind(param.descriptor_table_with_flags.ranges[0].type, output.kind))
-          return {};
-        output.count = 1;
-        cost += 2;
-        break;
-      default:
-        return {};
-    }
-    if (cost > 64)
-      return {};
-  }
-  result.count = count;
-  result.valid = true;
-  return result;
-}
-
-#endif
 void PfdGraphicsState::reset(std::uint64_t generation, bool native_observations) noexcept {
   *this = PfdGraphicsState{};
   generation_ = generation;

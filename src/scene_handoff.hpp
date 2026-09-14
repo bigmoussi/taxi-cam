@@ -17,7 +17,7 @@ struct SceneManagerIdentity {
 
 struct SceneResourceIdentity {
   std::uint64_t device_epoch = 0;
-  std::uint64_t resource_id = 0;  // Existing ReShade registry target ID.
+  std::uint64_t resource_id = 0;  // Existing graphics registry target ID.
   std::uint64_t generation = 0;   // Unique registration within this handoff.
   bool operator==(const SceneResourceIdentity&) const = default;
 };
@@ -66,7 +66,7 @@ struct SceneCopyObservation {
 // unresolvable pair data revokes it; actual owner/resource/scene invalidation
 // remains immediate. A failed engine inspection must still call stop_scene.
 //
-// observe_copy accepts ONLY handles from actual native or ReShade GPU callbacks. Its
+// observe_copy accepts ONLY handles from actual native GPU callbacks. Its
 // match identifies a source or destination; the adapter separately proves the
 // copy extent/state and recording/submission/retirement contract. A returned
 // match is a value snapshot, not a lease. is_current checks it again before

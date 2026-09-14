@@ -1,6 +1,6 @@
 # GPU copy capture packet
 
-`src/scene_capture_d3d12.*` captures an actual application's whole-texture copy source into an owned D3D12 texture. It does not yet connect MSFS scene outputs to the PFD. The native adapter must prove scene/resource identity, command-list lifetime and submission ordering before using it.
+`src/scene_capture_d3d12.*` captures an actual application's whole-texture copy source into an owned D3D12 texture. This test exercises the capture packet independently of MSFS scene outputs and the PFD. The native adapter must prove scene/resource identity, command-list lifetime and submission ordering before using it.
 
 Run `powershell -ExecutionPolicy Bypass -File validation/scene_capture_build.ps1` from the repository root. This uses the pinned compiler and creates an isolated, windowless D3D12 process on hardware and WARP. It does not open MSFS or install an add-on.
 
@@ -15,7 +15,7 @@ The test records four changing source images. Each application copy is forwarded
 
 ## Retirement and completion are different
 
-`retire_recording(queue)` requires the caller to establish that **all submissions of this recording returned, all used one producer queue, and this recording cannot execute again**. It then issues the producer fence signal. `poll_ready()` publishes the owned snapshot only after that fence completes. ReShade's `execute_command_list`, `close_command_list` and `reset_command_list` callbacks in pinned v6.8.0 occur before their respective native operations; they alone cannot prove retirement or successful submission.
+`retire_recording(queue)` requires the caller to establish that **all submissions of this recording returned, all used one producer queue, and this recording cannot execute again**. It then issues the producer fence signal. `poll_ready()` publishes the owned snapshot only after that fence completes. Callbacks issued before native execution or Reset cannot prove retirement or successful submission.
 
 Only private DIRECT compositor commands may consume the ready texture. They must restore its `COPY_DEST` state and signal a same-device consumer fence after every submitted read. `finish_consumption()` hides the texture, and `recycle()` waits nonblockingly for that fence before reusing storage. Resource references alone do not order GPU access. [Microsoft's D3D12 fence-based resource management](https://learn.microsoft.com/en-us/windows/win32/direct3d12/fence-based-resource-management).
 

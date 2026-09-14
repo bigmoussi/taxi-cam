@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Installation = (Join-Path $env:LOCALAPPDATA '380 Taxi Cam/app'),
+    [string]$Installation = (Join-Path $env:LOCALAPPDATA 'Taxi Cam/app'),
     [switch]$RestoreLegacy
 )
 $ErrorActionPreference = 'Stop'
@@ -20,7 +20,7 @@ if ($RestoreLegacy -and $record.legacyBackup) {
 }
 if ($record.shortcut -and (Test-Path -LiteralPath $record.shortcut)) {
     $shell = New-Object -ComObject WScript.Shell
-    if ($shell.CreateShortcut($record.shortcut).TargetPath -eq (Join-Path $record.destination '380-taxi-cam.exe')) {
+    if ($shell.CreateShortcut($record.shortcut).TargetPath -eq (Join-Path $record.destination 'taxi-cam.exe')) {
         Remove-Item -LiteralPath $record.shortcut
     }
 }

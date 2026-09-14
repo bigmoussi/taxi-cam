@@ -11,7 +11,7 @@
 namespace taxi_camera {
 
 // Shutdown only: the caller must prevent further submissions to this queue.
-// Unlike ReShade's void wait_idle, every fence/event failure is observable. On a
+// Every fence/event failure is observable. On a
 // failed or timed-out wait, retain the native fence and event until process exit:
 // the GPU/driver may still reference both. The caller must then abandon the pool.
 inline bool drain_copy_queue(ID3D12CommandQueue* queue, ID3D12Device* device) noexcept {
@@ -113,7 +113,7 @@ class CopyCalibration {
       return false;
     }
     // MinGW's COM headers explicitly implement Microsoft's aggregate-return
-    // ABI for GetDesc; this is not a ReShade C++ API struct-return call.
+    // ABI for GetDesc, including its native COM struct-return convention.
     D3D12_RESOURCE_DESC actual{};
 #if defined(__MINGW32__)
 #ifndef WIDL_EXPLICIT_AGGREGATE_RETURNS

@@ -1,4 +1,4 @@
-380 Taxi Cam - native runtime third-party notices
+Taxi Cam - native runtime third-party notices
 =================================================
 
 The native executable and graphics bridge include statically linked runtime

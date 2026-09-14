@@ -120,7 +120,7 @@ struct Statistics {
 Result register_list(ID3D12GraphicsCommandList*, std::uint64_t object_generation, const Callbacks&) noexcept;
 void unregister_list(ID3D12GraphicsCommandList*, std::uint64_t object_generation) noexcept;
 // Wire only from the already-verified native Reset after S_OK. Failed Reset
-// must call reset_failed. Never use ReShade's synthetic creation/reset event.
+// must call reset_failed. Synthetic creation/reset events are insufficient.
 // A disabled/failed hook invalidates existing recordings. Reset while disabled
 // cannot reauthorize them; an actual successful Reset after repair is required.
 void successful_reset(ID3D12GraphicsCommandList*, std::uint64_t object_generation) noexcept;

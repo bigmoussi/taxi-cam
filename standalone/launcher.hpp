@@ -195,7 +195,7 @@ inline LaunchResult load_bridge(DWORD pid,
     if (!_wcsicmp(m.name.c_str(), L"FlightSimulator2024.exe") && same_path(m.path, path))
       main = m;
     if (!_wcsicmp(m.name.c_str(), L"taxi-camera-native.addon64"))
-      return {false, ERROR_ALREADY_EXISTS, L"The legacy taxi ReShade add-on is loaded. Run the native installer, then restart MSFS."};
+      return {false, ERROR_ALREADY_EXISTS, L"The legacy taxi add-on is loaded. Run the native installer, then restart MSFS."};
     if (same_path(m.path, dll))
       bridge = m;
   }

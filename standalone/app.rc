@@ -11,11 +11,11 @@ BEGIN
  BEGIN
   BLOCK "040904b0"
   BEGIN
-   VALUE "FileDescription", "380 Taxi Cam Windows companion\0"
+   VALUE "FileDescription", "Taxi Cam Windows companion\0"
    VALUE "FileVersion", TAXI_CAM_RELEASE_VERSION "\0"
-   VALUE "ProductName", "380 Taxi Cam\0"
+   VALUE "ProductName", "Taxi Cam\0"
    VALUE "ProductVersion", TAXI_CAM_RELEASE_VERSION "\0"
-   VALUE "OriginalFilename", "380-taxi-cam.exe\0"
+   VALUE "OriginalFilename", "taxi-cam.exe\0"
   END
  END
  BLOCK "VarFileInfo"

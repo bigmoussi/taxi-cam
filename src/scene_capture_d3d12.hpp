@@ -21,7 +21,7 @@ namespace taxi_camera {
 //    separate RT methods require the stronger native barrier proof below.
 // 3. Before retire_recording, establish that every submission of this recording
 //    has returned, all used ONE producer queue, and this recording cannot execute
-//    again. ReShade's pre-execute/pre-reset callbacks do NOT establish this.
+//    again. Pre-execute/pre-reset callbacks do NOT establish this.
 // 4. Only use ready_resource after the producer fence completes. Submit private
 //    DIRECT compositor work using COPY_DEST as the input before state, restoring it to
 //    COPY_DEST, then signal a consumer fence after ALL such uses. Only recycle

@@ -27,7 +27,7 @@ struct Result {
 // Exactly five documented native COM slots: Reset10, SetDescriptorHeaps28,
 // SetGraphicsRootSignature30, SetGraphicsRootDescriptorTable32 and
 // SetGraphicsRootConstantBufferView38. No vtable copies or instruction changes.
-// The explicit object must be a current native interface supplied by ReShade.
+// The explicit object must be a current native interface supplied by the graphics bridge.
 // One shared vtable and at most8192 simultaneously registered object identities.
 // No AddRef, object retention, memory scan or arbitrary address API.
 //

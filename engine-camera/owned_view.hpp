@@ -40,7 +40,7 @@ struct OwnedViewSnapshot {
   std::uint64_t view_address = 0;
   std::uint64_t node_address = 0;
   std::uint64_t camera_address = 0;
-  // Opaque member for lifecycle-bracketed ReShade identity matching only.
+  // Opaque member for lifecycle-bracketed resource identity matching only.
   // Never dereference/AddRef or send to UI/logs; no resource lifetime is acquired.
   std::uint64_t resource_address = 0;
   float fov = 0;

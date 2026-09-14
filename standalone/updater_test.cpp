@@ -21,8 +21,8 @@ int main() {
   for (const auto* tag : {L"v0.8.0-build.01", L"v0.8.0-build.-1", L"v0.8.0-build.4294967296", L"v0.8.0-build.9;calc",
                           L"0.8.0-build.9", L"v0.8.0-build.9-preview", L"v0.8.0-build.", L"v0.8.0-build.9\n"})
     check(!parse_update_version(tag, latest), "malformed tag rejected");
-  check(update_installer_arguments(L"C:\\Users\\A B\\380 Taxi Cam", 123) ==
-            L"/DIR=\"C:\\Users\\A B\\380 Taxi Cam\" /UPDATEFROMPID=123", "installer args preserve path spaces");
+  check(update_installer_arguments(L"C:\\Users\\A B\\Taxi Cam", 123) ==
+            L"/DIR=\"C:\\Users\\A B\\Taxi Cam\" /UPDATEFROMPID=123", "installer args preserve path spaces");
   check(update_installer_arguments(L"C:\\Bad\" /SILENT", 123).empty(), "reject argument injection");
   check(update_installer_arguments(L"C:\\App\\", 123).empty(), "reject trailing slash quote ambiguity");
   check(update_installer_arguments(L"C:\\App", 0).empty(), "require parent pid");

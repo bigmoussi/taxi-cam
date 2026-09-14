@@ -869,21 +869,7 @@ bool initialize_graphics() noexcept {
     error("d3d12_device_unavailable");
     return false;
   }
-  // Optional coexistence escape only. Native systems return E_NOINTERFACE.
-  // No ReShade DLL, SDK, API registration or renderer is loaded or required.
-  IUnknown* unwrapped{};
-  reported->QueryInterface(ReShadeUnwrappedObject, reinterpret_cast<void**>(&unwrapped));
-  ID3D12Device* native{};
-  if (unwrapped) {
-    unwrapped->QueryInterface(IID_PPV_ARGS(&native));
-    unwrapped->Release();
-  } else {
-    native = reported;
-    native->AddRef();
-  }
-  const bool ok = initialize_graphics(native);
-  if (native)
-    native->Release();
+  const bool ok = initialize_graphics(reported);
   reported->Release();
   return ok;
 }

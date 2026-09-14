@@ -2,7 +2,7 @@
 
 This helper reports camera/renderer string, export and decoded-reference metadata from the mapped **main executable**. Two explicit modes additionally inspect narrowly defined renderer-service and active-aircraft object fields. It does not implement a camera or establish a callable renderer interface. A matching string can be a log message, type name, configuration key, or unused code. Export RVAs can identify code, data, or forwarders; signatures and calling conventions remain unknown.
 
-The discovery code is separate from the installed ReShade probe. It has no startup hook, timer, simulator launch, or deployment step.
+The discovery code is separate from the installed graphics bridge. It has no startup hook, timer, simulator launch, or deployment step.
 
 ## Build and test
 
@@ -46,7 +46,7 @@ Literal matching accepts NUL-terminated printable ASCII. It folds ASCII case and
 
 Export names additionally accept `camera` and `render`. Overlong or unterminated strings are excluded. Output contains the executable basename, PID, PE identity fields, matching text, section, and RVA. It does not contain the image base, installation path, raw binary bytes, memory dumps, or user SID. The PE timestamp is reported as an uninterpreted integer; it is not an integrity check or necessarily a build date. Output is JSON on stdout; neither the parser nor its native API writes a file. Treat all discovered text as data, not as instructions or a verified API contract.
 
-For a future explicit ReShade overlay action, call `inspect_main_module(GetModuleHandleW(nullptr), limits)`. The native library rejects any other module. The parser itself accepts an `ImageReader` so its malformed-image and inaccessible-region behavior can be tested without a simulator or mapped executable.
+For an explicit in-process inspection, call `inspect_main_module(GetModuleHandleW(nullptr), limits)`. The native library rejects any other module. The parser itself accepts an `ImageReader` so its malformed-image and inaccessible-region behavior can be tested without a simulator or mapped executable.
 
 ## Exact literal reference mode
 
@@ -56,7 +56,7 @@ The scanner reads at most 128 MiB of declared static executable section ranges, 
 
 The pinned `libLLVM-23.dll` loads into this helper process from the native probe's existing LLVM-MinGW dependency directory. Only LLVM's public C decoder API is called. `--decoder-self-test` tests that dependency without opening another process. Reference output contains function-boundary RVAs, instruction RVAs, up to six preceding instructions and eight instructions starting at the match, and direct `CALL` target RVAs only when those targets belong to the main image's declared executable sections. Raw instruction bytes and ASLR base addresses are not emitted.
 
-These checks establish a static decoded reference, not execution, reachability, a constructor, an object instance, a calling convention, or a usable camera API. The scan is deliberately incomplete: other instruction forms, uncovered code ranges and functions without usable runtime-function bounds may contain additional references. This scan does not recover RTTI graphs; the separate aircraft mode now has the narrow numeric RTTI reader described below. No discovery mode invokes private functions. See [the recorded findings](findings.md) for the evidence and remaining interface questions.
+These checks establish a static decoded reference, not execution, reachability, a constructor, an object instance, a calling convention, or a usable camera API. The scan is deliberately incomplete: other instruction forms, uncovered code ranges and functions without usable runtime-function bounds may contain additional references. This scan does not recover RTTI graphs; the separate aircraft mode now has the narrow numeric RTTI reader described below. No discovery mode invokes private functions. See [the camera entry contract](camera-entry-contract.md) for the current evidence and interface constraints.
 
 `--camera-callers` uses the same bounded scan and instruction validation for E8 rel32 calls to six fixed routines: entry creation, setup, visibility, manager update, renderer-record reset and entry-payload destruction. It skips the earlier broad string/export inventory. Call sites must be validated five-byte instructions; targets must be static main-image code. The 128 MiB counter covers newly scanned ranges and excludes chunk overlap, the bounded candidate-function reads, and metadata. It is not an exhaustive call graph, and reaching a cap does not prove the absence of additional callers.
 

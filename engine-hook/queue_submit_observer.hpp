@@ -74,7 +74,7 @@ struct Statistics {
 // editing executable instructions. At most8 queue identities on that same
 // vtable can be registered. Unknown queues sharing it forward unchanged.
 //
-// The queue MUST be a live, valid native COM interface, not a ReShade proxy.
+// The queue MUST be a live, valid native COM interface, not an unverified interface wrapper.
 // Registration keeps one AddRef permanently and pins this module, the original
 // function's image and the vtable's image when applicable. Once queue_retained
 // is true, including a partial failure, the callback/context association is

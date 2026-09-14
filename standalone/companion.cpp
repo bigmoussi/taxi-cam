@@ -327,7 +327,7 @@ void tray(bool add) {
   data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
   data.uCallbackMessage = TrayMessage;
   data.hIcon = icon;
-  wcscpy_s(data.szTip, L"380 Taxi Cam — Settings");
+  wcscpy_s(data.szTip, L"Taxi Cam — Settings");
   Shell_NotifyIconW(add ? NIM_ADD : NIM_DELETE, &data);
   if (add) {
     data.uVersion = NOTIFYICON_VERSION_4;
@@ -341,7 +341,7 @@ void update_balloon() {
   data.uID = 1;
   data.uFlags = NIF_INFO;
   data.dwInfoFlags = NIIF_INFO | NIIF_RESPECT_QUIET_TIME;
-  wcscpy_s(data.szInfoTitle, L"380 Taxi Cam update downloaded");
+  wcscpy_s(data.szInfoTitle, L"Taxi Cam update downloaded");
   wcscpy_s(data.szInfo, L"Close Microsoft Flight Simulator, then use Check for updates in the tray menu to install.");
   Shell_NotifyIconW(NIM_MODIFY, &data);
 }
@@ -359,7 +359,7 @@ void draw_page(HDC dc) {
   FillRect(dc, &left, b);
   DeleteObject(b);
   DrawIconEx(dc, scale(24), scale(35), icon, scale(32), scale(32), 0, nullptr, DI_NORMAL);
-  text(dc, L"380 TAXI CAM", 68, 33, 134, 22, heading);
+  text(dc, L"TAXI CAM", 68, 33, 134, 22, heading);
   text(dc, L"Native camera service", 24, 84, 176, 22, small, Muted);
   text(dc, L"WINDOWS COMPANION", 24, 120, 182, 22, small, Muted);
   text(dc, L"v0.8.0", 24, 692, 155, 22, small, Muted);
@@ -575,21 +575,21 @@ void poll_updates() {
   if (updater.take(result)) {
     if (!result.available) {
       if (result.manual) {
-        notice = result.error.empty() ? L"380 Taxi Cam is up to date." : result.error;
-        MessageBoxW(window, notice.c_str(), L"380 Taxi Cam updates", MB_OK | MB_ICONINFORMATION);
+        notice = result.error.empty() ? L"Taxi Cam is up to date." : result.error;
+        MessageBoxW(window, notice.c_str(), L"Taxi Cam updates", MB_OK | MB_ICONINFORMATION);
       }
     } else {
       update_prompt = true;
       if (win::simulator_blocks_update()) {
         notice = L"Update downloaded. Close Microsoft Flight Simulator, then choose Check for updates to install.";
         if (result.manual)
-          MessageBoxW(window, notice.c_str(), L"380 Taxi Cam updates", MB_OK | MB_ICONINFORMATION);
+          MessageBoxW(window, notice.c_str(), L"Taxi Cam updates", MB_OK | MB_ICONINFORMATION);
         else
           update_balloon();
       } else {
-        const auto prompt = L"380 Taxi Cam " + result.tag +
-                            L" has been downloaded and verified.\n\nClose 380 Taxi Cam and start the installer now?";
-        if (MessageBoxW(window, prompt.c_str(), L"380 Taxi Cam update ready", MB_YESNO | MB_ICONINFORMATION | MB_DEFBUTTON2) == IDYES) {
+        const auto prompt = L"Taxi Cam " + result.tag +
+                            L" has been downloaded and verified.\n\nClose Taxi Cam and start the installer now?";
+        if (MessageBoxW(window, prompt.c_str(), L"Taxi Cam update ready", MB_YESNO | MB_ICONINFORMATION | MB_DEFBUTTON2) == IDYES) {
           bool proceed = true;
           if (dirty) {
             const int choice = MessageBoxW(window, L"Save your unsaved settings before installing?\n\nYes: save and continue.\nNo: discard changes.\nCancel: keep the app open.",
@@ -604,7 +604,7 @@ void poll_updates() {
               update_prompt = false;
               return;
             }
-            MessageBoxW(window, error.c_str(), L"380 Taxi Cam updates", MB_OK | MB_ICONWARNING);
+            MessageBoxW(window, error.c_str(), L"Taxi Cam updates", MB_OK | MB_ICONWARNING);
           }
         }
       }
@@ -939,6 +939,7 @@ int WINAPI wWinMain(HINSTANCE app, HINSTANCE, LPWSTR, int) {
     }
   }
   LocalFree(argv);
+  // Retain coordination names so an older installed app cannot run alongside this one.
   singleton = CreateMutexW(nullptr, FALSE, preview_ui ? L"Local\\380TaxiCamera.Preview" : L"Local\\380TaxiCamera.Companion");
   const DWORD existing = GetLastError();
   show_event = CreateEventW(nullptr, FALSE, FALSE, preview_ui ? L"Local\\380TaxiCamera.Preview.Show" : L"Local\\380TaxiCamera.Show");
@@ -972,7 +973,7 @@ int WINAPI wWinMain(HINSTANCE app, HINSTANCE, LPWSTR, int) {
   if (!RegisterClassExW(&type))
     return 1;
   dpi = GetDpiForSystem();
-  HWND main = CreateWindowExW(WS_EX_APPWINDOW, WindowClass, L"380 Taxi Cam", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT,
+  HWND main = CreateWindowExW(WS_EX_APPWINDOW, WindowClass, L"Taxi Cam", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT,
                               CW_USEDEFAULT, scale(1070), scale(810), nullptr, nullptr, instance, nullptr);
   if (!main)
     return 1;

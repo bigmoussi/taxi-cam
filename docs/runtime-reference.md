@@ -7,7 +7,7 @@ Use this page to look up values and diagnose the current runtime. For the explan
 The companion saves settings to:
 
 ~~~text
-%LOCALAPPDATA%\380 Taxi Cam\profiles\fbw-a380x.ini
+%LOCALAPPDATA%\Taxi Cam\profiles\fbw-a380x.ini
 ~~~
 
 The INI contains `[service]`, `[display]`, `[nose]` and `[tail]` sections. **Save changes** writes the current adjustments. Loading uses the saved profile first; if no profile exists, it reads `taxi-camera-mounts.cfg` beside the companion, with compiled defaults as fallback.
@@ -137,7 +137,7 @@ Source: [IPC](../standalone/protocol.hpp), [control loop](../standalone/bridge_m
 The bridge writes a status snapshot to the companion and appends metadata to:
 
 ~~~text
-%LOCALAPPDATA%\380 Taxi Cam\bridge.log
+%LOCALAPPDATA%\Taxi Cam\bridge.log
 ~~~
 
 Control-transition logs include companion connectivity, cached-read contention count, requested scene state, TAXI validity/grace expiry, scene stop reason and recovery attempts. Output changes and readiness-wait episodes are also logged immediately when observed by the control loop. Camera entry IDs, per-view readiness, draw counts, unknown command lists and invalid recording counts distinguish a control disconnect, temporary pending view and GPU capture-state loss.

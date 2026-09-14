@@ -15,13 +15,13 @@ $receiptPath = Join-Path $root 'build/native/validation.json'
 $receipt = Assert-TaxiNativeReceipt (Split-Path -Parent $receiptPath)
 $packagePath = (Resolve-Path -LiteralPath $Package).Path
 $installerPath = (Resolve-Path -LiteralPath $Installer).Path
-$expectedBase = "380-taxi-cam-$($receipt.version)-build.$BuildNumber-windows-x64"
+$expectedBase = "taxi-cam-$($receipt.version)-build.$BuildNumber-windows-x64"
 if ([IO.Path]::GetFileName($installerPath) -cne "$expectedBase-setup.exe" -or
     [IO.Path]::GetFileName($packagePath) -cne "$expectedBase.zip" -or $receipt.buildNumber -ne $BuildNumber) {
     throw 'Release asset names and validated application must match the release build.'
 }
 $tag = "v$($receipt.version)-build.$BuildNumber"
-$title = "380 Taxi Cam $($receipt.version) - Build $BuildNumber"
+$title = "Taxi Cam $($receipt.version) - Build $BuildNumber"
 function Invoke-Gh([string[]]$Arguments) {
     $result = @(& gh @Arguments)
     if ($LASTEXITCODE -ne 0) { throw "GitHub operation failed: $($Arguments[0])" }
@@ -38,7 +38,7 @@ if ($setupReceipt.sourceCommit -ne $Commit -or $setupReceipt.version -ne $receip
     $setupReceipt.packageSha256 -ne (Get-FileHash -LiteralPath $packagePath -Algorithm SHA256).Hash) {
     throw 'Installer provenance does not match the validated release package.'
 }
-foreach ($name in @('380-taxi-cam.exe','taxi-camera-bridge.dll')) {
+foreach ($name in @('taxi-cam.exe','taxi-camera-bridge.dll')) {
     if ($setupReceipt.files.PSObject.Properties[$name].Value -ne $receipt.files.PSObject.Properties[$name].Value) {
         throw "Installer contains a different validated binary: $name"
     }
@@ -74,7 +74,7 @@ $runUrl = "$env:GITHUB_SERVER_URL/$Repository/actions/runs/$env:GITHUB_RUN_ID"
 $notes = @(
     "Windows x64 native package from commit [$($Commit.Substring(0,7))](https://github.com/$Repository/commit/$Commit).",
     '',
-    'Download the Windows x64 setup EXE and run it with MSFS and 380 Taxi Cam closed. Existing paths and calibration are preserved. SHA256SUMS.txt covers the installer and optional runtime ZIP.',
+    'Download the Windows x64 setup EXE and run it with MSFS and Taxi Cam closed. Existing paths and calibration are preserved. SHA256SUMS.txt covers the installer and optional runtime ZIP.',
     '',
     'Validation: strict native build, software D3D12 (WARP), smoke, IPC, camera lifecycle, graphics-state, installer and package checks. Hardware GPU and live MSFS checks are not performed on the hosted runner.',
     '',

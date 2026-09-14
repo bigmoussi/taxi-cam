@@ -26,7 +26,7 @@ The saved wrapper constructor `64894368` copies its R9 descriptor's 56 bytes int
 | Nose-size view, index1 | 768x255 | `0x0019e013ff2220ef` | 768x255, format26 | Absent |
 | Tail-size view, index2 | 768x504 | `0x0019e013ff2220ef` | 768x504, format26 | Absent |
 
-Format10 is `R16G16B16A16_FLOAT`; format26 is `R11G11B10_FLOAT`. The three present bitmap handles each had generation1 matching their control records. Published resource ordinals establish equality only inside this snapshot; they are not addresses, durable identities, or ReShade registry generations. The two extra views are identified here by their exact dimensions and pool indices, not by a newly acquired ownership token.
+Format10 is `R16G16B16A16_FLOAT`; format26 is `R11G11B10_FLOAT`. The three present bitmap handles each had generation1 matching their control records. Published resource ordinals establish equality only inside this snapshot; they are not addresses, durable identities, or graphics registry generations. The two extra views are identified here by their exact dimensions and pool indices, not by a newly acquired ownership token.
 
 Primary bit49 is set and both extra-view bit49 values are clear; bit18 is clear in all three. Primary ADD_DIFFUSE is one eighth of the primary output dimensions after integer truncation. Those facts explain its allocation difference, but still do not prove the missing airport-light contribution lives there.
 

@@ -14,14 +14,24 @@ $path = Join-Path $testRoot 'exe.xml'
 $document = Read-TaxiLaunchXml $path
 $untouched = $document.SelectSingleNode('//Launch.Addon').OuterXml
 $original = (Get-FileHash -LiteralPath $path).Hash
-Set-TaxiStartupEntry $document 'C:\Native Camera & Tools\380-taxi-cam.exe' 'C:\MSFS\FlightSimulator2024.exe'
+Set-TaxiStartupEntry $document 'C:\Native Camera & Tools\taxi-cam.exe' 'C:\MSFS\FlightSimulator2024.exe'
 $backup = Save-TaxiLaunchXml $document $path $original
 if (-not $backup -or (Get-FileHash -LiteralPath $backup).Hash -ne $original) { throw 'Original startup file was not preserved.' }
 $read = Read-TaxiLaunchXml $path
 if ($read.SelectSingleNode('//Launch.Addon[Name="Existing & Addon"]').OuterXml -ne $untouched) { throw 'Unrelated entry changed.' }
-if ($read.SelectSingleNode('//Launch.Addon[Name="380 Taxi Cam"]/CommandLine').InnerText -ne '--background --simulator "C:\MSFS\FlightSimulator2024.exe"') { throw 'Argument quoting changed.' }
-Set-TaxiStartupEntry $read 'C:\Native Camera & Tools\380-taxi-cam.exe' 'C:\MSFS\FlightSimulator2024.exe'
-if ($read.SelectNodes('//Launch.Addon[Name="380 Taxi Cam"]').Count -ne 1) { throw 'Duplicate startup entry.' }
+if ($read.SelectSingleNode('//Launch.Addon[Name="Taxi Cam"]/CommandLine').InnerText -ne '--background --simulator "C:\MSFS\FlightSimulator2024.exe"') { throw 'Argument quoting changed.' }
+Set-TaxiStartupEntry $read 'C:\Native Camera & Tools\taxi-cam.exe' 'C:\MSFS\FlightSimulator2024.exe'
+if ($read.SelectNodes('//Launch.Addon[Name="Taxi Cam"]').Count -ne 1) { throw 'Duplicate startup entry.' }
+$read.SelectSingleNode('//Launch.Addon[Name="Taxi Cam"]/Name').InnerText = '380 Taxi Cam'
+Set-TaxiStartupEntry $read 'C:\Native Camera & Tools\taxi-cam.exe' 'C:\MSFS\FlightSimulator2024.exe'
+if ($read.SelectNodes('//Launch.Addon').Count -ne 2 -or $read.SelectNodes('//Launch.Addon[Name="Taxi Cam"]').Count -ne 1) { throw 'Rename did not migrate the existing entry in place.' }
+$duplicate = $read.SelectSingleNode('//Launch.Addon[Name="Taxi Cam"]').CloneNode($true)
+$duplicate.SelectSingleNode('Name').InnerText = '380 Taxi Cam'
+[void]$read.DocumentElement.AppendChild($duplicate)
+$refused = $false
+try { Set-TaxiStartupEntry $read 'C:\Native Camera & Tools\taxi-cam.exe' 'C:\MSFS\FlightSimulator2024.exe' } catch { $refused = $true }
+if (-not $refused) { throw 'Mixed old/new startup entries must refuse an ambiguous upgrade.' }
+[void]$read.DocumentElement.RemoveChild($duplicate)
 $refused = $false
 try { Save-TaxiLaunchXml $read $path ('0' * 64) } catch { $refused = $true }
 if (-not $refused) { throw 'Concurrent edit guard did not refuse.' }

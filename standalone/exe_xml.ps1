@@ -18,12 +18,13 @@ function Read-TaxiLaunchXml([string]$Path) {
 function Set-TaxiStartupEntry([Xml.XmlDocument]$Document, [string]$Executable, [string]$Simulator, [switch]$Remove) {
     if (-not $Remove -and (-not [IO.Path]::IsPathRooted($Executable) -or -not [IO.Path]::IsPathRooted($Simulator))) { throw 'Startup executable paths must be absolute.' }
     $root = $Document.DocumentElement
-    $matches = @($root.SelectNodes('Launch.Addon') | Where-Object { $node=$_.SelectSingleNode('Name'); $null -ne $node -and $node.InnerText -eq '380 Taxi Cam' })
-    if ($matches.Count -gt 1) { throw 'Multiple 380 Taxi Cam startup entries found; refusing an ambiguous update.' }
+    # Recognize the former name so an upgrade replaces its entry in place.
+    $matches = @($root.SelectNodes('Launch.Addon') | Where-Object { $node=$_.SelectSingleNode('Name'); $null -ne $node -and $node.InnerText -in @('Taxi Cam','380 Taxi Cam') })
+    if ($matches.Count -gt 1) { throw 'Multiple Taxi Cam startup entries found; refusing an ambiguous update.' }
     if ($Remove) { foreach ($entry in $matches) { [void]$root.RemoveChild($entry) }; return }
     $entry = if ($matches.Count) { $matches[0] } else { $Document.CreateElement('Launch.Addon') }
     foreach ($pair in @(
-        @('Name', '380 Taxi Cam'), @('Disabled', 'False'), @('ManualLoad', 'False'),
+        @('Name', 'Taxi Cam'), @('Disabled', 'False'), @('ManualLoad', 'False'),
         @('Path', $Executable), @('CommandLine', ('--background --simulator "' + $Simulator + '"')), @('NewConsole', 'False')
     )) {
         $node = $entry.SelectSingleNode($pair[0])

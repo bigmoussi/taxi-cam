@@ -12,11 +12,11 @@ if ($BuildLabel -match '^build\.([0-9]+)$' -and [int]$Matches[1] -ne $receipt.bu
     throw 'Release build label must match the build number compiled into the validated application.'
 }
 $label = if ($BuildLabel) { $BuildLabel } else { [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss-fff') }
-$package = Join-Path $PSScriptRoot ("build/packages/380-taxi-cam-$($receipt.version)-$label-windows-x64")
+$package = Join-Path $PSScriptRoot ("build/packages/taxi-cam-$($receipt.version)-$label-windows-x64")
 $zip = $package + '.zip'
 if ((Test-Path -LiteralPath $package) -or (Test-Path -LiteralPath $zip)) { throw 'Package already exists; use a new build label.' }
 New-Item -ItemType Directory -Path $package -Force | Out-Null
-foreach ($file in @('380-taxi-cam.exe','taxi-camera-bridge.dll')) {
+foreach ($file in @('taxi-cam.exe','taxi-camera-bridge.dll')) {
     Copy-Item -LiteralPath (Join-Path $payload $file) -Destination (Join-Path $package $file)
 }
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'taxi-camera-mounts.cfg') -Destination $package

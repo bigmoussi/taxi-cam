@@ -1,14 +1,6 @@
 #include "scene_runtime.hpp"
-#ifndef TAXI_NATIVE_RUNTIME
-#include "pfd_state_adapter.hpp"
-#endif
 #include "scene_frame_output.hpp"
-#ifdef TAXI_NATIVE_RUNTIME
 #include "../standalone/native_hooks.hpp"
-#define NATIVE_OWNED_WORK const standalone::OwnedWork owned_work_guard
-#else
-#define NATIVE_OWNED_WORK
-#endif
 
 #include <algorithm>
 #include <array>
@@ -83,9 +75,6 @@ bool init_device(std::uint64_t key, ID3D12Device* device) {
       return false;
     item.key = key;
     item.native = device;  // Manager retains this device until process exit.
-#ifndef TAXI_NATIVE_RUNTIME
-    pfd_adapter::initialize(manager());
-#endif
     return true;
   }
   return false;
@@ -104,7 +93,6 @@ bool init_queue(std::uint64_t key, ID3D12CommandQueue* queue) {
   if (!queue || queue->GetDesc().Type != D3D12_COMMAND_LIST_TYPE_DIRECT)
     return true;
   auto callbacks = manager().callbacks();
-#ifdef TAXI_NATIVE_RUNTIME
   callbacks.before = [](void*, ID3D12CommandQueue* q, UINT n, ID3D12CommandList* const* lists) noexcept {
     const standalone::OwnedWork guard;
     return manager().before_submission(q, n, lists);
@@ -117,7 +105,6 @@ bool init_queue(std::uint64_t key, ID3D12CommandQueue* queue) {
     const standalone::OwnedWork guard;
     manager().submission_refused(q, reason);
   };
-#endif
   const auto result = engine_hook::queue_submit::register_queue(queue, callbacks);
   const bool ready = result.protection_restored && (result.status == engine_hook::queue_submit::Status::registered ||
                                                     result.status == engine_hook::queue_submit::Status::already_registered);
@@ -132,7 +119,7 @@ bool init_queue(std::uint64_t key, ID3D12CommandQueue* queue) {
   return ready;
 }
 bool prepare(std::uint64_t key) {
-  NATIVE_OWNED_WORK;
+  const standalone::OwnedWork owned_work_guard;
   const std::lock_guard lock(runtime().mutex);
   auto* item = find(key);
   if (!item || item->status.failed)
@@ -188,7 +175,7 @@ void set_ground_speed(std::uint64_t key, float knots, bool valid) {
   }
 }
 void service() {
-  NATIVE_OWNED_WORK;
+  const standalone::OwnedWork owned_work_guard;
   const std::lock_guard lock(runtime().mutex);
   std::array<SceneCaptureManager::Frame, SceneCaptureManager::MaximumPackets> incoming{};
   const auto count = manager().poll_completed_frames(incoming.data(), incoming.size());
@@ -270,39 +257,6 @@ Snapshot snapshot(std::uint64_t key) {
   result.capture = manager().statistics();
   return result;
 }
-#ifndef TAXI_NATIVE_RUNTIME
-bool stamp(reshade::api::command_list* list, std::uint64_t key, DXGI_FORMAT format, UINT width, UINT height, DXGI_FORMAT depth_format) {
-  const std::lock_guard lock(runtime().mutex);
-  auto* item = find(key);
-  if (!item || !current_output(*item) || item->status.failed)
-    return false;
-  for (std::size_t i = 0; i < Formats.size(); ++i) {
-    if (Formats[i] != format)
-      continue;
-    for (std::size_t depth = 0; depth < DepthFormats.size(); ++depth) {
-      if (DepthFormats[depth] != depth_format)
-        continue;
-      const auto slot = i * DepthFormats.size() + depth;
-      if (!item->stamp_ready[slot]) {
-        ++item->status.state_skips;
-        item->status.message = "PFD depth/stencil pipeline format is unavailable.";
-        return false;
-      }
-      auto* native = reinterpret_cast<ID3D12GraphicsCommandList*>(list->get_native());
-      if (manager().register_consumer_recording(native) &&
-          pfd_adapter::record_stamp(list, item->stamps[slot], item->native, item->output.address(), width, height)) {
-        ++item->status.stamps;
-        return true;
-      }
-      ++item->status.state_skips;
-      return false;
-    }
-    ++item->status.state_skips;
-    return false;
-  }
-  return false;
-}
-#else
 bool stamp(ID3D12GraphicsCommandList* list,
            const PfdGraphicsState& state,
            std::uint64_t key,
@@ -333,5 +287,4 @@ bool stamp(ID3D12GraphicsCommandList* list,
   ++item->status.state_skips;
   return false;
 }
-#endif
 }  // namespace taxi_camera::scene_runtime

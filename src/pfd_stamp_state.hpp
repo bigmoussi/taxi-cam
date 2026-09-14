@@ -4,9 +4,6 @@
 #define NOMINMAX
 #endif
 #include <d3d12.h>
-#ifndef TAXI_NATIVE_RUNTIME
-#include <reshade_api.hpp>
-#endif
 
 #include <array>
 #include <cstdint>
@@ -24,12 +21,6 @@ struct PfdRootLayout {
   std::uint32_t count = 0;
   std::array<PfdRootParameter, 64> parameters{};
 };
-
-// Pinned ReShade 6.8 D3D12 init_pipeline_layout metadata only. Static sampler
-// metadata is appended by that implementation and is NOT a native root index.
-#ifndef TAXI_NATIVE_RUNTIME
-PfdRootLayout parse_pfd_root_layout(std::uint32_t count, const reshade::api::pipeline_layout_param* parameters) noexcept;
-#endif
 
 struct PfdRootValue {
   std::uint64_t known = 0;
@@ -74,8 +65,7 @@ class PfdGraphicsState {
   std::uint64_t generation() const noexcept { return generation_; }
   ID3D12RootSignature* root() const noexcept { return root_; }
   std::uint64_t layout_generation() const noexcept { return layout_generation_; }
-  // Direct native replay is deliberate: the stamp bypasses ReShade shadow
-  // state, so its public root setters may incorrectly optimize restoration out.
+  // Restore the exact observed native graphics bindings after the stamp.
   void restore(ID3D12GraphicsCommandList* native) const noexcept;
 
  private:

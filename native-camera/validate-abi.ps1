@@ -51,7 +51,7 @@ $result = [ordered]@{
     primitiveSignatures = $names
     negativeControl = $negative
     compiler = (& $Compiler --version | Select-Object -First 1)
-    limitation = 'Compile-only agreement for declared primitive/pointer calls; does not prove recovered signatures, private ABI safety, engine lifetime or thread phase. ReShade ABI gate remains separate and unchanged.'
+    limitation = 'Compile-only agreement for declared primitive/pointer calls; does not prove recovered signatures, private ABI safety, engine lifetime or thread phase.'
 }
 $result | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath (Join-Path $OutputDirectory 'result.json') -Encoding utf8
 Write-Output "Native call ABI gate passed: $($names.Count) primitive/pointer probes match; incompatible aggregate control differs. No engine calls."

@@ -35,7 +35,7 @@ function Restore-Transaction {
     Remove-Item -LiteralPath $statePath
     } catch {
         $rollbackError = $_.Exception.Message
-        $recovery = Join-Path ([IO.Path]::GetTempPath()) ('380-taxi-cam-recovery-' + [Guid]::NewGuid().ToString('N'))
+        $recovery = Join-Path ([IO.Path]::GetTempPath()) ('taxi-cam-recovery-' + [Guid]::NewGuid().ToString('N'))
         Copy-Item -LiteralPath $StateDirectory -Destination $recovery -Recurse
         $recoveryStatePath = Join-Path $recovery 'transaction.json'
         $recoveryState = Get-Content -Raw -LiteralPath $recoveryStatePath | ConvertFrom-Json
@@ -66,13 +66,13 @@ try {
     if ($UpdateFromPid) {
         $updater = Get-Process -Id $UpdateFromPid -ErrorAction SilentlyContinue
         if ($updater) {
-            if (-not [string]::Equals($updater.Path,(Join-Path $Destination '380-taxi-cam.exe'),[StringComparison]::OrdinalIgnoreCase)) { throw 'UPDATEFROMPID does not identify the installed companion.' }
+            if ($updater.Path -notin @((Join-Path $Destination 'taxi-cam.exe'),(Join-Path $Destination '380-taxi-cam.exe'))) { throw 'UPDATEFROMPID does not identify the installed companion.' }
             if (-not $updater.WaitForExit(30000)) { throw 'The companion is still exiting. Close it and retry Setup.' }
         }
     }
-    if (Get-Process -Name FlightSimulator2024 -ErrorAction SilentlyContinue) { throw 'Close MSFS 2024 before installing or uninstalling 380 Taxi Cam.' }
-    foreach ($process in @(Get-Process -Name 380-taxi-cam -ErrorAction SilentlyContinue)) {
-        if ([string]::Equals($process.Path,(Join-Path $Destination '380-taxi-cam.exe'),[StringComparison]::OrdinalIgnoreCase)) { throw 'Exit 380 Taxi Cam from its tray menu, then retry.' }
+    if (Get-Process -Name FlightSimulator2024 -ErrorAction SilentlyContinue) { throw 'Close MSFS 2024 before installing or uninstalling Taxi Cam.' }
+    foreach ($process in @(Get-Process -Name taxi-cam,380-taxi-cam -ErrorAction SilentlyContinue)) {
+        if ($process.Path -in @((Join-Path $Destination 'taxi-cam.exe'),(Join-Path $Destination '380-taxi-cam.exe'))) { throw 'Exit the taxi camera app from its tray menu, then retry.' }
     }
     if ($Mode -eq 'CheckClosed') { exit 0 }
     if ($Mode -eq 'Uninstall') {
@@ -84,9 +84,9 @@ try {
     if ([IO.Path]::GetFileName($ExeXml) -ine 'exe.xml') { throw 'Select the simulator launch configuration named exe.xml.' }
     $destFull = [IO.Path]::GetFullPath($Destination).TrimEnd('\')
     $payloadFull = (Resolve-Path -LiteralPath $PayloadDirectory).Path
-    $targets = @((Join-Path $destFull 'installation.json'), $ExeXml)
+    $targets = @((Join-Path $destFull 'installation.json'), (Join-Path $destFull '380-taxi-cam.exe'), $ExeXml)
     foreach ($file in Get-ChildItem -LiteralPath $payloadFull -File -Recurse) {
-        if ($file.Name -notin @('380-taxi-cam.exe','taxi-camera-bridge.dll','taxi-camera-mounts.cfg','THIRD_PARTY_NOTICES.txt')) { continue }
+        if ($file.Name -notin @('taxi-cam.exe','taxi-camera-bridge.dll','taxi-camera-mounts.cfg','THIRD_PARTY_NOTICES.txt')) { continue }
         $targets += Join-Path $destFull $file.FullName.Substring($payloadFull.Length + 1)
     }
     $legacy = Join-Path $SimulatorDirectory 'taxi-camera-native.addon64'

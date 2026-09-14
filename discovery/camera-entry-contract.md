@@ -314,4 +314,4 @@ These references use control-record/generation checks. Neither **E+80** nor the 
 - **GPU handoff:** conversion from an engine Bitmap_Z reference to a supported native resource, lifetime, format, resource states, fences and the point at which PFD sampling is safe.
 - **Failure semantics:** allocation failure, partial setup rollback, stale-key handling, scene transitions, device loss and build changes.
 
-The separate ReShade calibration probe demonstrates writes to the upper PFD region. It does not supply an engine camera view or resolve these remaining contracts.
+The separate calibration diagnostic demonstrates writes to the upper PFD region. It does not supply an engine camera view or resolve these remaining contracts.

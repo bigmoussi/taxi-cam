@@ -8,24 +8,25 @@
   #error BuildNumber is required
 #endif
 #ifndef OutputBase
-  #define OutputBase "380-taxi-cam-test-setup"
+  #define OutputBase "taxi-cam-test-setup"
 #endif
 #ifndef RuntimeScript
   #define RuntimeScript "runtime.ps1"
 #endif
 
 [Setup]
+; Keep the product ID and setup mutex stable across the application rename.
 #ifdef InstallerTest
 AppId=380TaxiCamIsolatedInstallerTest
 #else
 AppId={{C8581992-5605-46CA-AF6F-60E44477C023}
 #endif
-AppName=380 Taxi Cam
+AppName=Taxi Cam
 AppVersion={#AppVersion}
-AppVerName=380 Taxi Cam {#AppVersion} (build {#BuildNumber})
+AppVerName=Taxi Cam {#AppVersion} (build {#BuildNumber})
 VersionInfoVersion={#AppVersion}
-DefaultDirName={localappdata}\380 Taxi Cam\app
-DefaultGroupName=380 Taxi Cam
+DefaultDirName={localappdata}\Taxi Cam\app
+DefaultGroupName=Taxi Cam
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -38,7 +39,7 @@ SetupMutex=380TaxiCamInstaller
 OutputBaseFilename={#OutputBase}
 Compression=lzma2
 SolidCompression=yes
-UninstallDisplayIcon={app}\380-taxi-cam.exe
+UninstallDisplayIcon={app}\taxi-cam.exe
 #ifdef InstallerTest
 CreateUninstallRegKey=no
 UsePreviousAppDir=no
@@ -50,12 +51,15 @@ Source: "{#PayloadDir}\*"; DestDir: "{tmp}\payload"; Flags: dontcopy recursesubd
 Source: "{#RuntimeScript}"; DestDir: "{tmp}"; DestName: "runtime.ps1"; Flags: dontcopy
 
 #ifndef InstallerTest
+[InstallDelete]
+Type: files; Name: "{userprograms}\380 Taxi Cam.lnk"
+
 [Icons]
-Name: "{userprograms}\380 Taxi Cam"; Filename: "{app}\380-taxi-cam.exe"; WorkingDir: "{app}"
+Name: "{userprograms}\Taxi Cam"; Filename: "{app}\taxi-cam.exe"; WorkingDir: "{app}"
 #endif
 
 [UninstallDelete]
-Type: files; Name: "{app}\380-taxi-cam.exe"
+Type: files; Name: "{app}\taxi-cam.exe"
 Type: files; Name: "{app}\taxi-camera-bridge.dll"
 Type: files; Name: "{app}\THIRD_PARTY_NOTICES.txt"
 ; Calibration, installation record, user settings, logs and historical backups are retained.
@@ -98,11 +102,18 @@ end;
 
 procedure InitializeWizard;
 begin
+  { Registered installs retain their directory through the stable AppId.
+    Also discover the former default directory used by script installations. }
+  if (CompareText(WizardDirValue, ExpandConstant('{localappdata}\Taxi Cam\app')) = 0) and
+    (ExpandConstant('{param:DIR|}') = '') and
+    not FileExists(AddBackslash(WizardDirValue) + 'installation.json') and
+    FileExists(ExpandConstant('{localappdata}\380 Taxi Cam\app\installation.json')) then
+    WizardForm.DirEdit.Text := ExpandConstant('{localappdata}\380 Taxi Cam\app');
   SimulatorPage := CreateInputDirPage(wpSelectDir, 'Microsoft Flight Simulator 2024',
     'Select the simulator Content directory', 'Choose the directory containing FlightSimulator2024.exe.', False, '');
   SimulatorPage.Add('Simulator Content directory:');
   XmlPage := CreateInputFilePage(SimulatorPage.ID, 'Automatic startup', 'Select the simulator exe.xml',
-    'Setup preserves other startup entries and adds 380 Taxi Cam. A new exe.xml can be created at the selected path.');
+    'Setup preserves other startup entries and adds Taxi Cam. A new exe.xml can be created at the selected path.');
   XmlPage.Add('Simulator launch configuration:', 'XML files|*.xml|All files|*.*', '.xml');
   ExtractTemporaryFile('runtime.ps1');
 end;

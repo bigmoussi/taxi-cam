@@ -54,7 +54,7 @@ std::wstring make_cache() {
   wchar_t local[MAX_PATH]{};
   if (FAILED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, SHGFP_TYPE_CURRENT, local)))
     return {};
-  const std::wstring root = std::wstring(local) + L"\\380TaxiCam";
+  const std::wstring root = std::wstring(local) + L"\\Taxi Cam";
   CreateDirectoryW(root.c_str(), nullptr);
   const std::wstring updates = root + L"\\Updates";
   CreateDirectoryW(updates.c_str(), nullptr);

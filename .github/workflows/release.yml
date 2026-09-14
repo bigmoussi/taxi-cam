@@ -84,6 +84,9 @@ jobs:
             build/native/validation.json
             build/native/*.imports.txt
             build/native/native-dependencies.txt
+            build/installer/**/compiler.log
+            build/installer-tests/**/*.log
+            build/installer-tests/**/result.json
 
       - name: Publish release and release notes
         env:
