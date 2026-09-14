@@ -10,7 +10,6 @@ permissions:
 
 jobs:
   release:
-    if: github.ref == 'refs/heads/main'
     runs-on: windows-2025
     timeout-minutes: 45
     permissions:
@@ -89,6 +88,7 @@ jobs:
             build/installer-tests/**/result.json
 
       - name: Publish release and release notes
+        if: github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
