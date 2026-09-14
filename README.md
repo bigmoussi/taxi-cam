@@ -18,8 +18,6 @@ The installer places the EXE and bridge DLL together in `%LOCALAPPDATA%\Taxi Cam
 
 The installer adds automatic startup to `exe.xml` and creates a Start menu shortcut. It backs up the launch configuration and preserves other add-ons.
 
-Upgrading from **380 Taxi Cam**: download and run the new setup once. Setup reuses the existing installation directory and replaces the old startup entry. Saved profiles are imported into the new settings directory without deleting the originals or overwriting newer settings. The former updater may require this manual installation after the repository rename.
-
 Release files contain no loose PowerShell scripts, documentation folders or license folders. A single `THIRD_PARTY_NOTICES.txt` retains the notices required by the statically linked runtime. The optional ZIP contains the runtime files only; use setup to configure startup and uninstallation.
 
 ## About the application
