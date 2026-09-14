@@ -140,7 +140,11 @@ The bridge writes a status snapshot to the companion and appends metadata to:
 %LOCALAPPDATA%\380 Taxi Cam\bridge.log
 ~~~
 
-Control-transition logs include companion connectivity, cached-read contention count, requested scene state, TAXI validity/grace expiry, scene stop reason and recovery attempts. This distinguishes a control disconnect from capture recreation without relying on a five-second snapshot.
+Control-transition logs include companion connectivity, cached-read contention count, requested scene state, TAXI validity/grace expiry, scene stop reason and recovery attempts. Output changes and readiness-wait episodes are also logged immediately when observed by the control loop. Camera entry IDs, per-view readiness, draw counts, unknown command lists and invalid recording counts distinguish a control disconnect, temporary pending view and GPU capture-state loss.
+When an already resized, scheduled camera entry briefly reports a stable pending ready byte, the observer waits up to one second without recreating the pair. It closes only freshly validated ready views and makes no pose, resize or activation calls against the pending view. The last completed image remains subject to the existing resource-generation checks. A persistent pending state uses bounded scene recovery; changed identities, invalid reads, explicit OFF and resource destruction retain their existing rejection paths.
+
+OBS Game Capture's [D3D11On12 capture path](https://github.com/obsproject/obs-studio/blob/master/plugins/win-capture/graphics-hook/d3d12-capture.cpp) copies a wrapped backbuffer on an application queue. A null-buffer [SetPredication call](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12graphicscommandlist-setpredication) disables conditional execution and does not invalidate capture evidence. A non-null predicate still invalidates injection for the entire recording, including after a later null call, until a successful native Reset. Hardware and WARP validation exercise the D3D11On12 copy sequence followed by fresh camera capture and both PFD pixel checks; this is separate from live OBS/MSFS validation.
+
 
 Use the counters in pipeline order:
 

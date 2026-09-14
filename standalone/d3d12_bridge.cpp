@@ -748,6 +748,15 @@ struct Unsupported {
     boundary::invalidate_recording(l.native, l.id);
   }
 };
+struct Predication {
+  static void apply(List& list, ID3D12Resource* buffer, UINT64, D3D12_PREDICATION_OP) {
+    // NULL disables conditional execution; D3D11On12 emits it before an
+    // ordinary capture copy. It neither executes work nor changes resource
+    // states. Never revive a recording invalidated by an earlier real predicate.
+    if (buffer)
+      Unsupported::apply(list);
+  }
+};
 // Every signature is derived from the pinned Windows COM declaration.
 // These hooks observe, forward exactly once, and never alter application inputs.
 template <unsigned Slot, class Signature, class Action>
@@ -786,7 +795,7 @@ bool hook_state(ID3D12GraphicsCommandList* list) {
   ok &= STATE(46, OMSetRenderTargets, Targets)::install(list);
   ok &= STATE(27, ExecuteBundle, Unsupported)::install(list);
   ok &= STATE(59, ExecuteIndirect, Unsupported)::install(list);
-  ok &= STATE(55, SetPredication, Unsupported)::install(list);
+  ok &= STATE(55, SetPredication, Predication)::install(list);
   ok &= STATE(51, DiscardResource, Unsupported)::install(list);
   return ok;
 }

@@ -11,6 +11,7 @@
 #include "profile.hpp"
 #include "render_schedule.hpp"
 #include "source_view.hpp"
+#include "view_readiness_wait.hpp"
 #include "view_resize.hpp"
 
 #include <algorithm>
@@ -65,6 +66,7 @@ struct Runtime {
   std::array<ec::EntryId, 2> resized_ids{};
   std::array<ViewDimensions, 2> resized_dimensions{};
   ViewResizeWarmup resize_warmup;
+  ViewReadinessWait view_wait;
   ULONGLONG last_inspection = 0;
   std::uint64_t manager = 0;
   std::uint64_t control = 0;
@@ -292,6 +294,7 @@ void inspect_pair(Runtime& runtime,
     const auto view = timed(runtime, i == 0 ? ProbeStage::first_view : ProbeStage::second_view, [&] {
       return inspected(runtime, [&] { return ec::inspect_owned_view(reader, entries.entries[i].address, ids[i], pool); });
     });
+    views[i] = view;
     report.ready[i] = view.complete && view.ready;
     if (!report.ready[i]) {
       refuse((runtime.inspection_changed && view.status == ec::OwnedViewStatus::not_inspected) ||
@@ -313,8 +316,6 @@ void inspect_pair(Runtime& runtime,
         report.ready[i] = report.resource_present[i] = false;
         refuse(SceneStopReason::resolution_changed, "Owned-view resolution changed; retiring the pair before a guarded resize retry.");
       }
-      if (report.ready[i])
-        views[i] = view;
     }
   }
   if (report.ready[0] && report.ready[1])
@@ -634,6 +635,11 @@ void observer(void* manager) noexcept {
         std::array<ec::OwnedViewSnapshot, 2> views{};
         if (!closed_warmup)
           inspect_pair(runtime, pair.owned_ids, pool, report, views);
+        const bool wait_for_views = runtime.view_wait.observe(now, pair,
+                                                              !runtime.resize_warmup.pending() && runtime.scheduled_ids == pair.owned_ids &&
+                                                                  runtime.resized_ids == pair.owned_ids &&
+                                                                  runtime.inspection_stop == SceneStopReason::inspection_unavailable,
+                                                              views);
         if (closed_warmup) {
           // No publication, resize or activation yet. The tail-called original
           // initializes its cache while both verified new gates remain closed.
@@ -683,6 +689,22 @@ void observer(void* manager) noexcept {
               runtime.stage_error = "Aircraft body pose became unavailable; the owned camera gates were closed and removal requested.";
             }
           }
+        } else if (wait_for_views) {
+          // A pending entry exposes no validated view/node/camera pointers.
+          // Only close the other freshly verified ready view, and never issue
+          // activation/pose/resize calls against the pending one. Completed GPU
+          // images retain the normal handoff resource-generation guards.
+          timed(runtime, ProbeStage::activation, [&] {
+            for (unsigned i = 0; i < pair.owned_ids.size(); ++i)
+              if (report.ready[i]) {
+                if (runtime.gates[i] || (report.flags[i][0] & 1u) == 0)
+                  function<void (*)(void*, std::uint64_t, bool)>(runtime, 17641776)(reinterpret_cast<void*>(runtime.manager),
+                                                                                    pair.owned_ids[i], false);
+                runtime.gates[i] = false;
+              }
+          });
+          runtime.schedule = next_schedule;
+          report.view_waiting = true;
         } else {
           record_stop(runtime,
                       runtime.inspection_stop == SceneStopReason::none ? SceneStopReason::identity_refused : runtime.inspection_stop,
@@ -701,6 +723,7 @@ void observer(void* manager) noexcept {
         runtime.resized_ids = {};
         runtime.resized_dimensions = {};
         runtime.resize_warmup.clear();
+        runtime.view_wait.clear();
         runtime.gates = {};
         runtime.schedule.reset();
       }
@@ -714,6 +737,8 @@ void observer(void* manager) noexcept {
       report.pose_captured = runtime.pose_captured;
       if (body_pose_failed || waiting_for_body)
         report.message = runtime.message.empty() ? runtime.stage_error : runtime.message;
+      else if (report.view_waiting)
+        report.message = "Owned view temporarily pending; waiting up to one second while retaining the last valid camera image.";
       else if (pair.state == ec::State::active && runtime.resize_warmup.pending())
         report.message = "New scene views are closed for their initial engine update; final resizing is pending.";
       else if (pair.state == ec::State::active)
@@ -734,6 +759,7 @@ void observer(void* manager) noexcept {
     // duration is published after this operation has itself been timed.
     report.inspection_count = runtime.inspection_count;
     report.created_total = runtime.created_total;
+    report.view_wait_count = runtime.view_wait.episodes();
     report.observer_last_ms = runtime.observer_last_ms;
     report.observer_max_ms = runtime.observer_max_ms;
     report.gates = runtime.gates;

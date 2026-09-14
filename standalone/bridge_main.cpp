@@ -65,7 +65,8 @@ DWORD run_impl() {
   TaxiButtonIntent intent;
   DisplayExposureController exposure;
   CaptureProgress progress;
-  bool requested = false, failed = false;
+  bool requested = false, failed = false, last_output = false;
+  std::uint64_t last_view_wait_count = 0;
   std::uint64_t next_telemetry{}, next_discovery{}, next_recovery{}, next_log{}, route_request{}, last_frames{};
   unsigned rate{}, feeds{};
   win::CompanionControl control;
@@ -147,7 +148,8 @@ DWORD run_impl() {
     const auto output = scene_runtime::snapshot(key);
     if (now >= next_recovery) {
       const bool eligible = (active || test_scene) && !failed && !output.failed && scene.pair.state == engine_camera::State::active &&
-                            scene.requested_feeds == 2 && !scene.pose_waiting && native_camera::sample_body_pose(now).valid;
+                            scene.requested_feeds == 2 && !scene.pose_waiting && !scene.view_waiting &&
+                            native_camera::sample_body_pose(now).valid;
       if (eligible && output.frames != last_frames)
         native_camera::note_scene_capture_progress(now);
       last_frames = output.frames;
@@ -196,21 +198,32 @@ DWORD run_impl() {
     const bool changed = !logged || connected != last_connected || requested != last_requested ||
                          status.taxi_mask != last_logged.taxi_mask || status.left_id != last_logged.left_id ||
                          status.right_id != last_logged.right_id || status.speed_inhibited != last_logged.speed_inhibited ||
-                         scene.stop_sequence != last_stop_sequence;
+                         scene.stop_sequence != last_stop_sequence || output.output != last_output ||
+                         scene.view_wait_count != last_view_wait_count;
     if (changed || now >= next_log) {
-      char detail[1024];
+      char detail[1536];
       std::snprintf(detail, sizeof(detail),
                     "connected=%u requested=%u ipc_busy=%llu buttons_valid=%u held=%u expired=%u output=%u stop_seq=%llu stop=%s "
-                    "retry=%u pending=%u pose_wait=%u tail=%s | %.256s",
+                    "retry=%u pending=%u pose_wait=%u view_wait=%u waits=%llu ready=%u/%u entries=%llu/%llu tail=%s "
+                    "draws=%llu unknown_lists=%llu invalid_recordings=%llu scoped_invalidations=%llu | %.256s",
                     connected, requested, static_cast<unsigned long long>(control.busy_reads()), buttons.valid, desired.held,
                     desired.timed_out, output.output, static_cast<unsigned long long>(scene.stop_sequence),
                     native_camera::scene_stop_reason_name(scene.stop_reason), scene.recovery_attempts, scene.recovery_pending,
-                    scene.pose_waiting, output.capture.tail_status, scene.stop_detail.c_str());
+                    scene.pose_waiting, scene.view_waiting, static_cast<unsigned long long>(scene.view_wait_count), scene.ready[0],
+                    scene.ready[1], static_cast<unsigned long long>(scene.pair.owned_ids[0]),
+                    static_cast<unsigned long long>(scene.pair.owned_ids[1]), output.capture.tail_status,
+                    static_cast<unsigned long long>(output.capture.source_draws),
+                    static_cast<unsigned long long>(output.capture.unknown_submitted_lists),
+                    static_cast<unsigned long long>(output.capture.invalid_source_recordings),
+                    static_cast<unsigned long long>(output.capture.scoped_source_invalidations),
+                    scene.stop_reason == native_camera::SceneStopReason::none ? "" : scene.stop_detail.c_str());
       log_status(status, detail);
       last_logged = status;
       last_connected = connected;
       last_requested = requested;
       last_stop_sequence = scene.stop_sequence;
+      last_output = output.output;
+      last_view_wait_count = scene.view_wait_count;
       logged = true;
       next_log = now + 5000;
     }

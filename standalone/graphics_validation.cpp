@@ -5,6 +5,7 @@
 #include "../validation/compositor_main.cpp"
 #undef wmain
 #include <tlhelp32.h>
+#include <d3d11on12.h>
 #include "d3d12_bridge.hpp"
 #include "native_hooks.hpp"
 namespace {
@@ -22,6 +23,42 @@ void ensure_no_reshade() {
     } while (Module32NextW(snapshot, &module));
   CloseHandle(snapshot);
 }
+void copy_with_11on12(ID3D12Device* device, ID3D12CommandQueue* queue) {
+  const auto module = LoadLibraryExW(L"d3d11.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+  require(module != nullptr, "Load system D3D11 for capture interop regression");
+  const auto create = reinterpret_cast<PFN_D3D11ON12_CREATE_DEVICE>(GetProcAddress(module, "D3D11On12CreateDevice"));
+  require(create != nullptr, "D3D11On12CreateDevice");
+  Reference<ID3D11Device> device11;
+  Reference<ID3D11DeviceContext> context;
+  IUnknown* queues[]{queue};
+  check(create(device, 0, nullptr, 0, queues, 1, 0, device11.put(), context.put(), nullptr), "Create capture interop device");
+  Reference<ID3D11On12Device> interop;
+  check(device11->QueryInterface(IID_PPV_ARGS(interop.put())), "Interop device");
+  Reference<ID3D12Resource> source;
+  auto desc = texture_description(1920, 1080, DXGI_FORMAT_R8G8B8A8_UNORM);
+  create_texture(device, desc, source.put());
+  Reference<ID3D11Resource> wrapped;
+  D3D11_RESOURCE_FLAGS flags{};
+  check(interop->CreateWrappedResource(source.get(), &flags, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_RENDER_TARGET,
+                                       IID_PPV_ARGS(wrapped.put())),
+        "Wrap unrelated backbuffer");
+  D3D11_TEXTURE2D_DESC output{};
+  output.Width = 1920;
+  output.Height = 1080;
+  output.MipLevels = output.ArraySize = output.SampleDesc.Count = 1;
+  output.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+  output.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+  output.MiscFlags = D3D11_RESOURCE_MISC_SHARED;
+  Reference<ID3D11Texture2D> destination;
+  check(device11->CreateTexture2D(&output, nullptr, destination.put()), "Capture shared texture");
+  auto* input = wrapped.get();
+  interop->AcquireWrappedResources(&input, 1);
+  context->CopyResource(destination.get(), input);
+  interop->ReleaseWrappedResources(&input, 1);
+  context->Flush();
+  require(taxi_camera::drain_copy_queue(queue, device), "Interop capture completion");
+}
+
 void native_case(bool warp) {
   Reference<ID3D12Debug> debug;
   const bool debug_enabled = SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(debug.put())));
@@ -118,6 +155,25 @@ void native_case(bool warp) {
               static_cast<unsigned long long>(capture.frames), static_cast<unsigned long long>(capture.capture.source_draws),
               capture.capture.tail_status);
   require(capture.output && capture.frames, "Actual native draw -> queue -> capture -> composition");
+  // OBS Game Capture uses D3D11On12 to copy the swap-chain backbuffer on the
+  // application's queue. Exercise that API sequence without launching OBS.
+  const auto before_interop = runtime::manager().statistics();
+  copy_with_11on12(device.get(), queue.get());
+  const auto after_interop = runtime::manager().statistics();
+  std::printf("interop invalid recordings: %llu -> %llu; unknown lists: %llu -> %llu\n", before_interop.invalid_source_recordings,
+              after_interop.invalid_source_recordings, before_interop.unknown_submitted_lists, after_interop.unknown_submitted_lists);
+  Sleep(20);  // Next permitted 60-Hz capture opportunity.
+  const auto frames_before_interop = runtime::snapshot(key).frames;
+  generator.record(list.get(), rtvs[0], 768, 255, false, 0, 0);
+  generator.record(list.get(), rtvs[1], 768, 504, false, 0, 1);
+  submit();
+  reset();
+  const auto interop_deadline = GetTickCount64() + 1000;
+  while (runtime::snapshot(key).frames == frames_before_interop && GetTickCount64() < interop_deadline) {
+    runtime::service();
+    Sleep(1);
+  }
+  require(runtime::snapshot(key).frames > frames_before_interop, "Camera capture survives unrelated D3D11On12 Game Capture copy");
   win::set_target_mask(3);
   generator.record(list.get(), rtvs[2], 768, 1024, false, 0, 0);
   generator.record(list.get(), rtvs[3], 768, 1024, false, 0, 0);
@@ -183,6 +239,31 @@ void native_case(bool warp) {
     const D3D12_RANGE none{0, 0};
     readbacks[side]->Unmap(0, &none);
   }
+  // A real predicate must still refuse injection. Disabling it later cannot
+  // revive this recording; only the next successful native Reset can do that.
+  Reference<ID3D12Resource> predicate;
+  auto predicate_desc = bd;
+  predicate_desc.Width = sizeof(std::uint64_t);
+  const auto upload_heap = heap_properties(D3D12_HEAP_TYPE_UPLOAD);
+  check(device->CreateCommittedResource(&upload_heap, D3D12_HEAP_FLAG_NONE, &predicate_desc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
+                                        IID_PPV_ARGS(predicate.put())),
+        "Predicate buffer");
+  void* predicate_bytes = nullptr;
+  const D3D12_RANGE no_reads{0, 0};
+  check(predicate->Map(0, &no_reads, &predicate_bytes), "Initialize predicate");
+  std::memset(predicate_bytes, 0, sizeof(std::uint64_t));
+  predicate->Unmap(0, nullptr);
+  const auto before_predicate = runtime::snapshot(key).stamps;
+  list->SetPredication(predicate.get(), 0, D3D12_PREDICATION_OP_NOT_EQUAL_ZERO);
+  generator.record(list.get(), rtvs[2], 768, 1024, false, 0, 0);
+  require(runtime::snapshot(key).stamps == before_predicate, "Real predication refuses PFD injection");
+  list->SetPredication(nullptr, 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
+  generator.record(list.get(), rtvs[2], 768, 1024, false, 0, 0);
+  require(runtime::snapshot(key).stamps == before_predicate, "Disable predication cannot revive invalid recording");
+  submit();
+  reset();
+  generator.record(list.get(), rtvs[2], 768, 1024, false, 0, 0);
+  require(runtime::snapshot(key).stamps == before_predicate + 1, "Fresh Reset restores PFD injection");
   win::set_target_mask(0);
   const auto stamps = runtime::snapshot(key).stamps;
   generator.record(list.get(), rtvs[2], 768, 1024, false, 0, 0);
@@ -210,7 +291,7 @@ void native_case(bool warp) {
   require(errors == 0, "D3D12 validation errors");
   std::printf(
       "PASS native %s: two GPU feeds, two PFDs, pre-existing root/list/queue, partial state restoration, lower trim, descriptor copies, "
-      "OFF; %llu pixels; debug=%d errors=%llu; ReShade absent\n",
+      "OFF, D3D11On12 capture coexistence, predicate guards; %llu pixels; debug=%d errors=%llu; ReShade absent\n",
       warp ? "WARP" : "hardware", static_cast<unsigned long long>(pixels), debug_enabled, static_cast<unsigned long long>(errors));
 }
 }  // namespace

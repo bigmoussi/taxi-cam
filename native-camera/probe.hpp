@@ -70,6 +70,8 @@ struct ProbeSnapshot {
   std::array<std::array<std::uint64_t, 2>, 2> flags{};
   engine_camera::Snapshot pair{};
   bool pose_waiting = false;
+  bool view_waiting = false;
+  std::uint64_t view_wait_count = 0;
   bool recovery_pending = false;
   unsigned recovery_attempts = 0;
   std::uint64_t stop_sequence = 0;

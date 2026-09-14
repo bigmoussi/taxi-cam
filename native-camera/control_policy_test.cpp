@@ -1,12 +1,14 @@
 #include "../src/capture_progress.hpp"
 #include "../src/scene_source_state.hpp"
 #include "taxi_speed_cutoff.hpp"
+#include "view_readiness_wait_test.hpp"
 
 #include <cassert>
 #include <cstdio>
 #include <limits>
 
 int main() {
+  test_view_readiness_wait();
   using taxi_camera::native_camera::TaxiSpeedCutoff;
   TaxiSpeedCutoff cutoff;
   assert(cutoff.update(100, true, 60.0, true, 3, 100) == 0 && !cutoff.inhibited());
