@@ -1,30 +1,48 @@
-# Aircraft adapters
+# Aircraft integration
 
-The native companion separates Windows UI and saved settings from the camera renderer and aircraft controls. Version 0.8.0 ships one adapter: **FlyByWire A380X**. A350 support is not implemented.
+380 Taxi Cam uses an aircraft profile to connect cockpit controls, camera geometry and display layout. The active profile is **FlyByWire A380X**, defined in [profiles/catalog.hpp](../profiles/catalog.hpp).
 
-`profiles/catalog.hpp` is the adapter catalog. The A380 entry supplies its stable profile key, display layout kind, actual TAXI-light Lvars, push events, material-label hints, calibrated mounts and pane dimensions. The telemetry provider and camera defaults consume this catalog. Settings are saved under the profile key; resource IDs and diagnostic activation never persist.
+## A380 controls
 
-The native engine contract is independent of aircraft profiles. A profile cannot supply process addresses, machine code or unchecked hooks. MSFS build guards, resource lifetimes, queue synchronization and scene ownership remain shared.
+The bridge reads TAXI-light state through SimConnect. Automatic speed cutoff uses the corresponding push event and waits for the light to report OFF.
 
-## Contracts for another aircraft
+| Side | State variable | Push event |
+| --- | --- | --- |
+| Left | `L:A32NX_FCU_EFIS_L_TAXI_LIGHT_ON` | `A32NX.FCU_EFIS_L_TAXI_PUSH` |
+| Right | `L:A32NX_FCU_EFIS_R_TAXI_LIGHT_ON` | `A32NX.FCU_EFIS_R_TAXI_PUSH` |
 
-| Adapter responsibility | Required evidence |
+The profile key is `fbw-a380x` and its numeric ID is `1`. Settings use that key as the INI filename.
+
+## Display and camera geometry
+
+The A380 destination is a **768 × 1024 RGBA8 texture with five mips**. The camera image covers the upper 763 rows and preserves the lower 261 rows. Nose and tail scenes render at 768 × 255 and 768 × 504 respectively.
+
+The profile supplies two body-relative mounts, each containing right/up/forward position, pitch, yaw and field of view. Exact defaults and limits are in [Camera mounts](runtime-reference.md#camera-mounts).
+
+`SCREEN_DU_PFDL` and `SCREEN_DU_PFDR` are material-name hints in the catalog. Native PFD detection uses texture dimensions, format and draw activity. Initial side assignment uses the higher resource ID for left, and the UI allows manual correction.
+
+## Shared components and aircraft-specific code
+
+| Shared across integrations | Specific to the aircraft |
 | --- | --- |
-| Aircraft identity | A reliable installed-aircraft/version match and explicit handling of aircraft changes |
-| Controls | Light/state variables, input events, left/right mapping and acknowledgement of automatic OFF |
-| Display identification | Verified labels or another demonstrated identity strategy; transient IDs are insufficient |
-| Display layout | Texture format, dimensions, mips, pane placement, reference guides and areas to preserve |
-| Camera geometry | Body-relative datum, transforms, lenses and exterior-model availability |
-| Operating policy | Speed cutoff, power/activation conditions and telemetry freshness |
+| Tray app and settings transport | Cockpit state variables and input events |
+| MSFS camera function validation | Camera mounts and exterior-model framing |
+| Owned camera lifecycle | Display texture identification |
+| GPU capture and queue ordering | Pane layout, guides and preserved display area |
+| Exposure controller | Operating rules, including speed cutoff |
 
-The current GPU presentation, native texture observation and PFD detector intentionally implement the A380 layout: 768 × 1024, five mips, RGBA8 destination, 768 × 255 nose and 768 × 504 tail. The catalog records that contract; adding an entry alone does not implement a different display. Extend the layout/identification adapter and its pixel tests together.
+The current catalog contains one profile, and `profiles::active()` returns A380. Display filtering and composition also contain A380-specific dimensions. There is no automatic aircraft selector or dynamic profile plug-in loader.
 
-The initial A380 detector uses the previously tested high-activity pair ordering. The material strings are hints, not proof that every runtime resource has a label. Surviving target identity retains its side. Losing both established textures can require explicit reassignment; the UI provides per-side selection, calibration and swap.
+## Implementing another aircraft
 
-## Adding the requested A350
+An additional integration must define the following contracts:
 
-Inspect its actual display layers, control signals/events and exterior model. Implement and validate its identity and layout adapter, add a catalog entry and give it an independent settings file. Verify camera perspectives, both buttons, OFF feedback, speed policy, aircraft reload, time-of-day changes and lost telemetry. Measure completed frames and simulator frame-time at the actual pane sizes.
+1. **Identity:** determine which aircraft/version is loaded and handle aircraft changes.
+2. **Controls:** map left/right state, activation events and OFF acknowledgement.
+3. **Display:** identify the correct texture and layer, including format, dimensions and preserved regions.
+4. **Geometry:** establish body-relative camera positions, direction, field of view and exterior-model visibility.
+5. **Policy:** define speed, power and telemetry conditions for camera use.
 
-No A350 Lvar, material name, input event or mount transform is assumed here. The shared rendering and native camera lifecycle can be reused once those contracts are demonstrated.
+Implement those contracts in the profile and the relevant display/control code. Validate both sides, camera framing, display restoration, aircraft reload and operating limits. A new catalog entry alone does not implement a new aircraft.
 
-See the [working architecture](architecture.md) for the shared rendering and lifecycle contracts, and the [runtime reference](runtime-reference.md) for current profile values and settings.
+The process and rendering interfaces are explained in [Architecture](architecture.md).
