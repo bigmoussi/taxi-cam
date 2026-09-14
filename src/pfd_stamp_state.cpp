@@ -5,6 +5,7 @@
 
 namespace taxi_camera {
 namespace {
+#ifndef TAXI_NATIVE_RUNTIME
 bool descriptor_kind(reshade::api::descriptor_type type, PfdRootKind& kind) noexcept {
   using Type = reshade::api::descriptor_type;
   switch (type) {
@@ -21,11 +22,13 @@ bool descriptor_kind(reshade::api::descriptor_type type, PfdRootKind& kind) noex
       return false;
   }
 }
+#endif
 std::uint64_t mask(UINT count) noexcept {
   return count == 64 ? UINT64_MAX : ((std::uint64_t{1} << count) - 1);
 }
 }  // namespace
 
+#ifndef TAXI_NATIVE_RUNTIME
 PfdRootLayout parse_pfd_root_layout(std::uint32_t count, const reshade::api::pipeline_layout_param* params) noexcept {
   PfdRootLayout result;
   if (count > 65 || (count && !params))
@@ -90,6 +93,7 @@ PfdRootLayout parse_pfd_root_layout(std::uint32_t count, const reshade::api::pip
   return result;
 }
 
+#endif
 void PfdGraphicsState::reset(std::uint64_t generation, bool native_observations) noexcept {
   *this = PfdGraphicsState{};
   generation_ = generation;
@@ -101,6 +105,7 @@ void PfdGraphicsState::bind_root(ID3D12RootSignature* root,
                                  bool exact_native_change) noexcept {
   if (root_ == root && layout_generation_ == generation && layout_.valid && layout.valid)
     return;
+  observed_arguments_ = false;
   root_ = root;
   layout_generation_ = generation;
   layout_ = layout;
@@ -139,7 +144,25 @@ void PfdGraphicsState::bind_root(ID3D12RootSignature* root,
     }
   }
 }
+void PfdGraphicsState::bind_observed_root(ID3D12RootSignature* root, std::uint64_t generation) noexcept {
+  if (observed_arguments_ && root_ == root && layout_generation_ == generation)
+    return;
+  bind_root(root, generation, {}, true);
+  observed_arguments_ = true;
+  observed_word_count_ = 0;
+  observed_word_keys_ = {};
+  // A list first encountered mid-recording is never admitted here. An observed
+  // Reset or creation establishes the initial undefined root argument state.
+  layout_.valid = observed_ && root && generation;
+}
 bool PfdGraphicsState::parameter(UINT index, PfdRootKind kind) noexcept {
+  if (observed_arguments_ && layout_.valid && index < 64) {
+    auto& param = layout_.parameters[index];
+    if (!param.count) {
+      param = {kind, 1};
+      layout_.count = std::max(layout_.count, index + 1);
+    }
+  }
   if (!layout_.valid || index >= layout_.count || layout_.parameters[index].kind != kind) {
     invalidate("root_parameter_kind_or_index");
     return false;
@@ -149,6 +172,29 @@ bool PfdGraphicsState::parameter(UINT index, PfdRootKind kind) noexcept {
 void PfdGraphicsState::constants(UINT index, UINT first, UINT count, const void* data) noexcept {
   if (!parameter(index, PfdRootKind::constants))
     return;
+  if (observed_arguments_) {
+    if (!data || !count || first >= 64 || count > 64 - first) {
+      invalidate("observed_root_constant_bounds");
+      return;
+    }
+    const auto* words = static_cast<const std::uint32_t*>(data);
+    for (UINT n = 0; n < count; ++n) {
+      const auto key = static_cast<std::uint16_t>(index * 64 + first + n);
+      UINT slot = 0;
+      while (slot < observed_word_count_ && observed_word_keys_[slot] != key)
+        ++slot;
+      if (slot == 64) {
+        invalidate("observed_root_constant_capacity");
+        return;
+      }
+      if (slot == observed_word_count_) {
+        observed_word_keys_[slot] = key;
+        ++observed_word_count_;
+      }
+      std::memcpy(&constants_[slot], words + n, sizeof(std::uint32_t));
+    }
+    return;
+  }
   if (!data || !count || first > layout_.parameters[index].count || count > layout_.parameters[index].count - first) {
     invalidate("root_constant_bounds");
     return;
@@ -254,6 +300,8 @@ const char* PfdGraphicsState::incomplete_reason() const noexcept {
     return "viewport_missing";
   if (!scissor_count_)
     return "scissor_missing";
+  if (observed_arguments_)
+    return nullptr;
   for (UINT n = 0; n < layout_.count; ++n)
     if (values_[n].known != mask(layout_.parameters[n].count)) {
       if (layout_.parameters[n].kind == PfdRootKind::table && undefined_tables_[n])
@@ -283,7 +331,12 @@ UINT PfdGraphicsState::undefined_table_count() const noexcept {
 void PfdGraphicsState::restore(ID3D12GraphicsCommandList* list) const noexcept {
   list->SetPipelineState(pipeline_);
   list->SetGraphicsRootSignature(root_);
+  if (observed_arguments_)
+    for (UINT n = 0; n < observed_word_count_; ++n)
+      list->SetGraphicsRoot32BitConstant(observed_word_keys_[n] / 64, constants_[n], observed_word_keys_[n] % 64);
   for (UINT n = 0; n < layout_.count; ++n) {
+    if (observed_arguments_ && (!layout_.parameters[n].count || layout_.parameters[n].kind == PfdRootKind::constants || !values_[n].known))
+      continue;
     const auto& value = values_[n];
     switch (layout_.parameters[n].kind) {
       case PfdRootKind::constants:

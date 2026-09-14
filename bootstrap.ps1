@@ -1,8 +1,9 @@
 [CmdletBinding()]
-param()
+param([switch]$LegacyReShade)
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+if (-not $LegacyReShade) { & (Join-Path $PSScriptRoot 'bootstrap-native.ps1'); return }
 $dependencyRoot = Join-Path $PSScriptRoot 'build/deps'
 $dependencies = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'dependencies.json') | ConvertFrom-Json
 New-Item -ItemType Directory -Path $dependencyRoot -Force | Out-Null

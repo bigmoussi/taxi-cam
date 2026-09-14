@@ -355,6 +355,8 @@ void STDMETHODCALLTYPE begin(ID3D12GraphicsCommandList4* list,
       value.suspended = (flags & D3D12_RENDER_PASS_FLAG_SUSPENDING_PASS) != 0;
     }
   }
+  if (identity.generation && callbacks.pass_targets)
+    callbacks.pass_targets(callbacks.context, list, identity.generation, count, targets, depth);
   const auto after_begin_state = lookup(list);
   notify_invalidation(list, identity.generation,
                       InvalidationPassBegin | scope_invalidation(identity) |
@@ -378,6 +380,8 @@ void end_impl(ID3D12GraphicsCommandList4* list, End original) noexcept {
   if (!identity.active || identity.suspended || identity.invalid || !enabled.load(std::memory_order_acquire))
     notify_invalidation(list, identity.generation, InvalidationPassState | scope_invalidation(identity));
   original(list);
+  if (identity.generation && callbacks.pass_ended)
+    callbacks.pass_ended(callbacks.context, list, identity.generation);
   // End access can discard/resolve; no image is copied here and no RTV binding
   // is presumed to survive. Only later actual transitions prove layout/state.
   if (identity.generation) {
@@ -618,7 +622,7 @@ bool same_callbacks(const Callbacks& a, const Callbacks& b) noexcept {
   return a.context == b.context && a.before_legacy == b.before_legacy && a.before_enhanced == b.before_enhanced &&
          a.observe_legacy == b.observe_legacy && a.observe_enhanced == b.observe_enhanced &&
          a.after_copy_resource == b.after_copy_resource && a.after_copy_texture == b.after_copy_texture && a.after_draw == b.after_draw &&
-         a.recording_invalidated == b.recording_invalidated;
+         a.recording_invalidated == b.recording_invalidated && a.pass_targets == b.pass_targets && a.pass_ended == b.pass_ended;
 }
 bool install_active_end(ID3D12GraphicsCommandList4* list) noexcept {
   {

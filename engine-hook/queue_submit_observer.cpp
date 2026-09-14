@@ -24,6 +24,8 @@ struct QueueState {
 SRWLOCK control_lock = SRWLOCK_INIT;
 std::array<QueueState, kMaximumQueues> queues;
 std::atomic<Execute> original{nullptr};
+std::atomic<UnknownQueueObserver> discover_queue{nullptr};
+thread_local bool discovering_queue = false;
 void** saved_slot = nullptr;
 void** pending_slot = nullptr;
 DWORD pending_protection = 0;
@@ -137,6 +139,14 @@ void STDMETHODCALLTYPE submit(ID3D12CommandQueue* queue, UINT count, ID3D12Comma
   // Published before the slot exchange and immutable after a successful install.
   // A valid call through this wrapper always has an original to forward to.
   auto* entry = find_queue(queue);
+  if (!entry && !inside_wrapper && !discovering_queue) {
+    if (const auto discover = discover_queue.load(std::memory_order_acquire)) {
+      discovering_queue = true;
+      discover(queue);
+      discovering_queue = false;
+      entry = find_queue(queue);
+    }
+  }
   if (inside_wrapper) {
     nested_submission = true;
     forward(queue, count, lists);
@@ -201,6 +211,13 @@ bool same_callbacks(const Callbacks& left, const Callbacks& right) noexcept {
 }
 
 }  // namespace
+
+bool set_unknown_queue_observer(UnknownQueueObserver observer) noexcept {
+  if (!observer)
+    return false;
+  auto expected = static_cast<UnknownQueueObserver>(nullptr);
+  return discover_queue.compare_exchange_strong(expected, observer) || expected == observer;
+}
 
 Result register_queue(ID3D12CommandQueue* queue, const Callbacks& callbacks) noexcept {
   if (inside_wrapper)

@@ -1,11 +1,17 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [string]$SimulatorDirectory
+    [string]$SimulatorDirectory,
+    [string]$ExeXml,
+    [switch]$LegacyReShade
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+if (-not $LegacyReShade) {
+    & (Join-Path $PSScriptRoot 'install-native.ps1') -SimulatorDirectory $SimulatorDirectory -ExeXml $ExeXml
+    return
+}
 $directory = (Resolve-Path -LiteralPath $SimulatorDirectory).Path
 if (-not (Test-Path -LiteralPath (Join-Path $directory 'FlightSimulator2024.exe'))) {
     throw 'The target must be the MSFS 2024 Content directory containing FlightSimulator2024.exe.'

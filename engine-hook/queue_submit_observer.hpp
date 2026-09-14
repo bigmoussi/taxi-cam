@@ -92,6 +92,12 @@ struct Statistics {
 // SEH fault barrier or a guarantee that invalid application submissions execute.
 Result register_queue(ID3D12CommandQueue* queue, const Callbacks& callbacks) noexcept;
 
+// Optional native bootstrap discovery. Called outside the submission/registry locks,
+// before observation begins, with the application's live queue argument. The callback
+// may register a DIRECT queue. No default means the original fail-closed behavior.
+using UnknownQueueObserver = void (*)(ID3D12CommandQueue*) noexcept;
+bool set_unknown_queue_observer(UnknownQueueObserver) noexcept;
+
 // Disables notifications and waits only for an already-entered CPU wrapper on
 // this queue to return. Does not wait for the GPU or release anything. Repeating
 // registration with the identical callbacks may enable this retained queue.

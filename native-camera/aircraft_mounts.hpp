@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cmath>
+#include "../profiles/catalog.hpp"
 
 namespace taxi_camera::native_camera {
 
@@ -88,22 +89,13 @@ inline bool valid_mounts(const MountPair& mounts) noexcept {
 }
 
 inline MountPair default_mounts() noexcept {
-  // Visually calibrated starting points, not surveyed camera mounts.
-  // common/config/flight_model.cfg point.19 gives the belly landmark
-  // (0,-1.615317,26.950669)m and point.0 the wheel (0,-4.596384,30.220920)m.
-  // Retain the position actually verified live against the user's reference.
-  // Pitch/lens were tuned to retain the upright strut, put the wheel around
-  // 65-70% down the pane and leave pavement below. The aft candidate was not
-  // applied successfully in the live UI and is intentionally not the default.
-  constexpr Vector3 nose{0, -1.75, 26.950668984};
-  // Point.14 places the rudder tip at (0,20.268181,-37.572696)m. The previous
-  // live position -24 cleared the fin. Move one metre aft and widen the lens
-  // slightly to reduce the aircraft's size relative to the fixed reference guides.
-  // This is a visual framing adjustment, not a surveyed mount or VC conversion.
-  constexpr Vector3 tail{0, 18, -25};
-  // The user requested a little more underbody in frame after the 1.124-radian
-  // live test; the subsequent live view retained this modest 1.24 widening.
-  return {{{nose, -17.5, 0, 1.24f}, {tail, -32, 0, 1.02f}}};
+  // Calibrated profile defaults, shared with the Windows settings application.
+  MountPair result{};
+  for (unsigned i = 0; i < result.size(); ++i) {
+    const auto& m = profiles::active().mounts[i];
+    result[i] = {{m[0], m[1], m[2]}, m[3], m[4], static_cast<float>(m[5])};
+  }
+  return result;
 }
 
 inline bool make_mounted_pose(const BodyPose& body, const MountConfig& mount, MountedPose& output) noexcept {

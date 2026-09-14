@@ -1,0 +1,952 @@
+#include "d3d12_bridge.hpp"
+#include <dxgi1_6.h>
+#include <algorithm>
+#include <memory>
+#include <mutex>
+#include <tuple>
+#include <unordered_map>
+#include "../engine-hook/render_boundary_observer.hpp"
+#include "../src/calibration_d3d12.hpp"
+#include "../src/native_device_identity.hpp"
+#include "../src/taxi_button_routes.hpp"
+#include "../src/write_budget.hpp"
+#include "native_hooks.hpp"
+#include "root_layout.hpp"
+
+namespace taxi_camera::standalone {
+namespace {
+namespace boundary = engine_hook::render_boundary;
+namespace queue_hook = engine_hook::queue_submit;
+namespace runtime = scene_runtime;
+constexpr GUID LifetimeId{0x986208c6, 0x68b9, 0x450d, {0x86, 0x0c, 0xac, 0x85, 0x60, 0x07, 0x88, 0x01}};
+struct Metadata {
+  std::atomic<bool> alive{true};
+  std::uint64_t id{};
+  virtual void retire() noexcept { alive.store(false); }
+  virtual ~Metadata() = default;
+};
+struct Resource : Metadata {
+  ID3D12Resource* native{};
+  std::uint64_t key{};
+  D3D12_RESOURCE_DESC desc{};
+  std::atomic<std::uint64_t> draws{};
+  void retire() noexcept override {
+    alive.store(false, std::memory_order_release);
+    runtime::manager().unregister_source_candidate(key, native, id);
+    scene_handoff().unregister_resource(key, reinterpret_cast<std::uint64_t>(native));
+  }
+};
+struct Root : Metadata {
+  PfdRootLayout layout;
+};
+struct View {
+  std::shared_ptr<Resource> resource;
+  DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+  UINT mip{};
+  SIZE_T rtv{};
+};
+struct List : Metadata {
+  ID3D12GraphicsCommandList* native{};
+  std::uint64_t recording = 1;
+  PfdGraphicsState graphics;
+  std::array<View, 8> targets{};
+  UINT count{};
+  DXGI_FORMAT depth = DXGI_FORMAT_UNKNOWN;
+  bool depth_known = true;
+  bool ready = false;
+  void retire() noexcept override {
+    alive.store(false, std::memory_order_release);
+    boundary::unregister_list(native, id);
+    runtime::manager().destroy_command_list(native, id);
+  }
+};
+class Lifetime final : public IUnknown {
+ public:
+  explicit Lifetime(std::shared_ptr<Metadata> p) : value_(std::move(p)) {}
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** out) override {
+    if (!out)
+      return E_POINTER;
+    *out = nullptr;
+    if (iid != __uuidof(IUnknown))
+      return E_NOINTERFACE;
+    *out = static_cast<IUnknown*>(this);
+    AddRef();
+    return S_OK;
+  }
+  ULONG STDMETHODCALLTYPE AddRef() override { return ++references_; }
+  ULONG STDMETHODCALLTYPE Release() override {
+    const auto n = --references_;
+    if (!n) {
+      value_->retire();
+      delete this;
+    }
+    return n;
+  }
+
+ private:
+  std::atomic<ULONG> references_{1};
+  std::shared_ptr<Metadata> value_;
+};
+struct Registry {
+  std::recursive_mutex mutex;
+  ID3D12Device* device{};
+  std::uint64_t key{}, next_id = 0;
+  UINT rtv_stride{}, dsv_stride{};
+  std::atomic<bool> ready{};
+  std::atomic<std::uint64_t> failures{}, draws{};
+  const char* error = "not_started";
+  std::unordered_map<ID3D12Resource*, std::shared_ptr<Resource>> resources;
+  std::unordered_map<ID3D12RootSignature*, std::shared_ptr<Root>> roots;
+  std::unordered_map<ID3D12GraphicsCommandList*, std::shared_ptr<List>> lists;
+  std::unordered_map<SIZE_T, View> rtvs;
+  std::unordered_map<SIZE_T, DXGI_FORMAT> dsvs;
+  TaxiButtonRoutes routes;
+  PfdTargetDetector detector;
+  unsigned active_mask{}, calibration_mask{};
+  WriteBudget calibration_budget;
+};
+Registry& registry() {
+  static auto* r = new Registry;
+  return *r;
+}
+bool attach(ID3D12Object* object, const std::shared_ptr<Metadata>& metadata) {
+  auto* lifetime = new Lifetime(metadata);
+  const auto hr = object->SetPrivateDataInterface(LifetimeId, lifetime);
+  lifetime->Release();
+  return SUCCEEDED(hr);
+}
+void error(const char* value) noexcept {
+  auto& r = registry();
+  ++r.failures;
+  const std::lock_guard lock(r.mutex);
+  r.error = value;
+}
+template <class F>
+void observe_safely(F&& action) noexcept {
+  try {
+    action();
+  } catch (...) {
+    auto& r = registry();
+    r.ready = false;
+    const std::lock_guard lock(r.mutex);
+    r.active_mask = r.calibration_mask = 0;
+    error("native_observation_allocation_failed");
+  }
+}
+bool relevant(const D3D12_RESOURCE_DESC& d) noexcept {
+  return d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && d.Width == 768 && (d.Height == 255 || d.Height == 504 || d.Height == 1024) &&
+         d.DepthOrArraySize == 1 && d.SampleDesc.Count == 1 && (d.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) != 0;
+}
+bool same_device(ID3D12Device* device) noexcept {
+  IUnknown *a{}, *b{};
+  auto* expected = registry().device;
+  if (!device || !expected)
+    return false;
+  const bool equal =
+      SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&a))) && SUCCEEDED(expected->QueryInterface(IID_PPV_ARGS(&b))) && a && a == b;
+  if (a)
+    a->Release();
+  if (b)
+    b->Release();
+  return equal;
+}
+void observe_resource(ID3D12Device* device, IUnknown* object, source_state::Model initial) {
+  auto& r = registry();
+  if (!r.ready || !object || !same_device(device))
+    return;
+  ID3D12Resource* native{};
+  if (FAILED(object->QueryInterface(IID_PPV_ARGS(&native))))
+    return;
+  const auto desc = native->GetDesc();
+  if (relevant(desc)) {
+    std::shared_ptr<Resource> item;
+    {
+      const std::lock_guard lock(r.mutex);
+      auto found = r.resources.find(native);
+      if (found != r.resources.end() && found->second->alive) {
+        native->Release();
+        return;
+      }
+      if (r.resources.size() < 16384 && r.next_id != UINT64_MAX) {
+        item = std::make_shared<Resource>();
+        item->native = native;
+        item->key = r.key;
+        item->desc = desc;
+        item->id = ++r.next_id;
+        r.resources[native] = item;
+      }
+    }
+    if (item && scene_handoff().register_resource(r.key, reinterpret_cast<std::uint64_t>(native), item->id)) {
+      runtime::manager().register_source_candidate(r.key, native, item->id, desc, initial);
+      if (!attach(native, item))
+        error("resource_lifetime_notification_failed");
+    } else if (item) {
+      item->retire();
+      error("resource_registry_full");
+    }
+  }
+  native->Release();
+}
+std::shared_ptr<Resource> resource(ID3D12Resource* p) {
+  auto& r = registry();
+  const std::lock_guard lock(r.mutex);
+  const auto it = r.resources.find(p);
+  return it != r.resources.end() && it->second->alive ? it->second : nullptr;
+}
+std::shared_ptr<List> find_list(ID3D12GraphicsCommandList* p) {
+  auto& r = registry();
+  const std::lock_guard lock(r.mutex);
+  const auto it = r.lists.find(p);
+  return it != r.lists.end() && it->second->alive ? it->second : nullptr;
+}
+void before_legacy(void*, ID3D12GraphicsCommandList* list, std::uint64_t id, const D3D12_RESOURCE_TRANSITION_BARRIER& b) noexcept {
+  const OwnedWork guard;
+  runtime::manager().record_render_target_before_transition(list, b.pResource, true, id);
+}
+void before_enhanced(void*, ID3D12GraphicsCommandList7* list, std::uint64_t id, const D3D12_TEXTURE_BARRIER& b) noexcept {
+  const OwnedWork guard;
+  runtime::manager().record_render_target_before_enhanced_transition(list, b.pResource, true, id);
+}
+void observe_legacy(void*, ID3D12GraphicsCommandList* list, std::uint64_t id, const D3D12_RESOURCE_BARRIER& b, std::uint32_t) noexcept {
+  const OwnedWork guard;
+  runtime::manager().observe_source_legacy(list, id, b);
+}
+void observe_enhanced(void*, ID3D12GraphicsCommandList7* list, std::uint64_t id, const D3D12_TEXTURE_BARRIER& b, std::uint32_t) noexcept {
+  const OwnedWork guard;
+  runtime::manager().observe_source_enhanced(list, id, b);
+}
+void copy_resource(void*,
+                   ID3D12GraphicsCommandList* list,
+                   std::uint64_t id,
+                   ID3D12Resource* dest,
+                   ID3D12Resource* src,
+                   bool allowed) noexcept {
+  const OwnedWork guard;
+  runtime::manager().record_copy_after_forward(list, src, dest, allowed, id);
+}
+void copy_texture(void*,
+                  ID3D12GraphicsCommandList* list,
+                  std::uint64_t id,
+                  const D3D12_TEXTURE_COPY_LOCATION* dest,
+                  UINT x,
+                  UINT y,
+                  UINT z,
+                  const D3D12_TEXTURE_COPY_LOCATION* src,
+                  const D3D12_BOX* box,
+                  bool allowed) noexcept {
+  const OwnedWork guard;
+  runtime::manager().record_texture_copy_after_forward(list, dest, x, y, z, src, box, allowed, id);
+}
+void invalidate(void*, ID3D12GraphicsCommandList* native, std::uint64_t id, std::uint32_t reasons) noexcept {
+  const OwnedWork guard;
+  auto list = find_list(native);
+  if (!list || list->id != id)
+    return;
+  const bool scoped =
+      (reasons & ~(boundary::InvalidationPassBegin | boundary::InvalidationSplitBarrier | boundary::InvalidationAliasOrDiscard)) == 0;
+  if (scoped && list->count) {
+    std::array<ID3D12Resource*, 8> targets{};
+    std::array<std::uint64_t, 8> generations{};
+    UINT count = 0;
+    for (UINT i = 0; i < list->count; ++i) {
+      const auto& target = list->targets[i].resource;
+      if (target && target->alive) {
+        targets[count] = target->native;
+        generations[count++] = target->id;
+      }
+    }
+    if (count) {
+      runtime::manager().invalidate_source_targets(native, id, count, targets.data(), generations.data());
+      return;
+    }
+  }
+  runtime::manager().invalidate_source_recording(native, id, true);
+}
+void after_draw(void*, ID3D12GraphicsCommandList* native, std::uint64_t id, bool allowed) noexcept {
+  const OwnedWork guard;
+  auto list = find_list(native);
+  if (!registry().ready || !list || list->id != id || !list->ready)
+    return;
+  auto& r = registry();
+  ++r.draws;
+  std::array<ID3D12Resource*, 8> sources{};
+  std::array<std::uint64_t, 8> ids{};
+  UINT count = 0;
+  for (UINT i = 0; i < list->count; ++i) {
+    const auto& target = list->targets[i];
+    if (target.resource && target.resource->alive && !target.mip) {
+      ++target.resource->draws;
+      sources[count] = target.resource->native;
+      ids[count++] = target.resource->id;
+    }
+  }
+  runtime::manager().stage_source_draw(native, id, count, sources.data(), ids.data());
+  runtime::manager().after_source_draw(native, id, allowed);
+  if (!allowed || list->count != 1 || !list->depth_known)
+    return;
+  const auto& view = list->targets[0];
+  if (!view.resource || !view.resource->alive || view.mip || view.resource->desc.Height != 1024)
+    return;
+  bool selected = false, calibrate = false;
+  {
+    const std::lock_guard lock(r.mutex);
+    calibrate = r.routes.matches(view.resource->id, r.calibration_mask) && r.calibration_budget.try_acquire(0, GetTickCount64());
+    selected = r.routes.matches(view.resource->id, r.active_mask);
+    if (selected) {
+      const auto root = r.roots.find(list->graphics.root());
+      selected = root != r.roots.end() && root->second->alive && root->second->id == list->graphics.layout_generation();
+    }
+  }
+  if (calibrate) {
+    record_calibration(native, {view.rtv}, 768, 1024, GetTickCount64() / 16);
+    return;
+  }
+  if (!selected)
+    return;
+  const boundary::ScopedBypass bypass;
+  runtime::stamp(native, list->graphics, r.key, view.format, 768, 1024, list->depth);
+}
+void pass_targets(void*,
+                  ID3D12GraphicsCommandList*,
+                  std::uint64_t,
+                  UINT,
+                  const D3D12_RENDER_PASS_RENDER_TARGET_DESC*,
+                  const D3D12_RENDER_PASS_DEPTH_STENCIL_DESC*) noexcept;
+void pass_ended(void*, ID3D12GraphicsCommandList* native, std::uint64_t id) noexcept {
+  if (auto item = find_list(native); item && item->id == id) {
+    item->targets = {};
+    item->count = 0;
+    item->depth_known = false;
+  }
+}
+const boundary::Callbacks Boundaries{nullptr,      before_legacy, before_enhanced, observe_legacy, observe_enhanced, copy_resource,
+                                     copy_texture, after_draw,    invalidate,      pass_targets,   pass_ended};
+std::shared_ptr<List> ensure_list(ID3D12GraphicsCommandList* native, bool observed = false) {
+  if (auto existing = find_list(native))
+    return existing;
+  auto& r = registry();
+  if (!r.ready || native->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT || !same_native_device(native, r.device))
+    return {};
+  std::shared_ptr<List> item;
+  {
+    const std::lock_guard lock(r.mutex);
+    if (r.lists.size() >= 4096 || r.next_id == UINT64_MAX) {
+      error("command_list_capacity");
+      return {};
+    }
+    item = std::make_shared<List>();
+    item->native = native;
+    item->id = ++r.next_id;
+    item->ready = observed;
+    item->graphics.reset(item->recording, observed);
+    r.lists[native] = item;
+  }
+  const auto hooked = boundary::register_list(native, item->id, Boundaries);
+  const bool registered = observed ? runtime::manager().register_command_list(native, r.key, item->id)
+                                   : runtime::manager().register_unobserved_command_list(native, r.key, item->id);
+  if (!hooked.ready || !hooked.protection_restored || !registered || !attach(native, item)) {
+    item->retire();
+    error("native_list_registration_failed");
+    return {};
+  }
+  if (observed)
+    boundary::successful_reset(native, item->id);
+  else
+    boundary::reset_failed(native, item->id);
+  return item;
+}
+void unknown_list(void*, ID3D12GraphicsCommandList* list, std::uint64_t) noexcept {
+  const OwnedWork guard;
+  observe_safely([&] { ensure_list(list); });
+}
+void unknown_queue(ID3D12CommandQueue* queue) noexcept {
+  if (owned_depth || !registry().ready || queue->GetDesc().Type != D3D12_COMMAND_LIST_TYPE_DIRECT)
+    return;
+  const OwnedWork guard;
+  if (!same_native_device(queue, registry().device)) {
+    error("queue_device_mismatch");
+    return;
+  }
+  if (!runtime::init_queue(registry().key, queue))
+    error("queue_registration_failed");
+}
+std::array<NativeSlot, 10> creations;
+constexpr std::array<unsigned, 10> CreationSlots{27, 29, 30, 53, 55, 69, 70, 76, 77, 78};
+constexpr std::array<unsigned, 10> StateArgs{3, 3, 1, 3, 1, 3, 3, 3, 3, 1};
+source_state::Model model(D3D12_RESOURCE_STATES s) {
+  return s == D3D12_RESOURCE_STATE_RENDER_TARGET ? source_state::Model::legacy_rt : source_state::Model::unknown;
+}
+source_state::Model model(D3D12_BARRIER_LAYOUT s) {
+  return s == D3D12_BARRIER_LAYOUT_RENDER_TARGET ? source_state::Model::enhanced_rt : source_state::Model::unknown;
+}
+template <unsigned I, class Signature>
+struct Creation;
+template <unsigned I, class C, class... Args>
+struct Creation<I, HRESULT (STDMETHODCALLTYPE C::*)(Args...)> {
+  using F = HRESULT(STDMETHODCALLTYPE*)(C*, Args...);
+  static HRESULT STDMETHODCALLTYPE call(C* self, Args... args) noexcept {
+    const bool observe = owned_depth == 0;
+    const OwnedWork guard;
+    const auto hr = creations[I].forward<F>()(self, args...);
+    if (observe && SUCCEEDED(hr)) {
+      const auto tuple = std::forward_as_tuple(args...);
+      auto** out = std::get<sizeof...(Args) - 1>(tuple);
+      if (out && *out)
+        observe_safely([&] {
+          observe_resource(reinterpret_cast<ID3D12Device*>(self), static_cast<IUnknown*>(*out), model(std::get<StateArgs[I]>(tuple)));
+        });
+    }
+    return hr;
+  }
+};
+const std::array<void*, 10> CreationWrappers{
+    reinterpret_cast<void*>(&Creation<0, decltype(&ID3D12Device::CreateCommittedResource)>::call),
+    reinterpret_cast<void*>(&Creation<1, decltype(&ID3D12Device::CreatePlacedResource)>::call),
+    reinterpret_cast<void*>(&Creation<2, decltype(&ID3D12Device::CreateReservedResource)>::call),
+    reinterpret_cast<void*>(&Creation<3, decltype(&ID3D12Device4::CreateCommittedResource1)>::call),
+    reinterpret_cast<void*>(&Creation<4, decltype(&ID3D12Device4::CreateReservedResource1)>::call),
+    reinterpret_cast<void*>(&Creation<5, decltype(&ID3D12Device8::CreateCommittedResource2)>::call),
+    reinterpret_cast<void*>(&Creation<6, decltype(&ID3D12Device8::CreatePlacedResource1)>::call),
+    reinterpret_cast<void*>(&Creation<7, decltype(&ID3D12Device10::CreateCommittedResource3)>::call),
+    reinterpret_cast<void*>(&Creation<8, decltype(&ID3D12Device10::CreatePlacedResource2)>::call),
+    reinterpret_cast<void*>(&Creation<9, decltype(&ID3D12Device10::CreateReservedResource2)>::call)};
+
+NativeSlot root_creation, rtv_creation, dsv_creation, descriptor_copy, descriptor_copy_simple, create_list, create_list1;
+HRESULT STDMETHODCALLTYPE root_create(ID3D12Device* device, UINT node, const void* blob, SIZE_T bytes, REFIID iid, void** out) noexcept {
+  using F = HRESULT(STDMETHODCALLTYPE*)(ID3D12Device*, UINT, const void*, SIZE_T, REFIID, void**);
+  const bool observe = !owned_depth && registry().ready && same_device(device);
+  const OwnedWork guard;
+  const auto hr = root_creation.forward<F>()(device, node, blob, bytes, iid, out);
+  if (observe && SUCCEEDED(hr) && out && *out)
+    observe_safely([&] {
+      ID3D12RootSignature* native{};
+      if (SUCCEEDED(static_cast<IUnknown*>(*out)->QueryInterface(IID_PPV_ARGS(&native)))) {
+        auto item = std::make_shared<Root>();
+        item->layout = native_root_layout(blob, bytes);
+        auto& r = registry();
+        {
+          const std::lock_guard lock(r.mutex);
+          if (r.roots.size() < 16384 && r.next_id != UINT64_MAX) {
+            item->id = ++r.next_id;
+            r.roots[native] = item;
+          }
+        }
+        if (!item->id || !attach(native, item))
+          error("root_lifetime_registration_failed");
+        native->Release();
+      }
+    });
+  return hr;
+}
+void STDMETHODCALLTYPE rtv_create(ID3D12Device* device,
+                                  ID3D12Resource* native,
+                                  const D3D12_RENDER_TARGET_VIEW_DESC* desc,
+                                  D3D12_CPU_DESCRIPTOR_HANDLE handle) noexcept {
+  using F = void(STDMETHODCALLTYPE*)(ID3D12Device*, ID3D12Resource*, const D3D12_RENDER_TARGET_VIEW_DESC*, D3D12_CPU_DESCRIPTOR_HANDLE);
+  rtv_creation.forward<F>()(device, native, desc, handle);
+  if (owned_depth || !registry().ready || !same_device(device))
+    return;
+  const OwnedWork guard;
+  observe_safely([&] {
+    if (native && !resource(native))
+      observe_resource(device, native, source_state::Model::unknown);
+    auto item = resource(native);
+    auto& r = registry();
+    View view;
+    if (item && (!desc || desc->ViewDimension == D3D12_RTV_DIMENSION_TEXTURE2D)) {
+      view = {item, desc ? desc->Format : item->desc.Format, desc ? desc->Texture2D.MipSlice : 0};
+    }
+    const std::lock_guard lock(r.mutex);
+    if (view.resource && r.rtvs.size() < 65536)
+      r.rtvs[handle.ptr] = view;
+    else
+      r.rtvs.erase(handle.ptr);
+  });
+}
+void STDMETHODCALLTYPE dsv_create(ID3D12Device* device,
+                                  ID3D12Resource* native,
+                                  const D3D12_DEPTH_STENCIL_VIEW_DESC* desc,
+                                  D3D12_CPU_DESCRIPTOR_HANDLE handle) noexcept {
+  using F = void(STDMETHODCALLTYPE*)(ID3D12Device*, ID3D12Resource*, const D3D12_DEPTH_STENCIL_VIEW_DESC*, D3D12_CPU_DESCRIPTOR_HANDLE);
+  dsv_creation.forward<F>()(device, native, desc, handle);
+  if (owned_depth || !registry().ready || !same_device(device))
+    return;
+  observe_safely([&] {
+    DXGI_FORMAT format = desc ? desc->Format : native ? native->GetDesc().Format : DXGI_FORMAT_UNKNOWN;
+    auto& r = registry();
+    const std::lock_guard lock(r.mutex);
+    if (r.dsvs.size() < 16384)
+      r.dsvs[handle.ptr] = format;
+  });
+}
+void copy_descriptors(UINT count, D3D12_CPU_DESCRIPTOR_HANDLE dest, D3D12_CPU_DESCRIPTOR_HANDLE src, D3D12_DESCRIPTOR_HEAP_TYPE type) {
+  auto& r = registry();
+  if (count > 65536) {
+    error("descriptor_copy_capacity");
+    return;
+  }
+  const std::lock_guard lock(r.mutex);
+  const UINT stride = type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV ? r.rtv_stride : r.dsv_stride;
+  for (UINT i = 0; i < count; ++i) {
+    if (type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV) {
+      const auto found = r.rtvs.find(src.ptr);
+      if (found != r.rtvs.end() && r.rtvs.size() < 65536)
+        r.rtvs[dest.ptr] = found->second;
+      else
+        r.rtvs.erase(dest.ptr);
+    } else if (type == D3D12_DESCRIPTOR_HEAP_TYPE_DSV) {
+      const auto found = r.dsvs.find(src.ptr);
+      if (found != r.dsvs.end() && r.dsvs.size() < 16384)
+        r.dsvs[dest.ptr] = found->second;
+      else
+        r.dsvs.erase(dest.ptr);
+    }
+    src.ptr += stride;
+    dest.ptr += stride;
+  }
+}
+void STDMETHODCALLTYPE descriptors_simple(ID3D12Device* device,
+                                          UINT count,
+                                          D3D12_CPU_DESCRIPTOR_HANDLE dest,
+                                          D3D12_CPU_DESCRIPTOR_HANDLE src,
+                                          D3D12_DESCRIPTOR_HEAP_TYPE type) noexcept {
+  using F =
+      void(STDMETHODCALLTYPE*)(ID3D12Device*, UINT, D3D12_CPU_DESCRIPTOR_HANDLE, D3D12_CPU_DESCRIPTOR_HANDLE, D3D12_DESCRIPTOR_HEAP_TYPE);
+  descriptor_copy_simple.forward<F>()(device, count, dest, src, type);
+  if (!owned_depth && registry().ready && same_device(device) &&
+      (type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV || type == D3D12_DESCRIPTOR_HEAP_TYPE_DSV))
+    observe_safely([&] { copy_descriptors(count, dest, src, type); });
+}
+void STDMETHODCALLTYPE descriptors(ID3D12Device* device,
+                                   UINT nd,
+                                   const D3D12_CPU_DESCRIPTOR_HANDLE* dest,
+                                   const UINT* ds,
+                                   UINT ns,
+                                   const D3D12_CPU_DESCRIPTOR_HANDLE* src,
+                                   const UINT* ss,
+                                   D3D12_DESCRIPTOR_HEAP_TYPE type) noexcept {
+  using F = void(STDMETHODCALLTYPE*)(ID3D12Device*, UINT, const D3D12_CPU_DESCRIPTOR_HANDLE*, const UINT*, UINT,
+                                     const D3D12_CPU_DESCRIPTOR_HANDLE*, const UINT*, D3D12_DESCRIPTOR_HEAP_TYPE);
+  descriptor_copy.forward<F>()(device, nd, dest, ds, ns, src, ss, type);
+  if (owned_depth || !registry().ready || !same_device(device) ||
+      (type != D3D12_DESCRIPTOR_HEAP_TYPE_RTV && type != D3D12_DESCRIPTOR_HEAP_TYPE_DSV))
+    return;
+  observe_safely([&] {
+    auto& r = registry();
+    if (nd > 4096 || ns > 4096 || !dest || !src) {
+      const std::lock_guard lock(r.mutex);
+      r.rtvs.clear();
+      r.dsvs.clear();
+      error("descriptor_ranges_refused");
+      return;
+    }
+    const UINT stride = type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV ? r.rtv_stride : r.dsv_stride;
+    UINT di = 0, si = 0, dp = 0, sp = 0, total = 0;
+    while (di < nd && si < ns) {
+      const UINT dcount = ds ? ds[di] : 1, scount = ss ? ss[si] : 1;
+      if (dp == dcount) {
+        ++di;
+        dp = 0;
+        continue;
+      }
+      if (sp == scount) {
+        ++si;
+        sp = 0;
+        continue;
+      }
+      const UINT n = std::min(dcount - dp, scount - sp);
+      if (n > 65536 - total) {
+        const std::lock_guard lock(r.mutex);
+        r.rtvs.clear();
+        r.dsvs.clear();
+        error("descriptor_ranges_overflow");
+        return;
+      }
+      copy_descriptors(n, {dest[di].ptr + SIZE_T{dp} * stride}, {src[si].ptr + SIZE_T{sp} * stride}, type);
+      dp += n;
+      sp += n;
+      total += n;
+    }
+  });
+}
+HRESULT STDMETHODCALLTYPE list_create(ID3D12Device* device,
+                                      UINT node,
+                                      D3D12_COMMAND_LIST_TYPE type,
+                                      ID3D12CommandAllocator* allocator,
+                                      ID3D12PipelineState* pso,
+                                      REFIID iid,
+                                      void** out) noexcept {
+  using F = HRESULT(STDMETHODCALLTYPE*)(ID3D12Device*, UINT, D3D12_COMMAND_LIST_TYPE, ID3D12CommandAllocator*, ID3D12PipelineState*, REFIID,
+                                        void**);
+  const bool observe = !owned_depth;
+  const OwnedWork guard;
+  const auto hr = create_list.forward<F>()(device, node, type, allocator, pso, iid, out);
+  if (observe && SUCCEEDED(hr) && out && *out && type == D3D12_COMMAND_LIST_TYPE_DIRECT) {
+    ID3D12GraphicsCommandList* native{};
+    if (SUCCEEDED(static_cast<IUnknown*>(*out)->QueryInterface(IID_PPV_ARGS(&native)))) {
+      observe_safely([&] {
+        if (auto item = ensure_list(native, true))
+          item->graphics.bind_pipeline(pso);
+      });
+      native->Release();
+    }
+  }
+  return hr;
+}
+HRESULT STDMETHODCALLTYPE list_create1(ID3D12Device4* device,
+                                       UINT node,
+                                       D3D12_COMMAND_LIST_TYPE type,
+                                       D3D12_COMMAND_LIST_FLAGS flags,
+                                       REFIID iid,
+                                       void** out) noexcept {
+  using F = HRESULT(STDMETHODCALLTYPE*)(ID3D12Device4*, UINT, D3D12_COMMAND_LIST_TYPE, D3D12_COMMAND_LIST_FLAGS, REFIID, void**);
+  const bool observe = !owned_depth;
+  const OwnedWork guard;
+  const auto hr = create_list1.forward<F>()(device, node, type, flags, iid, out);
+  if (observe && SUCCEEDED(hr) && out && *out && type == D3D12_COMMAND_LIST_TYPE_DIRECT) {
+    ID3D12GraphicsCommandList* native{};
+    if (SUCCEEDED(static_cast<IUnknown*>(*out)->QueryInterface(IID_PPV_ARGS(&native)))) {
+      observe_safely([&] { ensure_list(native); });
+      native->Release();  // CreateCommandList1 creates a closed list; actual Reset admits it.
+    }
+  }
+  return hr;
+}
+NativeSlot list_reset;
+HRESULT STDMETHODCALLTYPE reset(ID3D12GraphicsCommandList* native, ID3D12CommandAllocator* allocator, ID3D12PipelineState* pso) noexcept {
+  using F = HRESULT(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*, ID3D12CommandAllocator*, ID3D12PipelineState*);
+  if (owned_depth)
+    return list_reset.forward<F>()(native, allocator, pso);
+  const OwnedWork guard;
+  std::shared_ptr<List> item;
+  observe_safely([&] { item = ensure_list(native); });
+  const auto hr = list_reset.forward<F>()(native, allocator, pso);
+  if (item) {
+    item->targets = {};
+    item->count = 0;
+    item->depth = DXGI_FORMAT_UNKNOWN;
+    item->depth_known = true;
+    item->ready = hr == S_OK && item->recording < UINT64_MAX;
+    if (item->ready) {
+      item->graphics.reset(++item->recording, true);
+      item->graphics.bind_pipeline(pso);
+      boundary::successful_reset(native, item->id);
+      runtime::manager().successful_reset(native, item->id);
+    } else {
+      item->graphics.invalidate("native_reset_failed");
+      boundary::reset_failed(native, item->id);
+    }
+  }
+  return hr;
+}
+struct Pipeline {
+  static void apply(List& l, ID3D12PipelineState* p) { l.graphics.bind_pipeline(p); }
+};
+struct Heaps {
+  static void apply(List& l, UINT n, ID3D12DescriptorHeap* const* p) { l.graphics.descriptor_heaps(n, p); }
+};
+struct GraphicsRoot {
+  static void apply(List& l, ID3D12RootSignature* p) {
+    auto& r = registry();
+    const std::lock_guard lock(r.mutex);
+    auto it = r.roots.find(p);
+    if (p && (it == r.roots.end() || !it->second->alive) && r.roots.size() < 16384 && r.next_id != UINT64_MAX &&
+        same_native_device(p, r.device)) {
+      auto item = std::make_shared<Root>();
+      item->id = ++r.next_id;
+      r.roots[p] = item;
+      if (!attach(p, item)) {
+        item->retire();
+        error("existing_root_lifetime_registration_failed");
+      }
+      it = r.roots.find(p);
+    }
+    if (it != r.roots.end() && it->second->alive)
+      l.graphics.bind_observed_root(p, it->second->id);
+    else
+      l.graphics.bind_observed_root(nullptr, 0);
+  }
+};
+struct Table {
+  static void apply(List& l, UINT i, D3D12_GPU_DESCRIPTOR_HANDLE h) { l.graphics.table(i, h.ptr); }
+};
+struct Constant {
+  static void apply(List& l, UINT i, UINT v, UINT offset) { l.graphics.constants(i, offset, 1, &v); }
+};
+struct Constants {
+  static void apply(List& l, UINT i, UINT n, const void* p, UINT offset) { l.graphics.constants(i, offset, n, p); }
+};
+template <PfdRootKind Kind>
+struct Address {
+  static void apply(List& l, UINT i, D3D12_GPU_VIRTUAL_ADDRESS p) { l.graphics.descriptor(i, Kind, p); }
+};
+struct Topology {
+  static void apply(List& l, D3D12_PRIMITIVE_TOPOLOGY t) { l.graphics.topology(t); }
+};
+struct Viewports {
+  static void apply(List& l, UINT n, const D3D12_VIEWPORT* p) { l.graphics.viewports(0, n, p); }
+};
+struct Scissors {
+  static void apply(List& l, UINT n, const D3D12_RECT* p) { l.graphics.scissors(0, n, p); }
+};
+struct Targets {
+  static void apply(List& l,
+                    UINT count,
+                    const D3D12_CPU_DESCRIPTOR_HANDLE* handles,
+                    BOOL contiguous,
+                    const D3D12_CPU_DESCRIPTOR_HANDLE* depth) {
+    auto& r = registry();
+    const std::lock_guard lock(r.mutex);
+    l.targets = {};
+    l.count = 0;
+    l.depth = DXGI_FORMAT_UNKNOWN;
+    l.depth_known = depth == nullptr;
+    if (depth) {
+      const auto found = r.dsvs.find(depth->ptr);
+      if (found != r.dsvs.end()) {
+        l.depth = found->second;
+        l.depth_known = true;
+      }
+    }
+    if (count > 8 || (count && !handles))
+      return;
+    l.count = count;
+    for (UINT i = 0; i < count; ++i) {
+      const auto handle = contiguous ? handles[0].ptr + SIZE_T{i} * r.rtv_stride : handles[i].ptr;
+      const auto it = r.rtvs.find(handle);
+      if (it != r.rtvs.end()) {
+        l.targets[i] = it->second;
+        l.targets[i].rtv = handle;
+      }
+    }
+  }
+};
+void pass_targets(void*,
+                  ID3D12GraphicsCommandList* native,
+                  std::uint64_t id,
+                  UINT count,
+                  const D3D12_RENDER_PASS_RENDER_TARGET_DESC* targets,
+                  const D3D12_RENDER_PASS_DEPTH_STENCIL_DESC* depth) noexcept {
+  auto item = find_list(native);
+  if (!item || item->id != id)
+    return;
+  if (count > 8 || (count && !targets)) {
+    item->targets = {};
+    item->count = 0;
+    item->depth_known = false;
+    return;
+  }
+  std::array<D3D12_CPU_DESCRIPTOR_HANDLE, 8> handles{};
+  for (UINT i = 0; i < count; ++i)
+    handles[i] = targets[i].cpuDescriptor;
+  Targets::apply(*item, count, handles.data(), FALSE, depth ? &depth->cpuDescriptor : nullptr);
+}
+struct Unsupported {
+  template <class... Args>
+  static void apply(List& l, Args...) {
+    l.graphics.invalidate("unsupported_native_work");
+    boundary::invalidate_recording(l.native, l.id);
+  }
+};
+// Every signature is derived from the pinned Windows COM declaration.
+// These hooks observe, forward exactly once, and never alter application inputs.
+template <unsigned Slot, class Signature, class Action>
+struct StateHook;
+template <unsigned Slot, class C, class... Args, class Action>
+struct StateHook<Slot, void (STDMETHODCALLTYPE C::*)(Args...), Action> {
+  using F = void(STDMETHODCALLTYPE*)(C*, Args...);
+  static inline NativeSlot slot;
+  static void STDMETHODCALLTYPE call(C* native, Args... args) noexcept {
+    slot.forward<F>()(native, args...);
+    if (owned_depth || !registry().ready)
+      return;
+    const OwnedWork guard;
+    observe_safely([&] {
+      if (auto item = ensure_list(reinterpret_cast<ID3D12GraphicsCommandList*>(native)))
+        Action::apply(*item, args...);
+    });
+  }
+  static bool install(ID3D12GraphicsCommandList* list) { return slot.install(list, Slot, reinterpret_cast<void*>(&call)); }
+};
+#define STATE(Slot, Method, Action) StateHook<Slot, decltype(&ID3D12GraphicsCommandList::Method), Action>
+bool hook_state(ID3D12GraphicsCommandList* list) {
+  bool ok = list_reset.install(list, 10, reinterpret_cast<void*>(&reset));
+  ok &= STATE(25, SetPipelineState, Pipeline)::install(list);
+  ok &= STATE(28, SetDescriptorHeaps, Heaps)::install(list);
+  ok &= STATE(30, SetGraphicsRootSignature, GraphicsRoot)::install(list);
+  ok &= STATE(32, SetGraphicsRootDescriptorTable, Table)::install(list);
+  ok &= STATE(34, SetGraphicsRoot32BitConstant, Constant)::install(list);
+  ok &= STATE(36, SetGraphicsRoot32BitConstants, Constants)::install(list);
+  ok &= STATE(38, SetGraphicsRootConstantBufferView, Address<PfdRootKind::cbv>)::install(list);
+  ok &= STATE(40, SetGraphicsRootShaderResourceView, Address<PfdRootKind::srv>)::install(list);
+  ok &= STATE(42, SetGraphicsRootUnorderedAccessView, Address<PfdRootKind::uav>)::install(list);
+  ok &= STATE(20, IASetPrimitiveTopology, Topology)::install(list);
+  ok &= STATE(21, RSSetViewports, Viewports)::install(list);
+  ok &= STATE(22, RSSetScissorRects, Scissors)::install(list);
+  ok &= STATE(46, OMSetRenderTargets, Targets)::install(list);
+  ok &= STATE(27, ExecuteBundle, Unsupported)::install(list);
+  ok &= STATE(59, ExecuteIndirect, Unsupported)::install(list);
+  ok &= STATE(55, SetPredication, Unsupported)::install(list);
+  ok &= STATE(51, DiscardResource, Unsupported)::install(list);
+  return ok;
+}
+#undef STATE
+bool same_interface(ID3D12Device* device, REFIID iid) {
+  IUnknown* p{};
+  const bool ok = SUCCEEDED(device->QueryInterface(iid, reinterpret_cast<void**>(&p))) && p == device;
+  if (p)
+    p->Release();
+  return ok;
+}
+}  // namespace
+
+bool initialize_graphics(ID3D12Device* device) noexcept {
+  const OwnedWork guard;
+  auto& r = registry();
+  if (r.device)
+    return r.device == device && r.ready;
+  if (!device || !same_interface(device, __uuidof(ID3D12Device10))) {
+    error("native_device10_required");
+    return false;
+  }
+  r.device = device;
+  device->AddRef();
+  r.key = reinterpret_cast<std::uint64_t>(device);
+  if (!scene_handoff().register_device(r.key) || !runtime::init_device(r.key, device)) {
+    error("native_device_registration_failed");
+    return false;
+  }
+  r.rtv_stride = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+  r.dsv_stride = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
+  ID3D12CommandAllocator* allocator{};
+  ID3D12GraphicsCommandList* list{};
+  ID3D12CommandQueue* queue{};
+  D3D12_COMMAND_QUEUE_DESC q{};
+  q.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+  if (FAILED(device->CreateCommandAllocator(q.Type, IID_PPV_ARGS(&allocator))) ||
+      FAILED(device->CreateCommandList(0, q.Type, allocator, nullptr, IID_PPV_ARGS(&list))) ||
+      FAILED(device->CreateCommandQueue(&q, IID_PPV_ARGS(&queue)))) {
+    error("bootstrap_objects_failed");
+    return false;
+  }
+  // Bootstrap objects, modules and the device remain pinned. No runtime unload.
+  bool ok = hook_state(list);
+  const auto base = boundary::register_list(list, ++r.next_id, Boundaries);
+  ok &= base.ready && base.protection_restored;
+  boundary::unregister_list(list, r.next_id);
+  list->Close();
+  ok &= runtime::init_queue(r.key, queue);
+  ok &= queue_hook::set_unknown_queue_observer(unknown_queue);
+  ok &= runtime::manager().set_unknown_list_observer(unknown_list, nullptr);
+  for (unsigned i = 0; i < creations.size(); ++i)
+    ok &= creations[i].install(device, CreationSlots[i], CreationWrappers[i]);
+  ok &= root_creation.install(device, 16, reinterpret_cast<void*>(&root_create));
+  ok &= rtv_creation.install(device, 20, reinterpret_cast<void*>(&rtv_create));
+  ok &= dsv_creation.install(device, 21, reinterpret_cast<void*>(&dsv_create));
+  ok &= descriptor_copy.install(device, 23, reinterpret_cast<void*>(&descriptors));
+  ok &= descriptor_copy_simple.install(device, 24, reinterpret_cast<void*>(&descriptors_simple));
+  ok &= create_list.install(device, 12, reinterpret_cast<void*>(&list_create));
+  ok &= create_list1.install(device, 51, reinterpret_cast<void*>(&list_create1));
+  r.ready = ok;
+  r.error = ok ? "native_graphics_ready" : "native_hook_installation_failed";
+  if (!ok)
+    ++r.failures;
+  return ok;
+}
+bool initialize_graphics() noexcept {
+  const OwnedWork guard;
+  ID3D12Device* reported{};
+  if (FAILED(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&reported)))) {
+    error("d3d12_device_unavailable");
+    return false;
+  }
+  // Optional coexistence escape only. Native systems return E_NOINTERFACE.
+  // No ReShade DLL, SDK, API registration or renderer is loaded or required.
+  IUnknown* unwrapped{};
+  reported->QueryInterface(ReShadeUnwrappedObject, reinterpret_cast<void**>(&unwrapped));
+  ID3D12Device* native{};
+  if (unwrapped) {
+    unwrapped->QueryInterface(IID_PPV_ARGS(&native));
+    unwrapped->Release();
+  } else {
+    native = reported;
+    native->AddRef();
+  }
+  const bool ok = initialize_graphics(native);
+  if (native)
+    native->Release();
+  reported->Release();
+  return ok;
+}
+GraphicsStatus graphics_status() noexcept {
+  auto& r = registry();
+  const std::lock_guard lock(r.mutex);
+  return {r.ready, r.key, r.resources.size(), r.lists.size(), r.draws, r.failures, r.error};
+}
+std::vector<PfdTargetObservation> pfd_inventory() {
+  auto& r = registry();
+  const std::lock_guard lock(r.mutex);
+  std::vector<PfdTargetObservation> result;
+  for (const auto& [p, item] : r.resources) {
+    (void)p;
+    if (item->alive && item->desc.Height == 1024)
+      result.push_back({item->id, item->draws, 768, 1024, item->desc.MipLevels, static_cast<UINT>(item->desc.Format)});
+  }
+  std::sort(result.begin(), result.end(), [](const auto& a, const auto& b) { return a.draws > b.draws; });
+  return result;
+}
+bool assign_targets(std::uint64_t left, std::uint64_t right) noexcept {
+  auto& r = registry();
+  const std::lock_guard lock(r.mutex);
+  bool l = !left, rr = !right;
+  for (const auto& [p, item] : r.resources) {
+    (void)p;
+    if (!item->alive || item->desc.Height != 1024 || item->desc.MipLevels != 5 || item->desc.Format != DXGI_FORMAT_R8G8B8A8_UNORM)
+      continue;
+    l |= item->id == left;
+    rr |= item->id == right;
+  }
+  if (!l || !rr || !left || !right || left == right)
+    return false;
+  r.routes.targets = {};
+  return r.routes.assign(0, left) && r.routes.assign(1, right);
+}
+void set_calibration(unsigned mask, unsigned budget) noexcept {
+  auto& r = registry();
+  const std::lock_guard lock(r.mutex);
+  r.calibration_mask = mask & 3u;
+  r.calibration_budget.set_limit(budget);
+}
+void set_target_mask(unsigned mask) noexcept {
+  auto& r = registry();
+  const std::lock_guard lock(r.mutex);
+  r.active_mask = mask & 3u;
+}
+std::array<std::uint64_t, 2> target_ids() noexcept {
+  auto& r = registry();
+  const std::lock_guard lock(r.mutex);
+  return r.routes.targets;
+}
+void discover_pfds(std::uint64_t now) noexcept {
+  observe_safely([&] {
+    auto inventory = pfd_inventory();
+    auto& r = registry();
+    const std::lock_guard lock(r.mutex);
+    for (auto i = r.resources.begin(); i != r.resources.end();) {
+      if (!i->second->alive) {
+        r.routes.forget(i->second->id);
+        i = r.resources.erase(i);
+      } else
+        ++i;
+    }
+    std::erase_if(r.roots, [](const auto& p) { return !p.second->alive; });
+    std::erase_if(r.lists, [](const auto& p) { return !p.second->alive; });
+    std::erase_if(r.rtvs, [](const auto& p) { return !p.second.resource || !p.second.resource->alive; });
+    if (now && (!r.routes.targets[0] || !r.routes.targets[1])) {
+      const auto& detection = r.detector.observe(inventory.data(), inventory.size(), now);
+      if (detection.valid)
+        r.routes.adopt_detected(detection.targets);
+    }
+  });
+}
+}  // namespace taxi_camera::standalone

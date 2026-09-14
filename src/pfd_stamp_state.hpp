@@ -4,7 +4,9 @@
 #define NOMINMAX
 #endif
 #include <d3d12.h>
+#ifndef TAXI_NATIVE_RUNTIME
 #include <reshade_api.hpp>
+#endif
 
 #include <array>
 #include <cstdint>
@@ -25,7 +27,9 @@ struct PfdRootLayout {
 
 // Pinned ReShade 6.8 D3D12 init_pipeline_layout metadata only. Static sampler
 // metadata is appended by that implementation and is NOT a native root index.
+#ifndef TAXI_NATIVE_RUNTIME
 PfdRootLayout parse_pfd_root_layout(std::uint32_t count, const reshade::api::pipeline_layout_param* parameters) noexcept;
+#endif
 
 struct PfdRootValue {
   std::uint64_t known = 0;
@@ -50,6 +54,10 @@ class PfdGraphicsState {
                  std::uint64_t layout_generation,
                  const PfdRootLayout& layout,
                  bool exact_native_change = false) noexcept;
+  // Native-only observations from the beginning of a recording also support
+  // signatures created before the bridge loaded. Replay only arguments actually
+  // set since Reset/signature change; all others were undefined in the app.
+  void bind_observed_root(ID3D12RootSignature* root, std::uint64_t generation) noexcept;
   void constants(UINT index, UINT first, UINT count, const void* data) noexcept;
   void table(UINT index, UINT64 address) noexcept;
   void descriptor(UINT index, PfdRootKind kind, UINT64 address) noexcept;
@@ -85,6 +93,9 @@ class PfdGraphicsState {
   std::array<bool, 64> undefined_tables_{};
   std::array<std::uint32_t, 64> constants_{};
   std::array<std::uint8_t, 64> constant_offsets_{};
+  bool observed_arguments_ = false;
+  UINT observed_word_count_ = 0;
+  std::array<std::uint16_t, 64> observed_word_keys_{};
   bool heaps_known_ = false;
   UINT heap_count_ = 0;
   std::array<ID3D12DescriptorHeap*, 2> heaps_{};

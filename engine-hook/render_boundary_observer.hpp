@@ -88,6 +88,14 @@ struct Callbacks {
                                 ID3D12GraphicsCommandList*,
                                 std::uint64_t object_generation,
                                 std::uint32_t reason_flags) noexcept = nullptr;
+  // Exact native render-pass descriptors, before pass invalidation. Metadata only.
+  void (*pass_targets)(void*,
+                       ID3D12GraphicsCommandList*,
+                       std::uint64_t,
+                       UINT,
+                       const D3D12_RENDER_PASS_RENDER_TARGET_DESC*,
+                       const D3D12_RENDER_PASS_DEPTH_STENCIL_DESC*) noexcept = nullptr;
+  void (*pass_ended)(void*, ID3D12GraphicsCommandList*, std::uint64_t) noexcept = nullptr;
 };
 struct Result {
   bool ready = false;

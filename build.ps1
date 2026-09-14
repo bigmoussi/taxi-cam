@@ -2,13 +2,18 @@
 param(
     [switch]$Bootstrap,
     [switch]$Validate,
-    [string]$ReShadeDll
+    [string]$ReShadeDll,
+    [switch]$LegacyReShade
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+if (-not $LegacyReShade -and -not $ReShadeDll) {
+    & (Join-Path $PSScriptRoot 'build-native.ps1') -Bootstrap:$Bootstrap -Validate:$Validate
+    return
+}
 if ($Bootstrap) {
-    & (Join-Path $PSScriptRoot 'bootstrap.ps1')
+    & (Join-Path $PSScriptRoot 'bootstrap.ps1') -LegacyReShade
 }
 
 $dependencies = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'dependencies.json') | ConvertFrom-Json

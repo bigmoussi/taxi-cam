@@ -1,35 +1,30 @@
-# Multiple-aircraft package design
+# Aircraft adapters
 
-This is the intended next architecture, not a claim that profile loading or A350 support is already implemented. The project is independently built and maintained. The current runtime still hardcodes the A380X adapter in several places.
+The native companion separates Windows UI and saved settings from the camera renderer and aircraft controls. Version 0.8.0 ships one adapter: **FlyByWire A380X**. A350 support is not implemented.
 
-The shared core owns native camera lifecycle and MSFS build guards, GPU capture and synchronization, composition, telemetry transport, recovery and diagnostics. Each aircraft adapter supplies the controls, geometry and display contracts. The planned Windows companion owns configuration and profile selection, with a small bridge inside the simulator; the present prototype uses ReShade for that bridge.
+`profiles/catalog.hpp` is the adapter catalog. The A380 entry supplies its stable profile key, display layout kind, actual TAXI-light Lvars, push events, material-label hints, calibrated mounts and pane dimensions. The telemetry provider and camera defaults consume this catalog. Settings are saved under the profile key; resource IDs and diagnostic activation never persist.
 
-## Profile contract
+The native engine contract is independent of aircraft profiles. A profile cannot supply process addresses, machine code or unchecked hooks. MSFS build guards, resource lifetimes, queue synchronization and scene ownership remain shared.
 
-| Profile data | Why it is needed |
+## Contracts for another aircraft
+
+| Adapter responsibility | Required evidence |
 | --- | --- |
-| Aircraft/package identity and supported versions | Select the correct adapter on load; stop and release the previous adapter when aircraft changes. A title substring alone may match liveries or unrelated variants. |
-| Display binding strategy | Exact runtime labels where present, or an independently validated binding/identification method. Never save transient texture IDs or assume the current activity heuristic works for another aircraft. |
-| Texture and delivery contract | Dimensions, format, mip/sample layout, upper/lower region boundaries and any instrument layers that redraw over the image. The destination might not be called a PFD. |
-| Controls | State variables, side mapping, ON/OFF or toggle input events, acknowledgement behavior and power conditions. A lamp/output variable alone is insufficient to change the aircraft controller's latch. |
-| Cameras | Aircraft-relative positions, orientation, FOV, reference origin and available exterior-model geometry for each view. Camera coordinate conventions must be explicit. |
-| Presentation | Pane sizes, divider, reference guides, ground-speed position, colour/exposure settings and the regions to preserve. |
-| Operating rules | Speed cutoff, activation conditions and automatic/manual behavior appropriate to the supported aircraft. The current requested A380 cutoff is strictly GS > 60 knots. |
+| Aircraft identity | A reliable installed-aircraft/version match and explicit handling of aircraft changes |
+| Controls | Light/state variables, input events, left/right mapping and acknowledgement of automatic OFF |
+| Display identification | Verified labels or another demonstrated identity strategy; transient IDs are insufficient |
+| Display layout | Texture format, dimensions, mips, pane placement, reference guides and areas to preserve |
+| Camera geometry | Body-relative datum, transforms, lenses and exterior-model availability |
+| Operating policy | Speed cutoff, power/activation conditions and telemetry freshness |
 
-The profile schema must be validated before allocation or activation. Configuration can describe known adapters; it must not supply unchecked process addresses, arbitrary hooks or executable code.
+The current GPU presentation, native texture observation and PFD detector intentionally implement the A380 layout: 768 × 1024, five mips, RGBA8 destination, 768 × 255 nose and 768 × 504 tail. The catalog records that contract; adding an entry alone does not implement a different display. Extend the layout/identification adapter and its pixel tests together.
 
-## Current A380-specific seams to extract
+The initial A380 detector uses the previously tested high-activity pair ordering. The material strings are hints, not proof that every runtime resource has a label. Surviving target identity retains its side. Losing both established textures can require explicit reassignment; the UI provides per-side selection, calibration and swap.
 
-- `src/pfd_target_detector.hpp`: 768x1024, five-mip RGBA8 target filtering and the initial observed ordering heuristic.
-- `src/calibration.hpp`, `src/camera_compositor_d3d12.hpp` and the capture/resize filters: the 763-row upper region and 768x255 / 768x504 source contract, guides and layout.
-- `native-camera/body_pose_provider.cpp`: two light Lvars and corresponding aircraft push events.
-- `native-camera/aircraft_mounts.hpp`, `taxi-camera-mounts.cfg`: current nose and tail transforms and FOV.
-- `native-camera/taxi_speed_cutoff.hpp`: the current speed rule and toggle acknowledgement policy.
+## Adding the requested A350
 
-Extract and validate these contracts together. Changing two strings while leaving the render-target filters, geometry or aircraft latch handling unchanged is not sufficient.
+Inspect its actual display layers, control signals/events and exterior model. Implement and validate its identity and layout adapter, add a catalog entry and give it an independent settings file. Verify camera perspectives, both buttons, OFF feedback, speed policy, aircraft reload, time-of-day changes and lost telemetry. Measure completed frames and simulator frame-time at the actual pane sizes.
 
-## Adding the requested iniBuilds A350 adapter
+No A350 Lvar, material name, input event or mount transform is assumed here. The shared rendering and native camera lifecycle can be reused once those contracts are demonstrated.
 
-First inspect the installed aircraft's actual button signals/input events, destination displays, rendering layers and exterior model. Verify resource identity, both side mappings and the camera perspectives while parked. Then test flight/aircraft reload, time-of-day changes, temporary telemetry loss, target replacement and the aircraft's intended automatic-off behavior. Measure completed camera frames and simulator frame-time impact at the actual pane sizes.
-
-No A350 Lvar, label, event name or camera transform is assumed here. A separate adapter can reuse the rendering core once those contracts have been demonstrated. It remains possible that a different display implementation will need an additional delivery adapter.
+See the [working architecture](architecture.md) for the shared rendering and lifecycle contracts, and the [runtime reference](runtime-reference.md) for current profile values and settings.

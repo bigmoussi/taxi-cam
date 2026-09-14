@@ -6,6 +6,7 @@
 #include <array>
 #include <cstring>
 #include <cwchar>
+#include "../profiles/catalog.hpp"
 #include "body_pose_math.hpp"
 #include "taxi_speed_cutoff.hpp"
 
@@ -277,7 +278,7 @@ DWORD WINAPI worker(void*) noexcept {
       taxi_packets[taxi_packet_cursor++ % taxi_packets.size()] = id;
   };
   bool taxi_defined = last_packet != nullptr;
-  for (const auto name : {"L:A32NX_FCU_EFIS_L_TAXI_LIGHT_ON", "L:A32NX_FCU_EFIS_R_TAXI_LIGHT_ON"}) {
+  for (const auto name : profiles::active().taxi_lvars) {
     if (!taxi_defined)
       break;
     taxi_defined = SUCCEEDED(define(session, 3, name, "number", 4, 0, 0xffffffffu));
@@ -291,8 +292,7 @@ DWORD WINAPI worker(void*) noexcept {
 #if !defined(TAXI_BODY_POSE_PROVIDER_VALIDATION) && !defined(TAXI_BODY_POSE_PROVIDER_EXTERNAL_VALIDATION)
   if (map_event && transmit_event) {
     for (unsigned side = 0; side < 2; ++side) {
-      taxi_events[side] = SUCCEEDED(map_event(session, 10 + side,
-          side == 0 ? "A32NX.FCU_EFIS_L_TAXI_PUSH" : "A32NX.FCU_EFIS_R_TAXI_PUSH"));
+      taxi_events[side] = SUCCEEDED(map_event(session, 10 + side, profiles::active().taxi_events[side]));
       remember_taxi_packet();
     }
   }
@@ -431,17 +431,17 @@ DWORD WINAPI worker(void*) noexcept {
     const auto buttons = get_taxi_buttons();
     AcquireSRWLockExclusive(&state.lock);
     const auto commands = state.speed_cutoff.update(GetTickCount64(), speed.valid, speed.knots, buttons.valid,
-        (buttons.left_on ? 1u : 0u) | (buttons.right_on ? 2u : 0u), buttons.sample_ms);
-    state.cutoff_status = state.speed_cutoff.pending() ? "waiting_for_taxi_off" :
-        state.speed_cutoff.inhibited() ? "ground_speed_above_60_knots" : "below_speed_limit";
+                                                    (buttons.left_on ? 1u : 0u) | (buttons.right_on ? 2u : 0u), buttons.sample_ms);
+    state.cutoff_status = state.speed_cutoff.pending()     ? "waiting_for_taxi_off"
+                          : state.speed_cutoff.inhibited() ? "ground_speed_above_60_knots"
+                                                           : "below_speed_limit";
     ReleaseSRWLockExclusive(&state.lock);
     for (unsigned side = 0; side < 2; ++side) {
       if (!(commands & (1u << side)))
         continue;
       // Public SimConnect priority flag: GroupID is an explicit priority.
       // https://docs.flightsimulator.com/msfs2024/retail/programming-apis/simconnect/api-reference/events-and-data/simconnect_transmitclientevent/
-      const bool accepted = taxi_events[side] && transmit_event &&
-          SUCCEEDED(transmit_event(session, 0, 10 + side, 0, 1, 16));
+      const bool accepted = taxi_events[side] && transmit_event && SUCCEEDED(transmit_event(session, 0, 10 + side, 0, 1, 16));
       if (taxi_events[side])
         remember_taxi_packet();
       AcquireSRWLockExclusive(&state.lock);

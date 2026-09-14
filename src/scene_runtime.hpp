@@ -30,10 +30,20 @@ void set_ground_speed(std::uint64_t key, float knots, bool valid);
 void reset_feed(std::uint64_t key);
 void service();
 Snapshot snapshot(std::uint64_t key);
+#ifndef TAXI_NATIVE_RUNTIME
 bool stamp(reshade::api::command_list* list,
            std::uint64_t key,
            DXGI_FORMAT format,
            UINT width,
            UINT height,
            DXGI_FORMAT depth_format = DXGI_FORMAT_UNKNOWN);
+#else
+bool stamp(ID3D12GraphicsCommandList*,
+           const PfdGraphicsState&,
+           std::uint64_t key,
+           DXGI_FORMAT format,
+           UINT width,
+           UINT height,
+           DXGI_FORMAT depth_format = DXGI_FORMAT_UNKNOWN);
+#endif
 }  // namespace taxi_camera::scene_runtime

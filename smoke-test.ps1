@@ -1,11 +1,11 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)]
     [string]$ReShadeDll
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+if (-not $ReShadeDll) { & (Join-Path $PSScriptRoot 'smoke-native.ps1'); return }
 $buildDirectory = Join-Path $PSScriptRoot 'build'
 $addon = Join-Path $buildDirectory 'taxi-camera-native.addon64'
 $validation = Get-Content -Raw -LiteralPath (Join-Path $buildDirectory 'validation-result.json') | ConvertFrom-Json
