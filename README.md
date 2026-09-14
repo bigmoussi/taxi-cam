@@ -10,6 +10,16 @@ The app does **not** adjust the simulator's graphics-quality or performance sett
 
 ## Install
 
+Before installing, you need:
+
+- **64-bit Windows 10 or Windows 11**, with Windows updates and a current graphics driver.
+- **A Direct3D 12 GPU supporting feature level 12_0 or higher**, with the newer Direct3D 12 interfaces used by MSFS 2024. The code is vendor-neutral and intended for **NVIDIA and AMD**. "DirectX 12 installed" alone does not guarantee compatibility; cross-vendor live simulator testing is still pending.
+- **Microsoft Flight Simulator 2024** and the **FlyByWire A380X**. The simulator installation must include its `SimConnect_internal.dll` client.
+- **[Microsoft Visual C++ v14 Redistributable (x64)](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist)**, required by the simulator's SimConnect client. MSFS normally installs it; install or repair the [x64 runtime](https://aka.ms/vc14/vc_redist.x64.exe) if setup reports it missing.
+- **Windows PowerShell 5.1**, normally included with Windows, for installation and update checks. Internet access to GitHub is needed for automatic updates.
+
+Setup checks Windows, required system components, the simulator executable, SimConnect client and Visual C++ runtime files before changing application files or startup configuration. If a required component is missing or has the wrong architecture, setup explains how to repair it. GPU and simulator compatibility are checked when the app connects to MSFS. You do not need the MSFS SDK or build tools to use Taxi Cam.
+
 Download the Windows x64 **setup EXE** from [Releases](https://github.com/rthoms334/taxi-cam/releases/latest). Close MSFS and exit any running Taxi Cam instance, then open setup.
 
 Choose the folder containing `FlightSimulator2024.exe` and the simulator's `exe.xml` launch configuration. Setup attempts to find the configuration and reuses existing installation choices on updates.

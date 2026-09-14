@@ -2,6 +2,12 @@
 
 Use this page to look up values and diagnose the current runtime. For the explanation of how images move from MSFS cameras to the PFD, start with [Architecture](architecture.md).
 
+## Graphics requirements
+
+The graphics implementation uses standard Direct3D 12 interfaces without NVIDIA- or AMD-specific APIs. Device creation requests feature level `12_0`, and bridge initialization also requires the simulator's device to expose `ID3D12Device10` with the expected native interface identity. The DirectX API version, GPU feature level and available runtime interfaces are distinct requirements. A generic DirectX 12 label is insufficient; keep Windows and graphics drivers current. NVIDIA and AMD are intended targets, but cross-vendor live simulator compatibility has not been established.
+
+Setup checks the presence and x64 headers of required DLLs, but does not load simulator code or probe the GPU. Xbox/MS Store installations can protect executable contents, so setup checks that `FlightSimulator2024.exe` exists; the launcher validates the loaded AMD64 image when connecting. These prerequisite checks do not establish live simulator compatibility.
+
 ## Settings and files
 
 The companion saves settings to:

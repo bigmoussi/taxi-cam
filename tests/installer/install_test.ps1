@@ -1,11 +1,13 @@
 $ErrorActionPreference = 'Stop'
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 $root = $repoRoot
+. (Join-Path $repoRoot 'tests/support/installer_fixture.ps1')
 $fixture = Join-Path $root ('build/native/install-validation-' + [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss-fff'))
 $sim = Join-Path $fixture 'sim'
 $app = Join-Path $fixture 'app'
 New-Item -ItemType Directory -Path $sim -Force | Out-Null
-[IO.File]::WriteAllText((Join-Path $sim 'FlightSimulator2024.exe'),'fixture; never executed')
+New-TaxiFixtureImage (Join-Path $sim 'FlightSimulator2024.exe') $false
+New-TaxiFixtureImage (Join-Path $sim 'SimConnect_internal.dll')
 [IO.File]::WriteAllText((Join-Path $sim 'taxi-camera-native.addon64'),'legacy fixture')
 [IO.File]::WriteAllText((Join-Path $sim 'dxgi.dll'),'unrelated graphics fixture')
 Copy-Item -LiteralPath (Join-Path $root 'taxi-camera-mounts.cfg') -Destination (Join-Path $sim 'taxi-camera-mounts.cfg')

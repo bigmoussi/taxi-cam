@@ -4,13 +4,15 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 Set-StrictMode -Version Latest
 $repo = $repoRoot
+. (Join-Path $repoRoot 'tests/support/installer_fixture.ps1')
 $installerPath = (Resolve-Path -LiteralPath $Installer).Path
 $receipt = Get-Content -Raw -LiteralPath ($installerPath + '.json') | ConvertFrom-Json
 if ((Get-FileHash -LiteralPath $installerPath).Hash -ne $receipt.installerSha256) { throw 'Installer hash does not match its build receipt.' }
 $testRoot = Join-Path $repo ('build/installer-tests/' + [Guid]::NewGuid().ToString('N'))
 $sim = Join-Path $testRoot 'sim'; $xmlPath = Join-Path $testRoot 'config/exe.xml'
 New-Item -ItemType Directory -Force -Path $sim,(Split-Path -Parent $xmlPath) | Out-Null
-'Fixture marker only; never executed' | Set-Content -LiteralPath (Join-Path $sim 'FlightSimulator2024.exe')
+New-TaxiFixtureImage (Join-Path $sim 'FlightSimulator2024.exe') $false
+New-TaxiFixtureImage (Join-Path $sim 'SimConnect_internal.dll')
 $xml = '<?xml version="1.0"?><SimBase.Document Type="Launch"><Disabled>False</Disabled><Launch.Addon><Name>Other Addon</Name><Path>C:\Other\other.exe</Path></Launch.Addon></SimBase.Document>'
 function Invoke-Setup([string]$Executable,[string]$App,[string]$Log,[switch]$Paths) {
     $arguments = @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',('/DIR="' + $App + '"'),('/LOG="' + $Log + '"'))
@@ -48,6 +50,18 @@ $compiler = & (Join-Path $repo 'installer/bootstrap.ps1')
 if ($LASTEXITCODE -ne 0) { throw "Fixture compilation failed: $testRoot" }
 $fixture = Join-Path $testRoot 'isolated-setup.exe'; $app = Join-Path $testRoot 'app'
 $xml | Set-Content -LiteralPath $xmlPath
+# Keep dependency checking active in the compiled fixture: only process discovery is mocked.
+$client = Join-Path $sim 'SimConnect_internal.dll'
+Remove-Item -LiteralPath $client
+$missingApp = Join-Path $testRoot 'missing-dependency'
+$before = (Get-FileHash -LiteralPath $xmlPath).Hash
+$dependencyLog = Join-Path $testRoot 'missing-dependency.log'
+$exitCode = Invoke-Setup $fixture $missingApp $dependencyLog -Paths
+Assert-That ($exitCode -ne 0) 'Installer accepted a missing SimConnect client.'
+Assert-That ((Get-Content -Raw -LiteralPath $dependencyLog).Contains('SimConnect_internal.dll')) 'Installer did not explain the missing SimConnect dependency.'
+Assert-That ((Get-FileHash -LiteralPath $xmlPath).Hash -eq $before) 'Dependency refusal changed startup configuration.'
+Assert-That (-not (Test-Path -LiteralPath (Join-Path $missingApp 'taxi-cam.exe'))) 'Dependency refusal wrote application files.'
+New-TaxiFixtureImage $client
 $exitCode = Invoke-Setup $fixture $app (Join-Path $testRoot 'install.log') -Paths
 Assert-That ($exitCode -eq 0) "Isolated first install failed ($exitCode): $testRoot"
 foreach ($name in @('taxi-cam.exe','taxi-camera-bridge.dll')) { Assert-That ((Get-FileHash -LiteralPath (Join-Path $app $name)).Hash -eq $receipt.files.PSObject.Properties[$name].Value) "Installed hash mismatch: $name" }
@@ -166,5 +180,5 @@ if ($shortLength -gt 0 -and $shortLength -lt $shortBuffer.Capacity -and $shortPa
 }
 Write-Output "Short-path install and rollback: $shortPathResult"
 
-[ordered]@{passed=$true;installerSha256=$receipt.installerSha256;shortPathValidation=$shortPathResult;tests=@('exact production rejection','isolated first install','remembered upgrade paths and former name migration','calibration preservation','post-transaction Setup rollback restores former executable and startup','retry after rename rollback','isolated uninstall','inner concurrent XML edit preserved','post-transaction concurrent XML edit preserved with recovery snapshot');simulatorVerified=$false} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $testRoot 'result.json') -Encoding utf8
+[ordered]@{passed=$true;installerSha256=$receipt.installerSha256;shortPathValidation=$shortPathResult;tests=@('exact production rejection','missing SimConnect refused before application and startup writes','isolated first install','remembered upgrade paths and former name migration','calibration preservation','post-transaction Setup rollback restores former executable and startup','retry after rename rollback','isolated uninstall','inner concurrent XML edit preserved','post-transaction concurrent XML edit preserved with recovery snapshot');simulatorVerified=$false} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $testRoot 'result.json') -Encoding utf8
 Write-Output "Installer checks passed: $testRoot"

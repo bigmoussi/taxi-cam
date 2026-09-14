@@ -10,6 +10,7 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot 'exe_xml.ps1')
 . (Join-Path $PSScriptRoot 'validation_receipt.ps1')
+. (Join-Path $PSScriptRoot 'prerequisites.ps1')
 if (-not $PayloadDirectory) {
     $PayloadDirectory = if (Test-Path -LiteralPath (Join-Path $PSScriptRoot '../build/native/validation.json')) { Join-Path $PSScriptRoot '../build/native' } else { $PSScriptRoot }
 }
@@ -39,6 +40,7 @@ function Assert-Closed {
     }
 }
 Assert-Closed
+Assert-TaxiPrerequisites -SimulatorDirectory $sim
 $hash = if (Test-Path -LiteralPath $ExeXml) { (Get-FileHash -LiteralPath $ExeXml).Hash } else { '' }
 $document = Read-TaxiLaunchXml $ExeXml
 $globalDisabled = $document.DocumentElement.SelectSingleNode('Disabled')

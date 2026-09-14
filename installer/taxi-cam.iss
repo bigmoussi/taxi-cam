@@ -30,6 +30,7 @@ DefaultGroupName=Taxi Cam
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
+MinVersion=10.0
 DisableDirPage=no
 DisableProgramGroupPage=yes
 WizardStyle=modern
@@ -75,6 +76,13 @@ var
 function Q(Value: String): String;
 begin
   Result := '"' + Value + '"';
+end;
+
+function InitializeSetup: Boolean;
+begin
+  Result := FileExists(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'));
+  if not Result then
+    SuppressibleMsgBox('Taxi Cam setup and updates require Windows PowerShell 5.1. Restore the Windows PowerShell component and run setup again.', mbError, MB_OK, IDOK);
 end;
 
 function RunHelper(Mode, Script, Destination, State: String): Boolean;

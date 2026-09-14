@@ -35,7 +35,7 @@ foreach ($file in Get-ChildItem -LiteralPath $payload -File -Recurse) {
 foreach ($name in @('taxi-cam.exe','taxi-camera-bridge.dll')) {
     if ((Get-FileHash -LiteralPath (Join-Path $payload $name)).Hash -ne $receipt.files.PSObject.Properties[$name].Value) { throw "Package binary differs from validated build: $name" }
 }
-foreach ($name in @('installer/install.ps1','installer/uninstall.ps1','installer/exe_xml.ps1','installer/validation_receipt.ps1')) {
+foreach ($name in @('installer/install.ps1','installer/uninstall.ps1','installer/exe_xml.ps1','installer/validation_receipt.ps1','installer/prerequisites.ps1')) {
     Copy-Item -LiteralPath (Join-Path $repoRoot $name) -Destination (Join-Path $payload ([IO.Path]::GetFileName($name)))
 }
 Copy-Item -LiteralPath (Join-Path $repoRoot 'build/native/validation.json') -Destination $payload
