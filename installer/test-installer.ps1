@@ -50,6 +50,7 @@ $xml | Set-Content -LiteralPath $xmlPath
 $exitCode = Invoke-Setup $fixture $app (Join-Path $testRoot 'install.log') -Paths
 Assert-That ($exitCode -eq 0) "Isolated first install failed ($exitCode): $testRoot"
 foreach ($name in @('taxi-cam.exe','taxi-camera-bridge.dll')) { Assert-That ((Get-FileHash -LiteralPath (Join-Path $app $name)).Hash -eq $receipt.files.PSObject.Properties[$name].Value) "Installed hash mismatch: $name" }
+Assert-That ((Get-FileHash -LiteralPath (Join-Path $app 'THIRD_PARTY_NOTICES.txt')).Hash -eq (Get-FileHash -LiteralPath (Join-Path $payload 'THIRD_PARTY_NOTICES.txt')).Hash) 'Installer omitted or changed the runtime notices.'
 Assert-That (@(Get-ChildItem -LiteralPath $app -Filter '*.ps1' -Recurse).Count -eq 0) 'Installer left loose PowerShell files in the application.'
 Assert-That (@(Get-ChildItem -LiteralPath $app -Directory).Count -eq 0) 'Installer left support or staging folders in the application.'
 [xml]$launch = Get-Content -Raw -LiteralPath $xmlPath
@@ -136,5 +137,33 @@ $conflict = Get-Content -Raw -LiteralPath (Join-Path $laterState 'error.txt')
 Assert-That ($conflict -match 'Recovery snapshot: (.+)$') 'Rollback did not retain a recovery snapshot.'
 Assert-That (Test-Path -LiteralPath (Join-Path $Matches[1] 'transaction.json')) 'The reported rollback snapshot does not exist.'
 
-[ordered]@{passed=$true;installerSha256=$receipt.installerSha256;tests=@('exact production rejection','isolated first install','remembered upgrade paths and former name migration','calibration preservation','post-transaction Setup rollback restores former executable and startup','retry after rename rollback','isolated uninstall','inner concurrent XML edit preserved','post-transaction concurrent XML edit preserved with recovery snapshot');simulatorVerified=$false} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $testRoot 'result.json') -Encoding utf8
+# Inno uses short temporary paths on hosted Windows. Exercise that path form
+# explicitly where the filesystem supports 8.3 names, without changing its policy.
+if (-not ('TaxiInstallerShortPath' -as [type])) {
+    Add-Type -TypeDefinition 'using System; using System.Text; using System.Runtime.InteropServices; public class TaxiInstallerShortPath { [DllImport("kernel32.dll", CharSet=CharSet.Unicode)] public static extern uint GetShortPathName(string path, StringBuilder output, int capacity); }'
+}
+$shortBuffer = New-Object Text.StringBuilder 32768
+$shortLength = [TaxiInstallerShortPath]::GetShortPathName($payload, $shortBuffer, $shortBuffer.Capacity)
+$shortPath = $shortBuffer.ToString()
+$shortPathResult = 'not-run: 8.3 alias unavailable'
+if ($shortLength -gt 0 -and $shortLength -lt $shortBuffer.Capacity -and $shortPath -ine $payload) {
+    $longPayload = $payload
+    try {
+        $payload = $shortPath
+        $xml | Set-Content -LiteralPath $xmlPath
+        $shortApp = Join-Path $testRoot 'short-path-app'; $shortState = Join-Path $testRoot 'short-path-state'
+        $exitCode = Invoke-FixtureRuntime 'Install' $shortApp $shortState
+        Assert-That ($exitCode -eq 0) 'Short-path payload installation failed.'
+        foreach ($name in @('taxi-cam.exe','taxi-camera-bridge.dll','taxi-camera-mounts.cfg','THIRD_PARTY_NOTICES.txt')) {
+            Assert-That ((Get-FileHash -LiteralPath (Join-Path $shortApp $name)).Hash -eq (Get-FileHash -LiteralPath (Join-Path $payload $name)).Hash) "Short-path install omitted or changed $name."
+        }
+        $exitCode = Invoke-FixtureRuntime 'Rollback' $shortApp $shortState
+        Assert-That ($exitCode -eq 0) 'Short-path rollback failed.'
+        Assert-That (@(Get-ChildItem -LiteralPath $shortApp -File -Recurse).Count -eq 0) 'Short-path rollback retained installed files.'
+        $shortPathResult = 'passed'
+    } finally { $payload = $longPayload }
+}
+Write-Output "Short-path install and rollback: $shortPathResult"
+
+[ordered]@{passed=$true;installerSha256=$receipt.installerSha256;shortPathValidation=$shortPathResult;tests=@('exact production rejection','isolated first install','remembered upgrade paths and former name migration','calibration preservation','post-transaction Setup rollback restores former executable and startup','retry after rename rollback','isolated uninstall','inner concurrent XML edit preserved','post-transaction concurrent XML edit preserved with recovery snapshot');simulatorVerified=$false} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $testRoot 'result.json') -Encoding utf8
 Write-Output "Installer checks passed: $testRoot"

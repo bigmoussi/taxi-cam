@@ -85,9 +85,10 @@ try {
     $destFull = [IO.Path]::GetFullPath($Destination).TrimEnd('\')
     $payloadFull = (Resolve-Path -LiteralPath $PayloadDirectory).Path
     $targets = @((Join-Path $destFull 'installation.json'), (Join-Path $destFull '380-taxi-cam.exe'), $ExeXml)
-    foreach ($file in Get-ChildItem -LiteralPath $payloadFull -File -Recurse) {
-        if ($file.Name -notin @('taxi-cam.exe','taxi-camera-bridge.dll','taxi-camera-mounts.cfg','THIRD_PARTY_NOTICES.txt')) { continue }
-        $targets += Join-Path $destFull $file.FullName.Substring($payloadFull.Length + 1)
+    # Setup can pass an 8.3 temporary path. Directory enumeration expands it,
+    # so slicing absolute paths by the original prefix length corrupts targets.
+    foreach ($name in @('taxi-cam.exe','taxi-camera-bridge.dll','taxi-camera-mounts.cfg','THIRD_PARTY_NOTICES.txt')) {
+        $targets += Join-Path $destFull $name
     }
     $legacy = Join-Path $SimulatorDirectory 'taxi-camera-native.addon64'
     $legacyBackups = @(Get-ChildItem -LiteralPath $SimulatorDirectory -Filter 'taxi-camera-native.addon64.disabled-native-*' | ForEach-Object FullName)
@@ -117,18 +118,17 @@ try {
             $entry.owned = $entry.installedHash -ne $priorHash
         }
         $state | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $statePath -Encoding utf8
-        foreach ($file in Get-ChildItem -LiteralPath $payloadFull -File -Recurse) {
-            $relative = $file.FullName.Substring($payloadFull.Length + 1)
-            if ($relative -ne 'THIRD_PARTY_NOTICES.txt') { continue }
-            $target = Join-Path $destFull $relative
+        foreach ($name in @('THIRD_PARTY_NOTICES.txt')) {
+            $source = Join-Path $payloadFull $name
+            $target = Join-Path $destFull $name
             New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
             $entry = @($snapshot | Where-Object { $_.path -eq $target })[0]
-            $entry.installedHash = (Get-FileHash -LiteralPath $file.FullName).Hash
+            $entry.installedHash = (Get-FileHash -LiteralPath $source).Hash
             $entry.owned = $true
             $state | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $statePath -Encoding utf8
             $noticeTemp = Join-Path $destFull ('.notice-' + [Guid]::NewGuid().ToString('N'))
             try {
-                Copy-Item -LiteralPath $file.FullName -Destination $noticeTemp
+                Copy-Item -LiteralPath $source -Destination $noticeTemp
                 if (Test-Path -LiteralPath $target) { [IO.File]::Replace($noticeTemp, $target, [NullString]::Value) }
                 else { [IO.File]::Move($noticeTemp, $target) }
             } finally { if (Test-Path -LiteralPath $noticeTemp) { Remove-Item -LiteralPath $noticeTemp } }
