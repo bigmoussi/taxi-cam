@@ -49,7 +49,7 @@ if (($globalDisabled -and $globalDisabled.InnerText -ieq 'True') -or
 Set-TaxiStartupEntry $document $exe $simExe
 $tag = [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss-fff')
 New-Item -ItemType Directory -Force -Path $dest | Out-Null
-$staging = Join-Path $dest ('staging-' + $tag)
+$staging = Join-Path ([IO.Path]::GetTempPath()) ('380-taxi-cam-install-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $staging | Out-Null
 foreach ($name in @('380-taxi-cam.exe','taxi-camera-bridge.dll')) {
     Copy-Item -LiteralPath (Join-Path $payload $name) -Destination (Join-Path $staging $name)
@@ -70,17 +70,25 @@ if (Test-Path -LiteralPath $previousRecordPath) {
     }
 }
 $xmlBackup = $null
+$xmlWritten = $false
+$xmlWrittenHash = ''
+$rollbackComplete = $true
+$mount = Join-Path $dest 'taxi-camera-mounts.cfg'
+$hadMount = Test-Path -LiteralPath $mount
+$recordBackup = Join-Path $staging 'installation.json'
+if (Test-Path -LiteralPath $previousRecordPath) { Copy-Item -LiteralPath $previousRecordPath -Destination $recordBackup }
+$startMenu = if ($NoShortcut) { $null } else { Join-Path $env:APPDATA 'Microsoft/Windows/Start Menu/Programs/380 Taxi Cam.lnk' }
 try {
     Assert-Closed
     foreach ($name in @('380-taxi-cam.exe','taxi-camera-bridge.dll')) {
         $target = Join-Path $dest $name
         if (Test-Path -LiteralPath $target) {
-            $backup = $target + '.backup-' + $tag
+            $backup = Join-Path $staging ($name + '.backup')
             Copy-Item -LiteralPath $target -Destination $backup
             $prior[$name] = $backup
         }
-        Copy-Item -LiteralPath (Join-Path $staging $name) -Destination $target -Force
         $installed += $name
+        Copy-Item -LiteralPath (Join-Path $staging $name) -Destination $target -Force
         if ((Get-FileHash -LiteralPath $target).Hash -ne $receipt.files.PSObject.Properties[$name].Value) { throw "Installed binary verification failed: $name" }
     }
     $mount = Join-Path $dest 'taxi-camera-mounts.cfg'
@@ -96,7 +104,17 @@ try {
         Move-Item -LiteralPath $legacy -Destination $disabled
     }
     $xmlBackup = Save-TaxiLaunchXml $document $ExeXml $hash
+    $xmlWritten = $true
+    $xmlWrittenHash = (Get-FileHash -LiteralPath $ExeXml).Hash
+    [ordered]@{
+        version=$receipt.version; buildNumber=$receipt.buildNumber; installedUtc=[DateTime]::UtcNow.ToString('o'); destination=$dest;
+        simulator=$simExe; exeXml=$ExeXml; exeXmlBackup=$xmlBackup; legacyBackup=$(if ($disabled) { $disabled } else { $previousLegacy });
+        files=$receipt.files; shortcut=$startMenu; simulatorVerified=$false
+    } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $previousRecordPath -Encoding utf8
 } catch {
+    $installFailure = $_
+    $rollbackComplete = $false
+    try {
     foreach ($name in $installed) {
         $target = Join-Path $dest $name
         if ($prior.ContainsKey($name)) { Copy-Item -LiteralPath $prior[$name] -Destination $target -Force }
@@ -105,9 +123,23 @@ try {
     if ($disabled -and (Test-Path -LiteralPath $disabled) -and -not (Test-Path -LiteralPath $legacy)) {
         Move-Item -LiteralPath $disabled -Destination $legacy
     }
-    throw
+    if ($xmlWritten) {
+        if (-not (Test-Path -LiteralPath $ExeXml) -or (Get-FileHash -LiteralPath $ExeXml).Hash -ne $xmlWrittenHash) { throw 'exe.xml changed after installation; the newer contents were preserved.' }
+        if ($xmlBackup) { Copy-Item -LiteralPath $xmlBackup -Destination $ExeXml -Force }
+        elseif (Test-Path -LiteralPath $ExeXml) { Remove-Item -LiteralPath $ExeXml }
+    }
+    if (-not $hadMount -and (Test-Path -LiteralPath $mount)) { Remove-Item -LiteralPath $mount }
+    if (Test-Path -LiteralPath $recordBackup) { Copy-Item -LiteralPath $recordBackup -Destination $previousRecordPath -Force }
+    elseif (Test-Path -LiteralPath $previousRecordPath) { Remove-Item -LiteralPath $previousRecordPath }
+    $rollbackComplete = $true
+    } catch { throw "Installation failed and rollback needs attention. Recovery files: $staging. $($_.Exception.Message)" }
+    throw $installFailure
+} finally {
+    # The GUID staging directory was created by this invocation; no installed file is removed here.
+    if ($rollbackComplete -and [IO.Path]::GetFullPath($staging).StartsWith([IO.Path]::GetFullPath([IO.Path]::GetTempPath()), [StringComparison]::OrdinalIgnoreCase)) {
+        Remove-Item -LiteralPath $staging -Recurse -Force
+    }
 }
-$startMenu = Join-Path $env:APPDATA 'Microsoft/Windows/Start Menu/Programs/380 Taxi Cam.lnk'
 try {
     if ($NoShortcut) { $startMenu = $null } else {
     $shell = New-Object -ComObject WScript.Shell
@@ -115,11 +147,6 @@ try {
     $shortcut.WorkingDirectory=$dest; $shortcut.Description='380 Taxi Cam settings'; $shortcut.Save()
     }
 } catch { Write-Warning 'Installed successfully, but the Start menu shortcut could not be created.' }
-[ordered]@{
-    version='0.8.0'; installedUtc=[DateTime]::UtcNow.ToString('o'); destination=$dest;
-    simulator=$simExe; exeXml=$ExeXml; exeXmlBackup=$xmlBackup; legacyBackup=$(if ($disabled) { $disabled } else { $previousLegacy });
-    files=$receipt.files; shortcut=$startMenu; simulatorVerified=$false
-} | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $dest 'installation.json') -Encoding utf8
 Write-Output "Installed 380 Taxi Cam: $exe"
 Write-Output "Automatic tray startup: $ExeXml"
 Write-Output "Legacy taxi add-on retained: $disabled"

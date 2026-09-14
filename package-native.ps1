@@ -8,28 +8,27 @@ Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot 'standalone/validation_receipt.ps1')
 $payload = Join-Path $PSScriptRoot 'build/native'
 $receipt = Assert-TaxiNativeReceipt $payload
+if ($BuildLabel -match '^build\.([0-9]+)$' -and [int]$Matches[1] -ne $receipt.buildNumber) {
+    throw 'Release build label must match the build number compiled into the validated application.'
+}
 $label = if ($BuildLabel) { $BuildLabel } else { [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss-fff') }
 $package = Join-Path $PSScriptRoot ("build/packages/380-taxi-cam-$($receipt.version)-$label-windows-x64")
 $zip = $package + '.zip'
 if ((Test-Path -LiteralPath $package) -or (Test-Path -LiteralPath $zip)) { throw 'Package already exists; use a new build label.' }
 New-Item -ItemType Directory -Path $package -Force | Out-Null
-foreach ($directory in @('standalone','licenses','docs')) {
-    New-Item -ItemType Directory -Path (Join-Path $package $directory) | Out-Null
-}
-foreach ($file in @('380-taxi-cam.exe','taxi-camera-bridge.dll','validation.json')) {
+foreach ($file in @('380-taxi-cam.exe','taxi-camera-bridge.dll')) {
     Copy-Item -LiteralPath (Join-Path $payload $file) -Destination (Join-Path $package $file)
 }
-foreach ($file in @('install-native.ps1','uninstall-native.ps1','README.md','taxi-camera-mounts.cfg','THIRD_PARTY_NOTICES.md',
-    'standalone/exe_xml.ps1','standalone/validation_receipt.ps1','licenses/LLVM.txt','licenses/ReShade.txt','licenses/Dear-ImGui.txt',
-    'docs/architecture.md','docs/runtime-reference.md','docs/aircraft-profiles.md','docs/releases.md')) {
-    Copy-Item -LiteralPath (Join-Path $PSScriptRoot $file) -Destination (Join-Path $package $file)
-}
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'taxi-camera-mounts.cfg') -Destination $package
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'licenses/native-runtime-notices.txt') -Destination (Join-Path $package 'THIRD_PARTY_NOTICES.txt')
+$sourceStatus = @(& git -C $PSScriptRoot status --porcelain)
+if ($LASTEXITCODE -ne 0) { throw 'Could not record source working-tree status.' }
 [ordered]@{
-    version=$receipt.version; build=$label; sourceCommit=$SourceCommit;
+    version=$receipt.version; build=$label; buildNumber=$receipt.buildNumber; sourceCommit=$SourceCommit; sourceDirty=($sourceStatus.Count -gt 0);
     createdUtc=[DateTime]::UtcNow.ToString('o'); simulatorVerified=$receipt.simulatorVerified
-} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $package 'build-info.json') -Encoding utf8
+} | ConvertTo-Json | Set-Content -LiteralPath ($package + '.build-info.json') -Encoding utf8
 Get-ChildItem -LiteralPath $package -File -Recurse | Sort-Object FullName | ForEach-Object {
     [ordered]@{file=$_.FullName.Substring($package.Length+1).Replace('\','/');sha256=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash}
-} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $package 'manifest.json') -Encoding utf8
+} | ConvertTo-Json | Set-Content -LiteralPath ($package + '.manifest.json') -Encoding utf8
 Compress-Archive -LiteralPath $package -DestinationPath $zip
 Write-Output $zip

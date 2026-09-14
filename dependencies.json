@@ -1,4 +1,10 @@
 {
+  "inno-setup": {
+    "version": "6.5.4",
+    "url": "https://github.com/jrsoftware/issrc/releases/download/is-6_5_4/innosetup-6.5.4.exe",
+    "sha256": "fa73bf47a4da250d185d07561c2bfda387e5e20db77e4570004cf6a133cc10b1",
+    "directory": "inno-setup/6.5.4"
+  },
   "reshade": {
     "version": "6.8.0",
     "commit": "18deaa52de0c425a78b329e9cb3c497281cd00ec",

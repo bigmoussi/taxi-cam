@@ -1,0 +1,123 @@
+[CmdletBinding()]
+param([Parameter(Mandatory=$true)][string]$Installer)
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+$repo = Split-Path -Parent $PSScriptRoot
+$installerPath = (Resolve-Path -LiteralPath $Installer).Path
+$receipt = Get-Content -Raw -LiteralPath ($installerPath + '.json') | ConvertFrom-Json
+if ((Get-FileHash -LiteralPath $installerPath).Hash -ne $receipt.installerSha256) { throw 'Installer hash does not match its build receipt.' }
+$testRoot = Join-Path $repo ('build/installer-tests/' + [Guid]::NewGuid().ToString('N'))
+$sim = Join-Path $testRoot 'sim'; $xmlPath = Join-Path $testRoot 'config/exe.xml'
+New-Item -ItemType Directory -Force -Path $sim,(Split-Path -Parent $xmlPath) | Out-Null
+'Fixture marker only; never executed' | Set-Content -LiteralPath (Join-Path $sim 'FlightSimulator2024.exe')
+$xml = '<?xml version="1.0"?><SimBase.Document Type="Launch"><Disabled>False</Disabled><Launch.Addon><Name>Other Addon</Name><Path>C:\Other\other.exe</Path></Launch.Addon></SimBase.Document>'
+function Invoke-Setup([string]$Executable,[string]$App,[string]$Log,[switch]$Paths) {
+    $arguments = @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',('/DIR="' + $App + '"'),('/LOG="' + $Log + '"'))
+    if ($Paths) { $arguments += @('/SIMULATORDIR="' + $sim + '"','/EXEXML="' + $xmlPath + '"') }
+    $process = Start-Process -FilePath $Executable -ArgumentList $arguments -WindowStyle Hidden -PassThru
+    if (-not $process.WaitForExit(60000)) { throw "Installer test timed out; process $($process.Id), log $Log" }
+    $process.Refresh()
+    return $process.ExitCode
+}
+function Assert-That([bool]$Condition,[string]$Message) { if (-not $Condition) { throw $Message } }
+# Exercise the exact production executable through a guaranteed pre-write failure.
+# Even if MSFS is running, Setup must return failure and leave all fixture bytes unchanged.
+$xml.Replace('<Disabled>False</Disabled>','<Disabled>True</Disabled>') | Set-Content -LiteralPath $xmlPath
+$before = (Get-FileHash -LiteralPath $xmlPath).Hash
+$negativeApp = Join-Path $testRoot 'production-rejected'
+$exitCode = Invoke-Setup $installerPath $negativeApp (Join-Path $testRoot 'production-rejection.log') -Paths
+Assert-That ($exitCode -ne 0) 'The production installer ignored a disabled launch document.'
+Assert-That ((Get-FileHash -LiteralPath $xmlPath).Hash -eq $before) 'The rejected production install modified exe.xml.'
+Assert-That (-not (Test-Path -LiteralPath (Join-Path $negativeApp '380-taxi-cam.exe'))) 'The rejected production install wrote a live executable.'
+
+# A separately compiled fixture suppresses registration and shortcuts. Only its private copies
+# of process discovery are mocked, allowing local simulator sessions to remain untouched.
+$payload = Join-Path $testRoot 'payload'
+Copy-Item -LiteralPath $receipt.compilerPayload -Destination $payload -Recurse
+$runtime = Join-Path $testRoot 'runtime.ps1'
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'runtime.ps1') -Destination $runtime
+foreach ($path in @($runtime,(Join-Path $payload 'install-native.ps1'),(Join-Path $payload 'uninstall-native.ps1'))) {
+    $source = (Get-Content -Raw -LiteralPath $path).Replace('Get-Process','Get-FixtureProcess')
+    $source = $source.Replace('Set-StrictMode -Version Latest', "Set-StrictMode -Version Latest`r`nfunction Get-FixtureProcess { return @() }")
+    Set-Content -LiteralPath $path -Value $source -Encoding utf8
+}
+& (Join-Path $PSScriptRoot 'embed-uninstaller.ps1') -Output (Join-Path $testRoot 'uninstall-scripts.iss') -RuntimeScript $runtime -UninstallScript (Join-Path $payload 'uninstall-native.ps1') -ExeXmlScript (Join-Path $payload 'standalone/exe_xml.ps1')
+$compiler = & (Join-Path $repo 'bootstrap-installer.ps1')
+& $compiler "/DPayloadDir=$payload" "/DInternalDir=$testRoot" "/DRuntimeScript=$runtime" "/DAppVersion=$($receipt.version)" "/DBuildNumber=$($receipt.buildNumber)" '/DInstallerTest=1' '/DOutputBase=isolated-setup' "/O$testRoot" (Join-Path $PSScriptRoot '380-taxi-cam.iss') *> (Join-Path $testRoot 'compiler.log')
+if ($LASTEXITCODE -ne 0) { throw "Fixture compilation failed: $testRoot" }
+$fixture = Join-Path $testRoot 'isolated-setup.exe'; $app = Join-Path $testRoot 'app'
+$xml | Set-Content -LiteralPath $xmlPath
+$exitCode = Invoke-Setup $fixture $app (Join-Path $testRoot 'install.log') -Paths
+Assert-That ($exitCode -eq 0) "Isolated first install failed ($exitCode): $testRoot"
+foreach ($name in @('380-taxi-cam.exe','taxi-camera-bridge.dll')) { Assert-That ((Get-FileHash -LiteralPath (Join-Path $app $name)).Hash -eq $receipt.files.PSObject.Properties[$name].Value) "Installed hash mismatch: $name" }
+Assert-That (@(Get-ChildItem -LiteralPath $app -Filter '*.ps1' -Recurse).Count -eq 0) 'Installer left loose PowerShell files in the application.'
+Assert-That (@(Get-ChildItem -LiteralPath $app -Directory).Count -eq 0) 'Installer left support or staging folders in the application.'
+[xml]$launch = Get-Content -Raw -LiteralPath $xmlPath
+Assert-That ($launch.SelectNodes('//Launch.Addon').Count -eq 2) 'Existing startup entry was not preserved.'
+$mount = Join-Path $app 'taxi-camera-mounts.cfg'
+Add-Content -LiteralPath $mount -Value '# user calibration fixture'
+$mountHash = (Get-FileHash -LiteralPath $mount).Hash
+$exitCode = Invoke-Setup $fixture $app (Join-Path $testRoot 'upgrade.log')
+Assert-That ($exitCode -eq 0) "Isolated upgrade with remembered paths failed ($exitCode): $testRoot"
+Assert-That ((Get-FileHash -LiteralPath $mount).Hash -eq $mountHash) 'Upgrade overwrote user calibration.'
+[xml]$launch = Get-Content -Raw -LiteralPath $xmlPath
+Assert-That ($launch.SelectNodes('//Launch.Addon').Count -eq 2) 'Upgrade duplicated the startup entry.'
+# Fail after the native transaction to verify Setup cancellation/error rollback.
+$rollbackScript = Join-Path $testRoot 'rollback.iss'
+$iss = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot '380-taxi-cam.iss')
+$iss = $iss.Replace('if CurStep = ssDone then Completed := True;', "if CurStep = ssInstall then Abort;`r`n  if CurStep = ssDone then Completed := True;")
+Set-Content -LiteralPath $rollbackScript -Value $iss -Encoding utf8
+& $compiler "/DPayloadDir=$payload" "/DInternalDir=$testRoot" "/DRuntimeScript=$runtime" "/DAppVersion=$($receipt.version)" "/DBuildNumber=$($receipt.buildNumber)" '/DInstallerTest=1' '/DOutputBase=rollback-setup' "/O$testRoot" $rollbackScript *> (Join-Path $testRoot 'rollback-compiler.log')
+if ($LASTEXITCODE -ne 0) { throw "Rollback fixture compilation failed: $testRoot" }
+$xmlHash = (Get-FileHash -LiteralPath $xmlPath).Hash
+$recordHash = (Get-FileHash -LiteralPath (Join-Path $app 'installation.json')).Hash
+$exitCode = Invoke-Setup (Join-Path $testRoot 'rollback-setup.exe') $app (Join-Path $testRoot 'rollback.log')
+Assert-That ($exitCode -ne 0) 'Injected Setup abort did not fail.'
+Assert-That ((Get-FileHash -LiteralPath $xmlPath).Hash -eq $xmlHash) 'Setup abort did not restore exe.xml.'
+Assert-That ((Get-FileHash -LiteralPath (Join-Path $app 'installation.json')).Hash -eq $recordHash) 'Setup abort did not restore installation.json.'
+$uninstaller = Join-Path $app 'unins000.exe'
+$process = Start-Process -FilePath $uninstaller -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',('/LOG="' + (Join-Path $testRoot 'uninstall.log') + '"')) -WindowStyle Hidden -Wait -PassThru
+Assert-That ($process.ExitCode -eq 0) 'Isolated uninstall failed.'
+Assert-That ((Get-FileHash -LiteralPath $mount).Hash -eq $mountHash) 'Uninstall removed calibration.'
+[xml]$launch = Get-Content -Raw -LiteralPath $xmlPath
+Assert-That ($launch.SelectNodes('//Launch.Addon').Count -eq 1) 'Uninstall did not preserve exactly the unrelated startup entry.'
+Assert-That (-not (Test-Path -LiteralPath (Join-Path $app '380-taxi-cam.exe'))) 'Uninstall retained the installed executable.'
+
+function Invoke-FixtureRuntime([string]$Mode,[string]$App,[string]$State) {
+    $arguments = @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',('"' + $runtime + '"'),'-Mode',$Mode,
+        '-Destination',('"' + $App + '"'),'-StateDirectory',('"' + $State + '"'),
+        '-SimulatorDirectory',('"' + $sim + '"'),'-ExeXml',('"' + $xmlPath + '"'),'-PayloadDirectory',('"' + $payload + '"'))
+    $process = Start-Process -FilePath (Join-Path $env:WINDIR 'System32/WindowsPowerShell/v1.0/powershell.exe') -ArgumentList $arguments -WindowStyle Hidden -Wait -PassThru
+    return $process.ExitCode
+}
+# Inject an unrelated XML edit after the inner installer has recorded the input hash.
+# Its optimistic concurrency check must fail without either rollback layer erasing that edit.
+$xmlHelper = Join-Path $payload 'standalone/exe_xml.ps1'
+$originalHelper = Get-Content -Raw -LiteralPath $xmlHelper
+try {
+    $injectedHelper = $originalHelper.Replace('$absolute = [IO.Path]::GetFullPath($Path)', ('$absolute = [IO.Path]::GetFullPath($Path)' + "`r`n    Add-Content -LiteralPath `$Path -Value '<!-- concurrent inner edit -->'"))
+    Set-Content -LiteralPath $xmlHelper -Value $injectedHelper -Encoding utf8
+    $xml | Set-Content -LiteralPath $xmlPath
+    $innerApp = Join-Path $testRoot 'concurrent-inner-app'
+    $innerState = Join-Path $testRoot 'concurrent-inner-state'
+    $exitCode = Invoke-FixtureRuntime 'Install' $innerApp $innerState
+    Assert-That ($exitCode -ne 0) 'The inner XML concurrency guard did not fail.'
+    Assert-That ((Get-Content -Raw -LiteralPath $xmlPath).Contains('<!-- concurrent inner edit -->')) 'Outer rollback erased an XML edit rejected by the inner guard.'
+    Assert-That (-not (Test-Path -LiteralPath (Join-Path $innerApp '380-taxi-cam.exe'))) 'Inner failure did not roll back the executable.'
+} finally { Set-Content -LiteralPath $xmlHelper -Value $originalHelper -Encoding utf8 }
+
+$xml | Set-Content -LiteralPath $xmlPath
+$laterApp = Join-Path $testRoot 'concurrent-later-app'; $laterState = Join-Path $testRoot 'concurrent-later-state'
+$exitCode = Invoke-FixtureRuntime 'Install' $laterApp $laterState
+Assert-That ($exitCode -eq 0) 'Concurrency fixture could not complete its initial transaction.'
+Add-Content -LiteralPath $xmlPath -Value '<!-- concurrent later edit -->'
+$laterHash = (Get-FileHash -LiteralPath $xmlPath).Hash
+$exitCode = Invoke-FixtureRuntime 'Rollback' $laterApp $laterState
+Assert-That ($exitCode -ne 0) 'Rollback did not report the concurrent edit conflict.'
+Assert-That ((Get-FileHash -LiteralPath $xmlPath).Hash -eq $laterHash) 'Rollback erased an XML edit made after its transaction.'
+$conflict = Get-Content -Raw -LiteralPath (Join-Path $laterState 'error.txt')
+Assert-That ($conflict -match 'Recovery snapshot: (.+)$') 'Rollback did not retain a recovery snapshot.'
+Assert-That (Test-Path -LiteralPath (Join-Path $Matches[1] 'transaction.json')) 'The reported rollback snapshot does not exist.'
+
+[ordered]@{passed=$true;installerSha256=$receipt.installerSha256;tests=@('exact production rejection','isolated first install','remembered upgrade paths','calibration preservation','post-transaction Setup rollback','isolated uninstall','inner concurrent XML edit preserved','post-transaction concurrent XML edit preserved with recovery snapshot');simulatorVerified=$false} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $testRoot 'result.json') -Encoding utf8
+Write-Output "Installer checks passed: $testRoot"

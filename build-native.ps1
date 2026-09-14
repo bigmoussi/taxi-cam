@@ -4,6 +4,14 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 if ($WarpOnly -and -not $Validate) { throw '-WarpOnly requires -Validate.' }
 $taskRoot = $PSScriptRoot
+$versionHeader = Get-Content -Raw -LiteralPath (Join-Path $taskRoot 'standalone/version.hpp')
+if ($versionHeader -notmatch '(?m)^#define TAXI_CAM_VERSION "(\d+\.\d+\.\d+)"') { throw 'Application version missing.' }
+$version = $Matches[1]
+$buildNumber = 0
+if ($env:GITHUB_RUN_NUMBER) {
+    if ($env:GITHUB_RUN_NUMBER -notmatch '^[1-9][0-9]{0,9}$' -or
+        -not [int]::TryParse($env:GITHUB_RUN_NUMBER, [ref]$buildNumber)) { throw 'Invalid GitHub build number.' }
+}
 $deps = Get-Content -Raw -LiteralPath (Join-Path $taskRoot 'dependencies.json') | ConvertFrom-Json
 $compiler = Join-Path $taskRoot ('build/deps/' + $deps.'llvm-mingw'.directory + '/bin/clang++.exe')
 if ($Bootstrap -and -not (Test-Path -LiteralPath $compiler)) { & (Join-Path $taskRoot 'bootstrap-native.ps1') }
@@ -15,6 +23,7 @@ if (Test-Path -LiteralPath $receipt) { Remove-Item -LiteralPath $receipt }
 $common = @('-std=c++20','-O2','-Wall','-Wextra','-Werror','-fms-extensions','-static',
     '-DNOMINMAX','-DWIN32_LEAN_AND_MEAN','-DTAXI_NATIVE_RUNTIME','-D_WIN32_WINNT=0x0A00',
     '-mno-avx','-mno-avx2','-mno-avx512f')
+$common += "-DTAXI_CAM_BUILD_NUMBER=$buildNumber"
 $graphics = @(
  'standalone/d3d12_bridge.cpp',
  'src/scene_handoff.cpp','src/scene_capture_d3d12.cpp','src/scene_capture_manager.cpp','src/scene_source_state.cpp',
@@ -43,9 +52,9 @@ if (Test-Path -LiteralPath (Join-Path $taskRoot 'standalone/bridge_main.cpp')) {
 if (Test-Path -LiteralPath (Join-Path $taskRoot 'standalone/companion.cpp')) {
     $windres = Join-Path (Split-Path -Parent $compiler) 'llvm-windres.exe'
     $resource = Join-Path $out 'app.res.o'
-    & $windres '-I' (Join-Path $taskRoot 'standalone') '-i' (Join-Path $taskRoot 'standalone/app.rc') '-O' 'coff' '-o' $resource
+    & $windres "-DTAXI_CAM_BUILD_NUMBER=$buildNumber" '-I' (Join-Path $taskRoot 'standalone') '-i' (Join-Path $taskRoot 'standalone/app.rc') '-O' 'coff' '-o' $resource
     if ($LASTEXITCODE -ne 0) { throw 'Windows application manifest compilation failed.' }
-    & $compiler @common '-municode' '-mwindows' (Join-Path $taskRoot 'standalone/companion.cpp') $resource '-lshell32' '-lcomctl32' '-ladvapi32' '-ldwmapi' '-luxtheme' '-Wl,--no-insert-timestamp' '-o' (Join-Path $out '380-taxi-cam.exe')
+    & $compiler @common '-municode' '-mwindows' (Join-Path $taskRoot 'standalone/companion.cpp') (Join-Path $taskRoot 'standalone/updater.cpp') $resource '-lbcrypt' '-lshell32' '-lcomctl32' '-ladvapi32' '-ldwmapi' '-luxtheme' '-Wl,--no-insert-timestamp' '-o' (Join-Path $out '380-taxi-cam.exe')
     if ($LASTEXITCODE -ne 0) { throw 'Windows companion build failed.' }
 }
 if ($Validate) {
@@ -85,6 +94,12 @@ if ($Validate) {
         if ($LASTEXITCODE -ne 0) { throw "Native test failed: $($entry.Name)" }
     }
     & (Join-Path $taskRoot 'standalone/exe_xml_test.ps1')
+    $updaterTest = Join-Path $out 'updater-test.exe'
+    & $compiler @common (Join-Path $taskRoot 'standalone/updater_test.cpp') (Join-Path $taskRoot 'standalone/updater.cpp') '-lbcrypt' '-lshell32' '-o' $updaterTest
+    if ($LASTEXITCODE -ne 0) { throw 'Updater test compilation failed.' }
+    & $updaterTest
+    if ($LASTEXITCODE -ne 0) { throw 'Updater tests failed.' }
+    & (Join-Path $taskRoot 'standalone/updater_test.ps1')
     & (Join-Path $taskRoot 'validation/render_boundary_test.ps1') -Compiler $compiler
     & (Join-Path $taskRoot 'engine-hook/build.ps1')
     & (Join-Path $taskRoot 'native-camera/build.ps1')
@@ -101,7 +116,7 @@ if ($Validate) {
         $hashes[$name] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
     }
     $closure = @()
-    foreach ($source in @($graphics + $engine + @('standalone/bridge_main.cpp','standalone/companion.cpp'))) {
+    foreach ($source in @($graphics + $engine + @('standalone/bridge_main.cpp','standalone/companion.cpp','standalone/updater.cpp'))) {
         if ($source.EndsWith('.S')) { continue }
         $dependencyList = & $compiler @common '-MM' (Join-Path $taskRoot $source)
         if ($LASTEXITCODE -ne 0) { throw "Native dependency audit failed: $source" }
@@ -112,11 +127,11 @@ if ($Validate) {
     $gpuTests = @('WARP GPU')
     if (-not $WarpOnly) { $gpuTests = @('hardware GPU') + $gpuTests }
     [ordered]@{
-        passed=$true; version='0.8.0'; createdUtc=[DateTime]::UtcNow.ToString('o'); files=$hashes;
+        passed=$true; version=$version; buildNumber=$buildNumber; createdUtc=[DateTime]::UtcNow.ToString('o'); files=$hashes;
         tests=@($gpuTests + @('pre-existing graphics objects','graphics state replay','exact DLL smoke',
             'settings persistence and IPC','companion contention and watchdog','launcher file identity','native COM slots','TAXI routing','PFD detector','exposure','calibration','write budget',
             'queue submit','render boundary','engine hook','camera telemetry and lifecycle','aircraft layout compatibility','exe.xml preservation',
-            'native imports and header dependency closure'));
+            'native imports and header dependency closure','release selection, download integrity and updater handoff guards'));
         gpuValidation=[ordered]@{hardware=$(if ($WarpOnly) { 'not-run' } else { 'passed' });warp='passed'};
         simulatorVerified=$false
     } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $out 'validation.json') -Encoding utf8

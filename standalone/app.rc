@@ -1,8 +1,10 @@
 #include <windows.h>
+#include "version.hpp"
 1 RT_MANIFEST "app.manifest"
+201 RCDATA "update-check.ps1"
 1 VERSIONINFO
-FILEVERSION 0,8,0,0
-PRODUCTVERSION 0,8,0,0
+FILEVERSION TAXI_CAM_VERSION_MAJOR,TAXI_CAM_VERSION_MINOR,TAXI_CAM_VERSION_PATCH,0
+PRODUCTVERSION TAXI_CAM_VERSION_MAJOR,TAXI_CAM_VERSION_MINOR,TAXI_CAM_VERSION_PATCH,0
 FILETYPE VFT_APP
 BEGIN
  BLOCK "StringFileInfo"
@@ -10,9 +12,9 @@ BEGIN
   BLOCK "040904b0"
   BEGIN
    VALUE "FileDescription", "380 Taxi Cam Windows companion\0"
-   VALUE "FileVersion", "0.8.0\0"
+   VALUE "FileVersion", TAXI_CAM_RELEASE_VERSION "\0"
    VALUE "ProductName", "380 Taxi Cam\0"
-   VALUE "ProductVersion", "0.8.0\0"
+   VALUE "ProductVersion", TAXI_CAM_RELEASE_VERSION "\0"
    VALUE "OriginalFilename", "380-taxi-cam.exe\0"
   END
  END

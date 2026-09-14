@@ -8,7 +8,7 @@ $dependencyRoot = Join-Path $PSScriptRoot 'build/deps'
 $dependencies = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'dependencies.json') | ConvertFrom-Json
 New-Item -ItemType Directory -Path $dependencyRoot -Force | Out-Null
 
-foreach ($entry in $dependencies.PSObject.Properties) {
+foreach ($entry in @($dependencies.PSObject.Properties | Where-Object { $_.Name -in @('reshade','imgui','llvm-mingw') })) {
     $dependency = $entry.Value
     $archive = Join-Path $dependencyRoot ($entry.Name + '.zip')
     $destination = Join-Path $dependencyRoot $dependency.directory

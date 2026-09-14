@@ -11,6 +11,21 @@ Copy-Item -LiteralPath (Join-Path $root 'taxi-camera-mounts.cfg') -Destination (
 $mountHash = (Get-FileHash -LiteralPath (Join-Path $sim 'taxi-camera-mounts.cfg')).Hash
 $xml = Join-Path $fixture 'exe.xml'
 [IO.File]::WriteAllText($xml,'<SimBase.Document Type="Launch"><Launch.Addon><Name>Keep Me</Name><Path>C:\Other.exe</Path></Launch.Addon></SimBase.Document>')
+# Override process enumeration only inside this test script. All writes target the
+# fresh fixture above; the user's simulator and companion remain untouched.
+$fixtureSimulatorRunning = $true
+function Get-Process {
+    param([string[]]$Name, $ErrorAction)
+    if ($fixtureSimulatorRunning -and 'FlightSimulator2024' -in $Name) {
+        [pscustomobject]@{ProcessName='FlightSimulator2024'; Path=(Join-Path $sim 'FlightSimulator2024.exe')}
+    }
+}
+$refused = $false
+try {
+    & (Join-Path $root 'install-native.ps1') -SimulatorDirectory $sim -ExeXml $xml -Destination $app -NoShortcut
+} catch { $refused = $_.Exception.Message -like 'Close MSFS*' }
+if (-not $refused -or (Test-Path -LiteralPath (Join-Path $app '380-taxi-cam.exe'))) { throw 'Running simulator installation guard failed.' }
+$fixtureSimulatorRunning = $false
 & (Join-Path $root 'install-native.ps1') -SimulatorDirectory $sim -ExeXml $xml -Destination $app -NoShortcut
 $record = Get-Content -Raw -LiteralPath (Join-Path $app 'installation.json') | ConvertFrom-Json
 [xml]$doc = Get-Content -Raw -LiteralPath $xml
@@ -29,4 +44,4 @@ if ($doc.SelectNodes('//Launch.Addon[Name="380 Taxi Cam"]').Count -ne 1) { throw
 if ($doc.SelectNodes('//Launch.Addon').Count -ne 1 -or $doc.SelectSingleNode('//Launch.Addon/Name').InnerText -ne 'Keep Me') { throw 'Uninstall removed unrelated startup.' }
 if ([IO.File]::ReadAllText((Join-Path $sim 'taxi-camera-native.addon64')) -ne 'legacy fixture') { throw 'Rollback did not restore the exact old file.' }
 if (-not (Test-Path -LiteralPath (Join-Path $app 'taxi-camera-mounts.cfg'))) { throw 'Uninstall removed user calibration.' }
-Write-Output 'PASS native install/rollback: real installer with isolated paths, exact binary receipts, startup preservation, calibration import, legacy retention and unrelated ReShade preserved.'
+Write-Output 'PASS native install/rollback: isolated process fixtures and paths, running-simulator refusal, exact binary receipts, startup preservation, calibration import, legacy retention and unrelated ReShade preserved.'

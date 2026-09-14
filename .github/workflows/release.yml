@@ -56,6 +56,17 @@ jobs:
           if (-not (Test-Path -LiteralPath $zip -PathType Leaf)) { throw 'Release ZIP missing.' }
           "zip=$zip" >> $env:GITHUB_OUTPUT
 
+      - name: Build Windows installer
+        id: installer
+        env:
+          RELEASE_ZIP: ${{ steps.package.outputs.zip }}
+        run: |
+          ./bootstrap-installer.ps1
+          $setup = ./build-installer.ps1 -Package $env:RELEASE_ZIP
+          if (-not (Test-Path -LiteralPath $setup -PathType Leaf)) { throw 'Release installer missing.' }
+          "setup=$setup" >> $env:GITHUB_OUTPUT
+          ./installer/test-installer.ps1 -Installer $setup
+
       - name: Keep package and validation diagnostics
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -65,6 +76,10 @@ jobs:
           retention-days: 30
           path: |
             ${{ steps.package.outputs.zip }}
+            ${{ steps.installer.outputs.setup }}
+            build/packages/*.build-info.json
+            build/packages/*.manifest.json
+            build/packages/*-setup.exe.json
             build/ci-validation.log
             build/native/validation.json
             build/native/*.imports.txt
@@ -77,4 +92,5 @@ jobs:
           SOURCE_COMMIT: ${{ github.sha }}
           BUILD_NUMBER: ${{ github.run_number }}
           RELEASE_ZIP: ${{ steps.package.outputs.zip }}
-        run: ./ci/publish-release.ps1 -Package $env:RELEASE_ZIP -Repository $env:GH_REPO -Commit $env:SOURCE_COMMIT -BuildNumber $env:BUILD_NUMBER
+          RELEASE_INSTALLER: ${{ steps.installer.outputs.setup }}
+        run: ./ci/publish-release.ps1 -Package $env:RELEASE_ZIP -Installer $env:RELEASE_INSTALLER -Repository $env:GH_REPO -Commit $env:SOURCE_COMMIT -BuildNumber $env:BUILD_NUMBER

@@ -11,6 +11,7 @@
 #include "launcher.hpp"
 #include "protocol.hpp"
 #include "settings_store.hpp"
+#include "updater.hpp"
 
 namespace {
 using namespace taxi_camera;
@@ -38,6 +39,9 @@ std::atomic<bool> running{true};
 std::atomic<DWORD> simulator_pid{};
 HANDLE worker{}, show_event{}, singleton{};
 bool dirty = false, refreshing = false, background_start = false, preview_ui = false;
+win::Updater updater;
+ULONGLONG next_update_check{};
+bool update_prompt{};
 int scale(int v) {
   return MulDiv(v, static_cast<int>(dpi), 96);
 }
@@ -330,6 +334,17 @@ void tray(bool add) {
     Shell_NotifyIconW(NIM_SETVERSION, &data);
   }
 }
+void update_balloon() {
+  NOTIFYICONDATAW data{};
+  data.cbSize = sizeof(data);
+  data.hWnd = window;
+  data.uID = 1;
+  data.uFlags = NIF_INFO;
+  data.dwInfoFlags = NIIF_INFO | NIIF_RESPECT_QUIET_TIME;
+  wcscpy_s(data.szInfoTitle, L"380 Taxi Cam update downloaded");
+  wcscpy_s(data.szInfo, L"Close Microsoft Flight Simulator, then use Check for updates in the tray menu to install.");
+  Shell_NotifyIconW(NIM_MODIFY, &data);
+}
 void show() {
   ShowWindow(window, SW_SHOW);
   ShowWindow(window, SW_RESTORE);
@@ -542,6 +557,64 @@ void stop_service() {
     }
   }
 }
+void check_updates(bool manual) {
+  if (preview_ui || update_prompt)
+    return;
+  if (updater.begin(installation, manual)) {
+    next_update_check = GetTickCount64() + 24ULL * 60 * 60 * 1000;
+    if (manual) {
+      notice = L"Checking for updates in the background...";
+      InvalidateRect(window, nullptr, FALSE);
+    }
+  }
+}
+void poll_updates() {
+  if (preview_ui || update_prompt)
+    return;
+  win::UpdateResult result;
+  if (updater.take(result)) {
+    if (!result.available) {
+      if (result.manual) {
+        notice = result.error.empty() ? L"380 Taxi Cam is up to date." : result.error;
+        MessageBoxW(window, notice.c_str(), L"380 Taxi Cam updates", MB_OK | MB_ICONINFORMATION);
+      }
+    } else {
+      update_prompt = true;
+      if (win::simulator_blocks_update()) {
+        notice = L"Update downloaded. Close Microsoft Flight Simulator, then choose Check for updates to install.";
+        if (result.manual)
+          MessageBoxW(window, notice.c_str(), L"380 Taxi Cam updates", MB_OK | MB_ICONINFORMATION);
+        else
+          update_balloon();
+      } else {
+        const auto prompt = L"380 Taxi Cam " + result.tag +
+                            L" has been downloaded and verified.\n\nClose 380 Taxi Cam and start the installer now?";
+        if (MessageBoxW(window, prompt.c_str(), L"380 Taxi Cam update ready", MB_YESNO | MB_ICONINFORMATION | MB_DEFBUTTON2) == IDYES) {
+          bool proceed = true;
+          if (dirty) {
+            const int choice = MessageBoxW(window, L"Save your unsaved settings before installing?\n\nYes: save and continue.\nNo: discard changes.\nCancel: keep the app open.",
+                                           L"Unsaved settings", MB_YESNOCANCEL | MB_ICONQUESTION);
+            proceed = choice == IDNO || (choice == IDYES && apply());
+          }
+          if (proceed) {
+            std::wstring error;
+            if (updater.launch(result, installation, error)) {
+              stop_service();
+              DestroyWindow(window);
+              update_prompt = false;
+              return;
+            }
+            MessageBoxW(window, error.c_str(), L"380 Taxi Cam updates", MB_OK | MB_ICONWARNING);
+          }
+        }
+      }
+      update_prompt = false;
+    }
+    InvalidateRect(window, nullptr, FALSE);
+  }
+  if (!updater.busy() && GetTickCount64() >= next_update_check)
+    check_updates(false);
+}
 bool is_on(int id, const win::Settings& s) {
   switch (id) {
     case 220:
@@ -596,6 +669,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
     case WM_TIMER:
       if (show_event && WaitForSingleObject(show_event, 0) == WAIT_OBJECT_0)
         show();
+      poll_updates();
       return 0;
     case WM_GETMINMAXINFO: {
       auto* info = reinterpret_cast<MINMAXINFO*>(l);
@@ -681,6 +755,8 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       if (LOWORD(l) == WM_CONTEXTMENU || LOWORD(l) == WM_RBUTTONUP) {
         HMENU menu = CreatePopupMenu();
         AppendMenuW(menu, MF_STRING, 600, L"Settings");
+        AppendMenuW(menu, MF_STRING | (preview_ui || updater.busy() || update_prompt ? MF_GRAYED : 0), 603,
+                    updater.busy() ? L"Checking for updates..." : L"Check for updates");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING, 601, L"Exit");
         POINT p;
@@ -690,12 +766,15 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         DestroyMenu(menu);
         if (selected == 600)
           show();
+        if (selected == 603)
+          check_updates(true);
         if (selected == 601) {
           stop_service();
           DestroyWindow(hwnd);
         }
         PostMessageW(hwnd, WM_NULL, 0, 0);
-      } else if (LOWORD(l) == NIN_SELECT || LOWORD(l) == NIN_KEYSELECT || LOWORD(l) == WM_LBUTTONDBLCLK)
+      } else if (LOWORD(l) == NIN_SELECT || LOWORD(l) == NIN_KEYSELECT || LOWORD(l) == NIN_BALLOONUSERCLICK ||
+                 LOWORD(l) == WM_LBUTTONDBLCLK)
         show();
       return 0;
     case WM_COMMAND: {
@@ -912,6 +991,7 @@ int WINAPI wWinMain(HINSTANCE app, HINSTANCE, LPWSTR, int) {
     }
   }
   running = false;
+  updater.stop();
   WaitForSingleObject(worker, 1500);
   CloseHandle(worker);
   CloseHandle(show_event);

@@ -25,17 +25,23 @@ See [How the camera reaches the PFD](docs/architecture.md) for the complete expl
 
 ## Install
 
-Download the Windows x64 ZIP from [Releases](https://github.com/rthomson83/380-taxi-cam/releases/latest) and extract it. Close MSFS and exit any running 380 Taxi Cam instance, then run:
+Download the Windows x64 **setup EXE** from [Releases](https://github.com/rthomson83/380-taxi-cam/releases/latest). Close MSFS and exit any running 380 Taxi Cam instance, then open setup.
 
-~~~powershell
-.\install-native.ps1 -SimulatorDirectory 'C:\XboxGames\Microsoft Flight Simulator 2024\Content'
-~~~
+Choose the folder containing `FlightSimulator2024.exe` and the simulator's `exe.xml` launch configuration. Setup attempts to find the configuration and reuses existing installation choices on updates.
 
-Set `-SimulatorDirectory` to the folder containing `FlightSimulator2024.exe`. If the installer cannot select the launch configuration, add `-ExeXml '<absolute path to exe.xml>'`.
-
-The installer places the EXE and bridge DLL together in `%LOCALAPPDATA%\380 Taxi Cam\app`. Use `-Destination 'C:\Users\<you>\Apps\380 Taxi Cam'` to choose another folder. Open `380-taxi-cam.exe` to launch the app; the DLL is loaded by the app and is not launched directly.
+The installer places the EXE and bridge DLL together in `%LOCALAPPDATA%\380 Taxi Cam\app`; the wizard lets you choose another folder. Open `380-taxi-cam.exe` to launch the app; the DLL is loaded by the app and is not launched directly.
 
 The installer adds automatic startup to `exe.xml` and creates a Start menu shortcut. It backs up the launch configuration and preserves other add-ons.
+
+Release files contain no loose PowerShell scripts, documentation folders or license folders. A single `THIRD_PARTY_NOTICES.txt` retains the notices required by the statically linked runtime. The optional ZIP contains the runtime files only; use setup to configure startup and uninstallation.
+
+## Updates
+
+The app checks GitHub Releases in the background and offers a downloaded update when a newer version or release build is available. Use **Check for updates** in the tray menu to check manually.
+
+Updates require publicly readable releases with a setup EXE. Live update distribution is unavailable while the repository is private; no GitHub credentials are stored in the app.
+
+The download must pass SHA-256 verification before setup can launch. Accepting the prompt exits the companion and starts setup for the current installation folder. Close MSFS first: its loaded bridge DLL cannot be replaced while the simulator is running. Declining the update leaves the app running. Updates preserve saved camera settings.
 
 ## Use
 
@@ -63,15 +69,9 @@ Select **Save changes** to keep adjustments. Settings are stored in `%LOCALAPPDA
 
 The camera rate can be set from **15 to 60**. It limits how often each camera is requested to render; achieved frame rate depends on simulator updates and rendering load. Camera size is **768 × 255** for the nose and **768 × 504** for the tail.
 
-## Remove automatic startup
+## Uninstall
 
-To remove automatic startup, with MSFS closed:
-
-~~~powershell
-.\uninstall-native.ps1
-~~~
-
-Application files, settings and logs are retained.
+With MSFS and 380 Taxi Cam closed, uninstall **380 Taxi Cam** from Windows Installed apps. Setup removes its startup entry and application files. Saved settings and calibration are retained.
 
 ## Build and releases
 
@@ -83,7 +83,17 @@ To build locally with the pinned compiler and run validation:
 .\package-native.ps1
 ~~~
 
-Every push to `main` runs the [Windows release workflow](.github/workflows/release.yml). A successful run publishes a ZIP, checksums and release notes. Hosted checks use software D3D12 (WARP); live simulator verification is a separate check.
+To build a local setup after validation:
+
+~~~powershell
+.\bootstrap-installer.ps1
+$zip = .\package-native.ps1 -BuildLabel build.0 -SourceCommit (git rev-parse HEAD)
+.\build-installer.ps1 -Package $zip
+~~~
+
+Local builds use build number zero; release builds use the GitHub workflow run number. Packages are immutable, so move an earlier local candidate out of the output location before building another with the same label. PowerShell scripts for development, validation and legacy rollback remain in the source repository; setup embeds the integration scripts it needs internally.
+
+Every push to `main` runs the [Windows release workflow](.github/workflows/release.yml). A successful run publishes an installer, runtime ZIP, checksums and release notes. Hosted checks use software D3D12 (WARP); live simulator verification is a separate check.
 
 ## Documentation
 
