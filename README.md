@@ -5,6 +5,7 @@ Nose-wheel and tail cameras for Microsoft Flight Simulator 2024. Use the aircraf
 ## Known issues
 
 - **ReShade incompatibility:** Taxi Cam is currently incompatible with ReShade. I'm working on a fix.
+- **Steam version:** Tracking an issue with the steam signature of MSFS preventing loading.
 
 ## Important notice
 
