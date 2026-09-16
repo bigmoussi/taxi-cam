@@ -79,11 +79,12 @@ Type: files; Name: "{app}\THIRD_PARTY_NOTICES.txt"
 #include InternalDir + "\uninstall-scripts.iss"
 var
   SimulatorPage: TInputDirWizardPage;
+  StartupPage: TInputOptionWizardPage;
   XmlPage: TInputFileWizardPage;
   SettingsPage: TInputOptionWizardPage;
   Prepared, Completed: Boolean;
   RemoveSavedSettings: Boolean;
-  PreviousDir: String;
+  PreviousDir, StartupNotice: String;
 
 function Q(Value: String): String;
 begin
@@ -91,10 +92,25 @@ begin
 end;
 
 function InitializeSetup: Boolean;
+var
+  Choice: String;
 begin
   Result := FileExists(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'));
   if not Result then
     SuppressibleMsgBox('Taxi Cam setup and updates require Windows PowerShell 5.1. Restore the Windows PowerShell component and run setup again.', mbError, MB_OK, IDOK);
+  if not Result then exit;
+  Choice := ExpandConstant('{param:STARTUP|}');
+  Result := (Choice = '') or (CompareText(Choice, 'automatic') = 0) or (CompareText(Choice, 'manual') = 0);
+  if not Result then begin
+    Log('Invalid /STARTUP value: ' + Choice);
+    SuppressibleMsgBox('The /STARTUP option must be automatic or manual.', mbError, MB_OK, IDOK);
+  end;
+end;
+
+function StartupMode: String;
+begin
+  if StartupPage.SelectedValueIndex = 1 then Result := 'Manual'
+  else Result := 'Automatic';
 end;
 
 function RunHelper(Mode, Script, Destination, State: String): Boolean;
@@ -106,8 +122,9 @@ begin
     ' -Mode ' + Mode + ' -Destination ' + Q(Destination) + ' -StateDirectory ' + Q(State);
   if Mode = 'Install' then begin
     Args := Args + ' -PayloadDirectory ' + Q(ExpandConstant('{tmp}\payload')) +
-      ' -SimulatorDirectory ' + Q(SimulatorPage.Values[0]) + ' -ExeXml ' + Q(XmlPage.Values[0]) +
+      ' -SimulatorDirectory ' + Q(SimulatorPage.Values[0]) + ' -StartupMode ' + StartupMode +
       ' -UpdateFromPid ' + Q(ExpandConstant('{param:UPDATEFROMPID|0}'));
+    if StartupMode = 'Automatic' then Args := Args + ' -ExeXml ' + Q(XmlPage.Values[0]);
     if not SettingsPage.Values[0] then Args := Args + ' -ResetSettings';
   end;
   if ((Mode = 'Uninstall') or (Mode = 'CheckClosed')) and RemoveSavedSettings then
@@ -136,7 +153,12 @@ begin
   SimulatorPage := CreateInputDirPage(wpSelectDir, 'Microsoft Flight Simulator 2024',
     'Select the simulator Content directory', 'Choose the directory containing FlightSimulator2024.exe.', False, '');
   SimulatorPage.Add('Simulator Content directory:');
-  XmlPage := CreateInputFilePage(SimulatorPage.ID, 'Automatic startup', 'Select the simulator exe.xml',
+  StartupPage := CreateInputOptionPage(SimulatorPage.ID, 'Startup preference', 'Choose how to start Taxi Cam',
+    'Automatic startup can be retried by running setup again. If setup cannot safely configure it, Taxi Cam will still be installed for manual launch.', True, False);
+  StartupPage.Add('Configure automatic startup with MSFS');
+  StartupPage.Add('Launch manually; leave existing startup entries unchanged');
+  StartupPage.SelectedValueIndex := 0;
+  XmlPage := CreateInputFilePage(StartupPage.ID, 'Automatic startup', 'Select the simulator exe.xml',
     'Setup preserves other startup entries and adds Taxi Cam. A new exe.xml can be created at the selected path.');
   XmlPage.Add('Simulator launch configuration:', 'XML files|*.xml|All files|*.*', '.xml');
   SettingsPage := CreateInputOptionPage(XmlPage.ID, 'Saved settings',
@@ -151,7 +173,7 @@ end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
 var
-  Ini: String;
+  Ini, Choice: String;
 begin
   Result := True;
   if (CurPageID = wpSelectDir) and (PreviousDir <> WizardDirValue) then begin
@@ -163,6 +185,9 @@ begin
     Ini := ExpandConstant('{tmp}\state\choices.ini');
     SimulatorPage.Values[0] := ExpandConstant('{param:SIMULATORDIR|' + GetIniString('Paths', 'Simulator', '', Ini) + '}');
     XmlPage.Values[0] := ExpandConstant('{param:EXEXML|' + GetIniString('Paths', 'ExeXml', '', Ini) + '}');
+    Choice := ExpandConstant('{param:STARTUP|' + GetIniString('Paths', 'Startup', 'automatic', Ini) + '}');
+    if CompareText(Choice, 'manual') = 0 then StartupPage.SelectedValueIndex := 1
+    else StartupPage.SelectedValueIndex := 0;
   end;
   if CurPageID = SimulatorPage.ID then begin
     Result := FileExists(AddBackslash(SimulatorPage.Values[0]) + 'FlightSimulator2024.exe');
@@ -174,16 +199,38 @@ begin
   end;
 end;
 
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+  Result := (PageID = XmlPage.ID) and (StartupMode = 'Manual');
+end;
+
 function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  Text: AnsiString;
 begin
   Result := '';
   if Prepared then exit;
   ExtractTemporaryFiles('{tmp}\payload\*');
   if not RunHelper('Install', ExpandConstant('{tmp}\runtime.ps1'), WizardDirValue, ExpandConstant('{tmp}\state')) then begin
     Result := ErrorText(ExpandConstant('{tmp}\state'));
+    Log('Taxi Cam installation failed: ' + Result);
     exit;
   end;
   Prepared := True;
+  if LoadStringFromFile(ExpandConstant('{tmp}\state\warning.txt'), Text) then
+    StartupNotice := UTF8Decode(Text)
+  else if StartupMode = 'Manual' then
+    StartupNotice := 'Launch Taxi Cam from the Start menu before using MSFS. Existing simulator startup entries were left unchanged. You can run setup again to configure automatic startup.';
+  if StartupNotice <> '' then Log('Taxi Cam startup notice: ' + StartupNotice);
+end;
+
+procedure CurPageChanged(CurPageID: Integer);
+begin
+  if (CurPageID = wpFinished) and (StartupNotice <> '') then begin
+    WizardForm.FinishedLabel.Caption := 'Taxi Cam was installed successfully.' + #13#10#13#10 + StartupNotice;
+    WizardForm.FinishedLabel.AutoSize := False;
+    WizardForm.FinishedLabel.Height := WizardForm.FinishedPage.ClientHeight - WizardForm.FinishedLabel.Top - ScaleY(16);
+  end;
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);

@@ -91,13 +91,20 @@ try {
     Assert-SettingsTest $refused 'Reset silently imported simulator calibration when bundled defaults were missing.'
     Assert-Saved $saved
 
+    $lockedXmlHash = (Get-FileHash -LiteralPath $xml).Hash
     $xmlLock = [IO.File]::Open($xml, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
-    $refused = $false
-    try { Invoke-Install -Reset } catch { $refused = $true } finally { $xmlLock.Dispose() }
-    Assert-SettingsTest $refused 'Locked startup XML did not fail reset installation.'
-    Assert-Saved $saved
+    try { Invoke-Install -Reset } finally { $xmlLock.Dispose() }
+    $lockedRecord = Get-Content -Raw -LiteralPath (Join-Path $app 'installation.json') | ConvertFrom-Json
+    Assert-SettingsTest ($lockedRecord.startupStatus -eq 'unchanged' -and -not $lockedRecord.startupUpdated) 'Locked XML fallback did not preserve existing startup ownership.'
+    Assert-SettingsTest (-not [string]::IsNullOrWhiteSpace($lockedRecord.startupWarning)) 'Locked XML fallback omitted its startup warning.'
+    Assert-SettingsTest ((Get-FileHash -LiteralPath $xml).Hash -eq $lockedXmlHash) 'Locked XML fallback changed simulator startup.'
+    foreach ($target in @(Get-TaxiSettingsTargets -Installation $app)) {
+        Assert-SettingsTest (-not (Test-Path -LiteralPath $target.path)) 'Locked XML fallback prevented the requested settings reset.'
+    }
+    Assert-SettingsTest ((Get-FileHash -LiteralPath (Join-Path $app 'taxi-camera-mounts.cfg')).Hash -eq $defaultHash) 'Locked XML fallback did not retain the requested default calibration reset.'
     Assert-Saved $unrelated
 
+    $saved = Seed-Settings
     Invoke-Install -Reset
     foreach ($target in @(Get-TaxiSettingsTargets -Installation $app)) {
         Assert-SettingsTest (-not (Test-Path -LiteralPath $target.path)) 'Explicit reset retained a known current or legacy setting.'
@@ -114,7 +121,27 @@ try {
     catch { $refused = $_.Exception.Message -like 'Exit every Taxi Cam*' }
     Assert-SettingsTest $refused 'Uninstall removal accepted another running installation.'
     $otherCompanion = $false
+
+    # More than one startup file can remain owned after a user changes their
+    # simulator selection. A later failure must undo every earlier XML write.
+    $secondXml = Join-Path $fixture 'second-startup/exe.xml'
+    New-Item -ItemType Directory -Path (Split-Path -Parent $secondXml) | Out-Null
+    Copy-Item -LiteralPath $xml -Destination $secondXml
+    $recordPath = Join-Path $app 'installation.json'
+    $record = Get-Content -Raw -LiteralPath $recordPath | ConvertFrom-Json
+    $record.startupPaths = @($xml,$secondXml)
+    $record | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $recordPath -Encoding utf8
     $xmlBefore = (Get-FileHash -LiteralPath $xml).Hash
+    $secondXmlBefore = (Get-FileHash -LiteralPath $secondXml).Hash
+    $xmlLock = [IO.File]::Open($secondXml, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+    $refused = $false
+    try { & (Join-Path $repoRoot 'installer/uninstall.ps1') -Installation $app -RemoveSettings }
+    catch { $refused = $true } finally { $xmlLock.Dispose() }
+    Assert-SettingsTest $refused 'Uninstall did not fail when its second owned startup file was locked.'
+    Assert-Saved $saved
+    Assert-SettingsTest ((Get-FileHash -LiteralPath $xml).Hash -eq $xmlBefore) 'Failure on the second startup file did not restore the first owned startup file.'
+    Assert-SettingsTest ((Get-FileHash -LiteralPath $secondXml).Hash -eq $secondXmlBefore) 'Failed uninstall changed the locked second startup file.'
+
     $settingsLock = [IO.File]::Open((Join-Path $local 'Taxi Cam/hotkeys.ini'), [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
     $refused = $false
     try { & (Join-Path $repoRoot 'installer/uninstall.ps1') -Installation $app -RemoveSettings }
@@ -122,8 +149,14 @@ try {
     Assert-SettingsTest $refused 'Locked settings did not fail uninstall removal.'
     Assert-Saved $saved
     Assert-SettingsTest ((Get-FileHash -LiteralPath $xml).Hash -eq $xmlBefore) 'Failed settings removal did not restore simulator startup.'
+    Assert-SettingsTest ((Get-FileHash -LiteralPath $secondXml).Hash -eq $secondXmlBefore) 'Failed settings removal did not restore the second owned startup file.'
     & (Join-Path $repoRoot 'installer/uninstall.ps1') -Installation $app
     Assert-Saved $saved
+    foreach ($startup in @($xml,$secondXml)) {
+        [xml]$remaining = Get-Content -Raw -LiteralPath $startup
+        Assert-SettingsTest ($remaining.SelectNodes('//Launch.Addon[Name="Taxi Cam"]').Count -eq 0) 'Successful uninstall retained an owned startup entry.'
+        Assert-SettingsTest ($remaining.SelectNodes('//Launch.Addon[Name="Keep Me"]').Count -eq 1) 'Successful uninstall changed an unrelated startup entry.'
+    }
     & (Join-Path $repoRoot 'installer/uninstall.ps1') -Installation $app -RemoveSettings
     foreach ($target in @(Get-TaxiSettingsTargets -Installation $app -IncludeMount)) {
         Assert-SettingsTest (-not (Test-Path -LiteralPath $target.path)) 'Explicit uninstall removal retained a known saved setting.'
@@ -181,7 +214,7 @@ exit $LASTEXITCODE
     $refused = $false
     try { [void]@(Get-TaxiSettingsTargets -Installation $app) } catch { $refused = $_.Exception.Message -like '*file is a directory*' }
     Assert-SettingsTest $refused 'A directory was accepted as a known settings file.'
-    Write-Output "PASS settings lifecycle: $checks checks; keep defaults, reset defaults, inner/outer rollback, concurrent writer, legacy imports, explicit uninstall removal, unrelated files and path guards. Fixture: $fixture"
+    Write-Output "PASS settings lifecycle: $checks checks; keep defaults, reset defaults with locked startup fallback, multiple startup file rollback, inner/outer rollback, concurrent writer, legacy imports, explicit uninstall removal, unrelated files and path guards. Fixture: $fixture"
 } finally {
     $env:LOCALAPPDATA = $priorLocal
     $env:TEMP = $priorTemp
