@@ -6,7 +6,7 @@ Run `build.ps1 -Validate` from the repository root with the pinned toolchain. It
 
 The native validation run includes `tests/app/camera_hotkeys_test.cpp`: Ctrl + Shift + L / R / B defaults, saved combinations, editor reset and conflict handling, hidden-window dispatch, and synchronization with supported aircraft TAXI controls. Profile checks cover the iniBuilds A380's manual-only controls and separate saved calibration. These fixtures do not operate a live aircraft's buttons.
 
-`tests/app/startup_state_test.cpp` checks first-launch Settings visibility, later tray starts, explicit manual opens, failed state writes and preview isolation using a private fixture directory. `tests/app/camera_status_test.cpp` verifies that stopped cameras and pending recovery do not report a generic frame wait, while recovered cameras stop showing historical temporary failures.
+`tests/app/startup_state_test.cpp` checks first-launch Settings visibility, later tray starts, explicit manual opens, failed state writes and preview isolation using a private fixture directory. `tests/app/camera_status_test.cpp` verifies distinct status reporting for stopped cameras, pending recovery and successfully recovered cameras.
 
 `tests/camera/manager_inspection_test.cpp` checks every manager-chain read and reread, field changes and identity refusals. `tests/camera/scene_recovery_test.cpp` covers temporary pair and manager failures followed by guarded cleanup and bounded retry, plus fatal identity refusal across later failures. These checks do not establish the cause of an individual simulator memory-read failure.
 

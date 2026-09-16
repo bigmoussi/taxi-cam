@@ -4,7 +4,7 @@
 
 Run `powershell -ExecutionPolicy Bypass -File tests/graphics/scene_capture_build.ps1` from the repository root. This uses the pinned compiler and creates an isolated, windowless D3D12 process on hardware and WARP. It does not open MSFS or install an add-on.
 
-The test records four changing source images. Each application copy is forwarded once, then the same live source is copied into the capture packet. Overwriting the source afterward ensures the snapshot contains the pixels at the copy event. A deliberately blocked producer queue must not publish a frame; a separately blocked consumer queue must prevent packet reuse. Pixel readback verifies all 24,576 snapshot/application-destination pixels per run, and four captures reuse one allocation. The debug layer is checked when available; the current host has no debug layer, so successful pixel tests do not claim debug-layer coverage.
+The test records four changing source images. Each application copy is forwarded once, then the same live source is copied into the capture packet. Overwriting the source afterward ensures the snapshot contains the pixels at the copy event. A deliberately blocked producer queue must not publish a frame; a separately blocked consumer queue must prevent packet reuse. Pixel readback verifies all 24,576 snapshot/application-destination pixels per run, and four captures reuse one allocation. The debug layer is checked when available; successful pixel tests without it do not claim debug-layer coverage.
 
 ## Supported operation and state
 
@@ -23,7 +23,7 @@ Destroying a packet while an application recording or GPU operation could still 
 
 ## Native live-bridge integration boundary
 
-`src/scene_capture_manager.*` now connects the separate queue-submit observer's before/after receipt API to recording lifetime. A receipt pins exact packet membership before forwarding the application's batch. The manager waits for successful native Reset/destruction, returned receipts and GPU completion before exposing snapshots. Its post callback runs only after the original native submission returns. An oversized, unobserved or reentrant submission must not be reported as completed capture work.
+`src/scene_capture_manager.*` connects the separate queue-submit observer's before/after receipt API to recording lifetime. A receipt pins exact packet membership before forwarding the application's batch. The manager waits for successful native Reset/destruction, returned receipts and GPU completion before exposing snapshots. Its post callback runs only after the original native submission returns. An oversized, unobserved or reentrant submission must not be reported as completed capture work.
 
 A post-submit signal alone does **not** prove that the original recording cannot replay. The manager uses recording retirement and a per-device Wait/Signal timeline. `retire_serialized_recording` additionally admits multiple DIRECT producer queues only after this explicit ordering proof; `discard_unsubmitted_retired` recycles a definitively retired recording that was never submitted. The stable output's recorded PFD consumers and private compositor writes use the same timeline, permitting old consumer recordings to read newly composed pixels. Submissions on an unobserved queue require synchronization before they execute; rejecting publication afterward cannot repair an already-recorded resource-state race. A pre-reset event is insufficient because native Reset may fail.
 
