@@ -4,11 +4,13 @@ param(
     [Parameter(Mandatory=$true)][string]$Installer,
     [Parameter(Mandatory=$true)][ValidatePattern('^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$')][string]$Repository,
     [Parameter(Mandatory=$true)][ValidatePattern('^[0-9a-fA-F]{40}$')][string]$Commit,
-    [Parameter(Mandatory=$true)][ValidateRange(1,2147483647)][int]$BuildNumber
+    [Parameter(Mandatory=$true)][ValidateRange(1,2147483647)][int]$BuildNumber,
+    [Parameter(Mandatory=$true)][ValidatePattern('^[1-9][0-9]*$')][string]$BuildRunId
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:GITHUB_REF -ne 'refs/heads/main') { throw 'Release publication runs only in the main-branch workflow.' }
+if ($env:GITHUB_EVENT_NAME -ne 'workflow_dispatch') { throw 'Release publication requires a manual workflow dispatch.' }
 $root = Split-Path -Parent $PSScriptRoot
 . (Join-Path $root 'installer/validation_receipt.ps1')
 $receiptPath = Join-Path $root 'build/native/validation.json'
@@ -71,7 +73,7 @@ foreach ($candidate in @($releases | Where-Object { -not $_.draft -and $_.tag_na
 $range = if ($previous) { "$previous..$Commit" } else { $Commit }
 $commits = @(& git log '--format=%H%x09%s' --reverse $range)
 if ($LASTEXITCODE -ne 0) { throw 'Could not collect release commits.' }
-$runUrl = "$env:GITHUB_SERVER_URL/$Repository/actions/runs/$env:GITHUB_RUN_ID"
+$runUrl = "$env:GITHUB_SERVER_URL/$Repository/actions/runs/$BuildRunId"
 $notes = @(
     "Windows x64 native package from commit [$($Commit.Substring(0,7))](https://github.com/$Repository/commit/$Commit).",
     '',

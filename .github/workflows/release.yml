@@ -1,9 +1,9 @@
-name: Windows release
+name: Windows build
 
 on:
   push:
     branches: [main]
-    # Release only when code or inputs to the shipped build change.
+    # Build only when code or inputs to the shipped build change.
     paths:
       - 'src/**'
       - 'tests/**'
@@ -19,6 +19,7 @@ on:
       - 'licenses/native-runtime-notices.txt'
       - 'LICENSE'
       - '.github/workflows/release.yml'
+      - '.github/workflows/publish.yml'
       - '!**/*.md'
       - '!**/.clang-format'
       - '!**/.gitignore'
@@ -28,11 +29,9 @@ permissions:
   contents: read
 
 jobs:
-  release:
+  build:
     runs-on: windows-2025
     timeout-minutes: 45
-    permissions:
-      contents: write
     defaults:
       run:
         shell: pwsh
@@ -112,13 +111,26 @@ jobs:
             build/installer-tests/**/*.log
             build/installer-tests/**/result.json
 
-      - name: Publish release and release notes
-        if: github.ref == 'refs/heads/main'
+      - name: Keep checked release candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-release-${{ github.run_number }}-attempt-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 30
+          path: |
+            ${{ steps.package.outputs.zip }}
+            ${{ steps.installer.outputs.setup }}
+            build/packages/*.build-info.json
+            build/packages/*-setup.exe.json
+            build/native/validation.json
+            build/native/taxi-cam.exe
+            build/native/taxi-camera-bridge.dll
+
+      - name: Explain manual publication
         env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          SOURCE_COMMIT: ${{ github.sha }}
+          BUILD_RUN_ID: ${{ github.run_id }}
           BUILD_NUMBER: ${{ github.run_number }}
-          RELEASE_ZIP: ${{ steps.package.outputs.zip }}
-          RELEASE_INSTALLER: ${{ steps.installer.outputs.setup }}
-        run: ./ci/publish-release.ps1 -Package $env:RELEASE_ZIP -Installer $env:RELEASE_INSTALLER -Repository $env:GH_REPO -Commit $env:SOURCE_COMMIT -BuildNumber $env:BUILD_NUMBER
+          BUILD_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          "Download windows-release-$env:BUILD_NUMBER-attempt-$env:BUILD_ATTEMPT and check the installer in packages/. Nothing has been published." >> $env:GITHUB_STEP_SUMMARY
+          "When ready, run Publish Windows release on main with build_run_id=$env:BUILD_RUN_ID and build_attempt=$env:BUILD_ATTEMPT." >> $env:GITHUB_STEP_SUMMARY
