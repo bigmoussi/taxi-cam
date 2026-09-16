@@ -47,6 +47,111 @@ try { Read-TaxiLaunchXml $invalid } catch { $refused = $true }
 if (-not $refused) { throw 'External XML entity was not refused.' }
 Write-Output 'PASS exe.xml: preserve unrelated entries/comments, escaped paths, exact arguments, backup, idempotence, concurrent-edit refusal, targeted removal, DTD refusal.'
 
+# Some third-party startup files have a SimConnect header but only launch entries.
+# Repair is explicitly requested and remains an in-memory edit until the existing
+# verified-backup/atomic-replacement transaction commits the complete document.
+$repairRoot = Join-Path $testRoot ('header-repair-' + [Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $repairRoot | Out-Null
+$repairPath = Join-Path $repairRoot 'exe.xml'
+$repairContents = @'
+<?xml version="1.0" encoding="utf-8"?>
+<SimBase.Document Type="SimConnect" version="1,0">
+  <Descr>SimConnect</Descr><Filename>SimConnect.xml</Filename>
+  <Disabled>False</Disabled><Launch.ManualLoad>False</Launch.ManualLoad>
+  <!-- Preserve the first add-on's startup details -->
+  <Launch.Addon><Name>Synaptic A220</Name><Path>C:\Other Aircraft\Synaptic.exe</Path><CommandLine>--keep="exact &amp; intact"</CommandLine><Disabled>False</Disabled><Custom>preserved</Custom></Launch.Addon>
+  <!-- Preserve the second add-on's startup details -->
+  <Launch.Addon><!-- Keep the add-on's own comment --><Name>FSRealistic</Name><Path>C:\Other App\FSRealistic.exe</Path><Disabled>True</Disabled><ManualLoad>True</ManualLoad></Launch.Addon>
+</SimBase.Document>
+'@
+[IO.File]::WriteAllText($repairPath, $repairContents, [Text.UTF8Encoding]::new($true))
+$repairHash = (Get-FileHash -LiteralPath $repairPath).Hash
+$refused = $false
+try { [void](Read-TaxiLaunchXml $repairPath) } catch { $refused = $true }
+if (-not $refused) { throw 'Default startup reading unexpectedly repaired a SimConnect header.' }
+$repairDocument = Read-TaxiLaunchXml $repairPath -RepairLaunchHeader
+if ($repairDocument.DocumentElement.GetAttribute('Type') -cne 'Launch' -or
+    $repairDocument.DocumentElement.SelectSingleNode('Descr').InnerText -cne 'Launch' -or
+    $repairDocument.DocumentElement.SelectSingleNode('Filename').InnerText -cne 'exe.xml' -or
+    $repairDocument.DocumentElement.SelectSingleNode('Disabled').InnerText -cne 'False' -or
+    $repairDocument.DocumentElement.SelectSingleNode('Launch.ManualLoad').InnerText -cne 'False' -or
+    $repairDocument.DocumentElement.GetAttribute('version') -cne '1,0') { throw 'Opt-in startup repair did not normalize only the launch header.' }
+if ((Get-FileHash -LiteralPath $repairPath).Hash -ne $repairHash -or
+    @(Get-ChildItem -LiteralPath $repairRoot -File).Count -ne 1) { throw 'Reading a repairable header changed disk files before commit.' }
+$originalRepairDocument = [Xml.XmlDocument]::new()
+$originalRepairDocument.PreserveWhitespace = $true
+$originalRepairDocument.LoadXml($repairContents)
+$originalAddons = @($originalRepairDocument.DocumentElement.SelectNodes('Launch.Addon') | ForEach-Object { $_.OuterXml })
+$originalComments = @($originalRepairDocument.DocumentElement.SelectNodes('comment()') | ForEach-Object { $_.OuterXml })
+for ($index = 0; $index -lt $originalAddons.Count; ++$index) {
+    if ($repairDocument.DocumentElement.SelectNodes('Launch.Addon')[$index].OuterXml -cne $originalAddons[$index]) { throw 'Header repair changed an existing add-on before commit.' }
+}
+Set-TaxiStartupEntry $repairDocument 'C:\Native Camera & Tools\taxi-cam.exe' 'C:\MSFS\FlightSimulator2024.exe'
+$writtenHash = ''
+$repairBackup = Save-TaxiLaunchXml $repairDocument $repairPath $repairHash ([ref]$writtenHash)
+if (-not $repairBackup -or (Get-FileHash -LiteralPath $repairBackup).Hash -ne $repairHash) { throw 'Header repair did not preserve the exact original startup bytes in its backup.' }
+if ($writtenHash -ne (Get-FileHash -LiteralPath $repairPath).Hash) { throw 'Header repair reported an incorrect committed file hash.' }
+$repaired = Read-TaxiLaunchXml $repairPath
+if ($repaired.DocumentElement.SelectNodes('Launch.Addon').Count -ne 3 -or
+    $repaired.DocumentElement.SelectNodes('Launch.Addon[Name="Taxi Cam"]').Count -ne 1) { throw 'Header repair lost an existing add-on or duplicated Taxi Cam.' }
+for ($index = 0; $index -lt $originalAddons.Count; ++$index) {
+    if ($repaired.DocumentElement.SelectNodes('Launch.Addon')[$index].OuterXml -cne $originalAddons[$index]) { throw 'Header repair round trip changed an unrelated add-on.' }
+}
+$repairedComments = @($repaired.DocumentElement.SelectNodes('comment()') | ForEach-Object { $_.OuterXml })
+if ($repairedComments.Count -ne $originalComments.Count -or
+    ($repairedComments -join "`n") -cne ($originalComments -join "`n")) { throw 'Header repair changed unrelated startup comments.' }
+$repairedAgain = Read-TaxiLaunchXml $repairPath -RepairLaunchHeader
+if ($repairedAgain.OuterXml -cne $repaired.OuterXml) { throw 'Opt-in reading changed an already valid launch document.' }
+Set-TaxiStartupEntry $repairedAgain 'C:\Native Camera & Tools\taxi-cam.exe' 'C:\MSFS\FlightSimulator2024.exe'
+if ($repairedAgain.DocumentElement.SelectNodes('Launch.Addon').Count -ne 3) { throw 'A repaired startup file is not idempotent.' }
+
+$launchChild = '<Launch.Addon><Name>Keep Me</Name><Path>C:\Other.exe</Path></Launch.Addon>'
+$launchHeaders = '<Descr>SimConnect</Descr><Filename>SimConnect.xml</Filename><Disabled>False</Disabled><Launch.ManualLoad>False</Launch.ManualLoad>'
+$refusalCases = [ordered]@{
+    'real-simconnect' = '<SimBase.Document Type="SimConnect">' + $launchHeaders + '<SimConnect.Comm><Protocol>IPv4</Protocol></SimConnect.Comm></SimBase.Document>'
+    'mixed-comm-and-launch' = '<SimBase.Document Type="SimConnect">' + $launchHeaders + $launchChild + '<SimConnect.Comm><Protocol>IPv4</Protocol></SimConnect.Comm></SimBase.Document>'
+    'unknown-child' = '<SimBase.Document Type="SimConnect">' + $launchHeaders + $launchChild + '<Unexpected>Keep</Unexpected></SimBase.Document>'
+    'unknown-root' = '<Unexpected Type="SimConnect">' + $launchHeaders + $launchChild + '</Unexpected>'
+    'unknown-type' = '<SimBase.Document Type="Other">' + $launchHeaders + $launchChild + '</SimBase.Document>'
+    'namespaced-root' = '<SimBase.Document xmlns="urn:other-startup" Type="SimConnect">' + $launchHeaders + $launchChild + '</SimBase.Document>'
+    'namespaced-child' = '<SimBase.Document Type="SimConnect">' + $launchHeaders + $launchChild + '<Disabled xmlns="urn:other-startup">False</Disabled></SimBase.Document>'
+    'missing-addon' = '<SimBase.Document Type="SimConnect">' + $launchHeaders + '</SimBase.Document>'
+    'missing-filename' = '<SimBase.Document Type="SimConnect"><Descr>SimConnect</Descr>' + $launchChild + '</SimBase.Document>'
+    'different-filename' = '<SimBase.Document Type="SimConnect"><Filename>Other.xml</Filename>' + $launchChild + '</SimBase.Document>'
+    'nonexact-filename' = '<SimBase.Document Type="SimConnect"><Filename>SimConnect.xml </Filename>' + $launchChild + '</SimBase.Document>'
+    'nested-filename-content' = '<SimBase.Document Type="SimConnect"><Filename><Value>SimConnect.xml</Value></Filename>' + $launchChild + '</SimBase.Document>'
+    'filename-comment' = '<SimBase.Document Type="SimConnect"><Filename><!-- Preserve me -->SimConnect.xml</Filename>' + $launchChild + '</SimBase.Document>'
+    'nested-description-content' = '<SimBase.Document Type="SimConnect"><Descr><Value>SimConnect</Value></Descr><Filename>SimConnect.xml</Filename>' + $launchChild + '</SimBase.Document>'
+    'description-comment' = '<SimBase.Document Type="SimConnect"><Descr><!-- Preserve me -->SimConnect</Descr><Filename>SimConnect.xml</Filename>' + $launchChild + '</SimBase.Document>'
+}
+foreach ($header in @('Descr', 'Filename', 'Disabled', 'Launch.ManualLoad')) {
+    $duplicateValue = switch ($header) { 'Descr' { 'SimConnect' }; 'Filename' { 'SimConnect.xml' }; default { 'False' } }
+    $refusalCases['duplicate-' + $header] = '<SimBase.Document Type="SimConnect">' + $launchHeaders +
+        '<' + $header + '>' + $duplicateValue + '</' + $header + '>' + $launchChild + '</SimBase.Document>'
+}
+foreach ($case in $refusalCases.GetEnumerator()) {
+    $casePath = Join-Path $repairRoot ($case.Key + '.xml')
+    [IO.File]::WriteAllText($casePath, $case.Value)
+    $caseHash = (Get-FileHash -LiteralPath $casePath).Hash
+    $refused = $false
+    try { [void](Read-TaxiLaunchXml $casePath -RepairLaunchHeader) } catch { $refused = $true }
+    if (-not $refused) { throw "Unsafe or ambiguous header repair was accepted: $($case.Key)" }
+    if ((Get-FileHash -LiteralPath $casePath).Hash -ne $caseHash) { throw "Refused header repair changed its source: $($case.Key)" }
+}
+foreach ($flags in @(@('True', 'False'), @('False', 'True'), @('True', 'True'))) {
+    $flagPath = Join-Path $repairRoot ('flags-' + ($flags -join '-') + '.xml')
+    $flagContents = '<SimBase.Document Type="SimConnect"><Descr>SimConnect</Descr><Filename>SimConnect.xml</Filename><Disabled>' +
+        $flags[0] + '</Disabled><Launch.ManualLoad>' + $flags[1] + '</Launch.ManualLoad>' + $launchChild + '</SimBase.Document>'
+    [IO.File]::WriteAllText($flagPath, $flagContents)
+    $flagDocument = Read-TaxiLaunchXml $flagPath -RepairLaunchHeader
+    Set-TaxiStartupEntry $flagDocument 'C:\Native Camera\taxi-cam.exe' 'C:\MSFS\FlightSimulator2024.exe'
+    if ($flagDocument.DocumentElement.SelectSingleNode('Disabled').InnerText -cne $flags[0] -or
+        $flagDocument.DocumentElement.SelectSingleNode('Launch.ManualLoad').InnerText -cne $flags[1]) {
+        throw 'Header repair overrode global disabled/manual startup flags needed by the installer refusal policy.'
+    }
+}
+Write-Output ('PASS exe.xml launch-header repair: explicit opt-in, memory-only preparation, exact original backup, preserved add-ons/comments/global flags, strict round trip, idempotence and ' + $refusalCases.Count + ' unsafe/ambiguous fixture refusals.')
+
 # Failures before replacement must leave user XML intact and identify whether
 # callers may safely continue with manual startup. All fixtures remain in build/.
 $failureRoot = Join-Path $testRoot ([Guid]::NewGuid().ToString('N'))
@@ -179,6 +284,77 @@ $writtenHash = ''
 $newBackup = Save-TaxiLaunchXml $newDocument $newPath '' ([ref]$writtenHash)
 if ($newBackup -or $writtenHash -ne (Get-FileHash -LiteralPath $newPath).Hash) { throw 'New-file transaction ownership is incorrect.' }
 Write-Output 'PASS exe.xml failure resilience: encryption error 6000 and access denial preserve original, partial/hash/encryption-mismatched backups removed, cleanup failure blocks fallback, typed conflicts, exact committed hashes and retained verified backups.'
+
+# Simulate packaged-host filesystem redirection without writing AppData or
+# changing a real launch file. Visibility must be proved before XML is written
+# to the reserved sibling; failure must remain an uncommitted transaction.
+& {
+    $visibilityRoot = Join-Path $testRoot ('visibility-' + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $visibilityRoot | Out-Null
+    $visibilityPath = Join-Path $visibilityRoot 'exe.xml'
+    [IO.File]::WriteAllText($visibilityPath, $failureContents)
+    $visibilityHash = (Get-FileHash -LiteralPath $visibilityPath).Hash
+    $visibilityDocument = Read-TaxiLaunchXml $visibilityPath
+    Set-TaxiStartupEntry $visibilityDocument 'C:\Native Camera\taxi-cam.exe' 'C:\MSFS\FlightSimulator2024.exe'
+    $visibilityCalls = [Collections.Generic.List[string]]::new()
+    $visibilityMode = 'refuse-temporary'
+    function Assert-TaxiVisibleInstallPath([string]$Path) {
+        [void]$visibilityCalls.Add($Path)
+        if ($Path -like ($visibilityPath + '.taxi-*.tmp')) {
+            if (-not [IO.File]::Exists($Path) -or ([IO.FileInfo]::new($Path)).Length -ne 0) {
+                throw 'Fixture visibility check did not precede writing XML to an existing empty sibling.'
+            }
+            if ($visibilityMode -eq 'refuse-temporary') { throw 'Fixture detects a redirected startup replacement.' }
+        } elseif ($Path -eq $visibilityPath) {
+            if ($visibilityMode -eq 'refuse-original') { throw 'Fixture detects a redirected existing startup file.' }
+        } else { throw "Unexpected path passed to startup visibility proof: $Path" }
+        if ($visibilityMode -eq 'refuse-all') { throw 'Default XML saving unexpectedly requested visibility proof.' }
+    }
+    foreach ($mode in @('refuse-temporary', 'refuse-original')) {
+        $visibilityMode = $mode
+        $visibilityCalls.Clear()
+        $failure = $null; $writtenHash = 'not committed'
+        try { Save-TaxiLaunchXml $visibilityDocument $visibilityPath $visibilityHash ([ref]$writtenHash) -RequireVisiblePath } catch { $failure = $_ }
+        $expectedMessage = if ($mode -eq 'refuse-temporary') { 'Fixture detects a redirected startup replacement.' } else { 'Fixture detects a redirected existing startup file.' }
+        if (-not $failure -or $failure.Exception.Message -ne $expectedMessage) { throw "The $mode fixture did not reach its requested visibility guard." }
+        if ($writtenHash -or (Get-FileHash -LiteralPath $visibilityPath).Hash -ne $visibilityHash) { throw 'Refused visibility proof changed the startup file or reported a commit.' }
+        if (@(Get-ChildItem -LiteralPath $visibilityRoot -Filter 'exe.xml.taxi-*').Count) { throw 'Refused visibility proof left temporary XML or a backup.' }
+        if ($mode -eq 'refuse-original' -and -not $visibilityCalls.Contains($visibilityPath)) { throw 'Existing startup visibility was not checked.' }
+        if ($mode -eq 'refuse-temporary' -and @($visibilityCalls | Where-Object { $_ -like ($visibilityPath + '.taxi-*.tmp') }).Count -ne 1) {
+            throw 'The created startup sibling was not checked exactly once before writing content.'
+        }
+    }
+    $visibilityMode = 'allow'
+    $visibilityCalls.Clear()
+    $writtenHash = ''
+    $visibilityBackup = Save-TaxiLaunchXml $visibilityDocument $visibilityPath $visibilityHash ([ref]$writtenHash) -RequireVisiblePath
+    if (-not $visibilityBackup -or (Get-FileHash -LiteralPath $visibilityBackup).Hash -ne $visibilityHash -or
+        $writtenHash -ne (Get-FileHash -LiteralPath $visibilityPath).Hash) { throw 'Successful visibility proof lost exact backup or committed hash semantics.' }
+    if (-not $visibilityCalls.Contains($visibilityPath) -or
+        @($visibilityCalls | Where-Object { $_ -like ($visibilityPath + '.taxi-*.tmp') }).Count -ne 1) { throw 'Successful startup saving omitted an original or empty-sibling visibility check.' }
+
+    # The common helper remains usable without requiring installer-specific
+    # visibility machinery unless the installer explicitly requests that check.
+    $visibilityMode = 'refuse-all'
+    $visibilityCalls.Clear()
+    $currentHash = $writtenHash
+    $writtenHash = ''
+    [void](Save-TaxiLaunchXml $visibilityDocument $visibilityPath $currentHash ([ref]$writtenHash))
+    if ($visibilityCalls.Count -ne 0 -or $writtenHash -ne (Get-FileHash -LiteralPath $visibilityPath).Hash) { throw 'Default direct XML saving changed its optional visibility contract.' }
+
+    $visibilityPath = Join-Path $visibilityRoot 'new/exe.xml'
+    $visibilityDocument = Read-TaxiLaunchXml $visibilityPath
+    Set-TaxiStartupEntry $visibilityDocument 'C:\Native Camera\taxi-cam.exe' 'C:\MSFS\FlightSimulator2024.exe'
+    $visibilityMode = 'refuse-temporary'
+    $visibilityCalls.Clear()
+    $failure = $null; $writtenHash = 'not committed'
+    try { Save-TaxiLaunchXml $visibilityDocument $visibilityPath '' ([ref]$writtenHash) -RequireVisiblePath } catch { $failure = $_ }
+    if (-not $failure -or $failure.Exception.Message -ne 'Fixture detects a redirected startup replacement.' -or
+        $writtenHash -or [IO.File]::Exists($visibilityPath)) { throw 'A refused new-file visibility proof created or reported startup XML.' }
+    if (@(Get-ChildItem -LiteralPath (Split-Path -Parent $visibilityPath) -File).Count) { throw 'A refused new-file visibility proof left a sibling or backup.' }
+    if ($visibilityCalls.Count -ne 1 -or $visibilityCalls[0] -notlike ($visibilityPath + '.taxi-*.tmp')) { throw 'A new startup transaction did not check only its created empty sibling.' }
+}
+Write-Output 'PASS exe.xml path visibility: original and empty sibling checked before content, redirected-path refusals leave original/new targets unchanged with no commit/backup/temp, successful opt-in and unchanged default saving.'
 
 # Real EFS coverage is opt-in through tests/installer/test-encryption.ps1 -RunEfsFixture.
 # That fixture requires an existing EFS key; this default test must not cause

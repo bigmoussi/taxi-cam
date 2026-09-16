@@ -1,5 +1,5 @@
 Set-StrictMode -Version Latest
-function Read-TaxiLaunchXml([string]$Path) {
+function Read-TaxiLaunchXml([string]$Path, [switch]$RepairLaunchHeader) {
     $document = [Xml.XmlDocument]::new()
     $document.PreserveWhitespace = $true
     $document.XmlResolver = $null
@@ -9,6 +9,34 @@ function Read-TaxiLaunchXml([string]$Path) {
         $settings.XmlResolver = $null
         $reader = [Xml.XmlReader]::Create($Path, $settings)
         try { $document.Load($reader) } finally { $reader.Dispose() }
+        $root = $document.DocumentElement
+        if ($RepairLaunchHeader -and $root.Name -ceq 'SimBase.Document' -and $root.GetAttribute('Type') -ceq 'SimConnect' -and
+            -not $root.NamespaceURI) {
+            # Some add-ons write launch entries under a copied SimConnect header.
+            # Repair only that recognizable launch-only shape, in memory. A real
+            # or mixed SimConnect configuration must never become a launch file.
+            $allowed = @('Descr','Filename','Disabled','Launch.ManualLoad','Launch.Addon')
+            $elements = @($root.ChildNodes | Where-Object { $_.NodeType -eq [Xml.XmlNodeType]::Element })
+            # LocalName avoids PowerShell's XML adapter substituting an add-on's
+            # child <Name> for the element's CLR Name property.
+            $unknown = @($elements | Where-Object { $allowed -cnotcontains $_.LocalName -or $_.NamespaceURI })
+            $ambiguous = @($allowed | Where-Object { $_ -ne 'Launch.Addon' -and $root.SelectNodes($_).Count -gt 1 })
+            $complexHeaders = @($elements | Where-Object { $_.LocalName -in @('Descr','Filename') } | ForEach-Object {
+                $_.ChildNodes | Where-Object { $_.NodeType -notin @([Xml.XmlNodeType]::Text, [Xml.XmlNodeType]::CDATA,
+                    [Xml.XmlNodeType]::Whitespace, [Xml.XmlNodeType]::SignificantWhitespace) }
+            })
+            $filename = $root.SelectSingleNode('Filename')
+            if ($unknown.Count -eq 0 -and $ambiguous.Count -eq 0 -and $complexHeaders.Count -eq 0 -and $root.SelectNodes('Launch.Addon').Count -gt 0 -and
+                $filename -and $filename.InnerText -ceq 'SimConnect.xml') {
+                $root.SetAttribute('Type','Launch')
+                $filename.InnerText = 'exe.xml'
+                $description = $root.SelectSingleNode('Descr')
+                if (-not $description) { $description = $document.CreateElement('Descr'); [void]$root.PrependChild($description) }
+                $description.InnerText = 'Launch'
+                # Disabled/ManualLoad flags, add-on entries and comments stay as
+                # supplied. Save-TaxiLaunchXml backs up original bytes atomically.
+            }
+        }
         if ($document.DocumentElement.Name -ne 'SimBase.Document' -or $document.DocumentElement.GetAttribute('Type') -ne 'Launch') { throw 'Unrecognized exe.xml launch document.' }
     } else {
         $document.LoadXml('<?xml version="1.0" encoding="utf-8"?><SimBase.Document Type="Launch" version="1,0"><Descr>Launch</Descr><Filename>exe.xml</Filename><Disabled>False</Disabled><Launch.ManualLoad>False</Launch.ManualLoad></SimBase.Document>')
@@ -38,7 +66,7 @@ function New-TaxiStartupConflict([string]$Message) {
     $exception.Data['TaxiStartupConflict'] = $true
     return $exception
 }
-function Save-TaxiLaunchXml([Xml.XmlDocument]$Document,[string]$Path,[string]$ExpectedHash,[ref]$WrittenHash) {
+function Save-TaxiLaunchXml([Xml.XmlDocument]$Document,[string]$Path,[string]$ExpectedHash,[ref]$WrittenHash,[switch]$RequireVisiblePath) {
     if ($null -ne $WrittenHash) { $WrittenHash.Value = '' }
     $absolute = [IO.Path]::GetFullPath($Path)
     if ([IO.Path]::GetFileName($absolute) -ine 'exe.xml') { throw 'Startup target must be named exe.xml.' }
@@ -68,6 +96,14 @@ function Save-TaxiLaunchXml([Xml.XmlDocument]$Document,[string]$Path,[string]$Ex
         $operationDestination = $temporary
         $stream = [IO.File]::Open($temporary, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
         $stream.Dispose()
+        if ($RequireVisiblePath) {
+            # A packaged host can redirect Roaming AppData independently of the
+            # binary directory. Verify the actual destination before any XML is
+            # written/backed up, so a private copy cannot report auto-start success.
+            $operation = 'Verify startup path visibility'
+            Assert-TaxiVisibleInstallPath $temporary
+            if (Test-Path -LiteralPath $absolute) { Assert-TaxiVisibleInstallPath $absolute }
+        }
         if ($encrypted) {
             $operation = 'Encrypt startup replacement'
             [IO.File]::Encrypt($temporary)

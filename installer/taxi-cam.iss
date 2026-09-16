@@ -85,6 +85,8 @@ var
   Prepared, Completed: Boolean;
   RemoveSavedSettings: Boolean;
   PreviousDir, StartupNotice: String;
+  DiscoveredSimulator, InheritedXml: String;
+  ExplicitXml, XmlEdited, LoadingChoices: Boolean;
 
 function Q(Value: String): String;
 begin
@@ -113,6 +115,29 @@ begin
   else Result := 'Automatic';
 end;
 
+procedure XmlChoiceChanged(Sender: TObject);
+begin
+  if not LoadingChoices then XmlEdited := True;
+end;
+
+procedure ClearStaleInheritedXml;
+begin
+  { A saved startup file belongs to the simulator discovered with it. Never
+    carry that default to another simulator, including a silent override. }
+  if not ExplicitXml and not XmlEdited and (InheritedXml <> '') and
+    (CompareText(ExpandFileName(XmlPage.Values[0]), ExpandFileName(InheritedXml)) = 0) and
+    (CompareText(AddBackslash(ExpandFileName(SimulatorPage.Values[0])),
+      AddBackslash(ExpandFileName(DiscoveredSimulator))) <> 0) then begin
+    LoadingChoices := True;
+    try
+      XmlPage.Values[0] := '';
+    finally
+      LoadingChoices := False;
+    end;
+    Log('Simulator selection changed; cleared the inherited exe.xml path.');
+  end;
+end;
+
 function RunHelper(Mode, Script, Destination, State: String): Boolean;
 var
   Args: String;
@@ -124,7 +149,8 @@ begin
     Args := Args + ' -PayloadDirectory ' + Q(ExpandConstant('{tmp}\payload')) +
       ' -SimulatorDirectory ' + Q(SimulatorPage.Values[0]) + ' -StartupMode ' + StartupMode +
       ' -UpdateFromPid ' + Q(ExpandConstant('{param:UPDATEFROMPID|0}'));
-    if StartupMode = 'Automatic' then Args := Args + ' -ExeXml ' + Q(XmlPage.Values[0]);
+    if (StartupMode = 'Automatic') and (XmlPage.Values[0] <> '') then
+      Args := Args + ' -ExeXml ' + Q(XmlPage.Values[0]);
     if not SettingsPage.Values[0] then Args := Args + ' -ResetSettings';
   end;
   if ((Mode = 'Uninstall') or (Mode = 'CheckClosed')) and RemoveSavedSettings then
@@ -139,6 +165,31 @@ var
 begin
   Result := 'Installation failed. Close MSFS and the companion and verify the selected paths.';
   if LoadStringFromFile(State + '\error.txt', Text) then Result := UTF8Decode(Text);
+end;
+
+function DiscoverChoices: Boolean;
+var
+  Ini, Choice: String;
+begin
+  Result := True;
+  if PreviousDir = WizardDirValue then exit;
+  Result := RunHelper('Discover', ExpandConstant('{tmp}\runtime.ps1'), WizardDirValue, ExpandConstant('{tmp}\state'));
+  if not Result then exit;
+  PreviousDir := WizardDirValue;
+  Ini := ExpandConstant('{tmp}\state\choices.ini');
+  DiscoveredSimulator := GetIniString('Paths', 'Simulator', '', Ini);
+  InheritedXml := GetIniString('Paths', 'ExeXml', '', Ini);
+  LoadingChoices := True;
+  try
+    SimulatorPage.Values[0] := ExpandConstant('{param:SIMULATORDIR|' + DiscoveredSimulator + '}');
+    XmlPage.Values[0] := ExpandConstant('{param:EXEXML|' + InheritedXml + '}');
+  finally
+    LoadingChoices := False;
+  end;
+  XmlEdited := False;
+  Choice := ExpandConstant('{param:STARTUP|' + GetIniString('Paths', 'Startup', 'automatic', Ini) + '}');
+  if CompareText(Choice, 'manual') = 0 then StartupPage.SelectedValueIndex := 1
+  else StartupPage.SelectedValueIndex := 0;
 end;
 
 procedure InitializeWizard;
@@ -161,6 +212,8 @@ begin
   XmlPage := CreateInputFilePage(StartupPage.ID, 'Automatic startup', 'Select the simulator exe.xml',
     'Setup preserves other startup entries and adds Taxi Cam. A new exe.xml can be created at the selected path.');
   XmlPage.Add('Simulator launch configuration:', 'XML files|*.xml|All files|*.*', '.xml');
+  XmlPage.Edits[0].OnChange := @XmlChoiceChanged;
+  ExplicitXml := ExpandConstant('{param:EXEXML|}') <> '';
   SettingsPage := CreateInputOptionPage(XmlPage.ID, 'Saved settings',
     'Keep your settings or start with the defaults',
     'Keep your camera profiles, calibration, reference guides and keyboard shortcuts. Clear this box to reset saved settings to the defaults.',
@@ -172,28 +225,23 @@ begin
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
-var
-  Ini, Choice: String;
 begin
   Result := True;
   if (CurPageID = wpSelectDir) and (PreviousDir <> WizardDirValue) then begin
-    if not RunHelper('Discover', ExpandConstant('{tmp}\runtime.ps1'), WizardDirValue, ExpandConstant('{tmp}\state')) then begin
+    if not DiscoverChoices then begin
       MsgBox('Cannot read the previous installation settings. Check installation.json.', mbError, MB_OK);
       Result := False; exit;
     end;
-    PreviousDir := WizardDirValue;
-    Ini := ExpandConstant('{tmp}\state\choices.ini');
-    SimulatorPage.Values[0] := ExpandConstant('{param:SIMULATORDIR|' + GetIniString('Paths', 'Simulator', '', Ini) + '}');
-    XmlPage.Values[0] := ExpandConstant('{param:EXEXML|' + GetIniString('Paths', 'ExeXml', '', Ini) + '}');
-    Choice := ExpandConstant('{param:STARTUP|' + GetIniString('Paths', 'Startup', 'automatic', Ini) + '}');
-    if CompareText(Choice, 'manual') = 0 then StartupPage.SelectedValueIndex := 1
-    else StartupPage.SelectedValueIndex := 0;
   end;
   if CurPageID = SimulatorPage.ID then begin
     Result := FileExists(AddBackslash(SimulatorPage.Values[0]) + 'FlightSimulator2024.exe');
-    if not Result then MsgBox('Select the Content directory containing FlightSimulator2024.exe.', mbError, MB_OK);
+    if Result then ClearStaleInheritedXml
+    else MsgBox('Select the Content directory containing FlightSimulator2024.exe.', mbError, MB_OK);
   end;
   if CurPageID = XmlPage.ID then begin
+    { Silent setup delegates an empty choice to the installer's existing
+      discovery/manual-startup fallback; interactive setup requests a path. }
+    if WizardSilent and (XmlPage.Values[0] = '') then exit;
     Result := (CompareText(ExtractFileName(XmlPage.Values[0]), 'exe.xml') = 0) and (ExtractFileDrive(XmlPage.Values[0]) <> '');
     if not Result then MsgBox('Choose a full path ending in exe.xml.', mbError, MB_OK);
   end;
@@ -210,6 +258,11 @@ var
 begin
   Result := '';
   if Prepared then exit;
+  if not DiscoverChoices then begin
+    Result := 'Cannot read the previous installation settings. Check installation.json.';
+    exit;
+  end;
+  ClearStaleInheritedXml;
   ExtractTemporaryFiles('{tmp}\payload\*');
   if not RunHelper('Install', ExpandConstant('{tmp}\runtime.ps1'), WizardDirValue, ExpandConstant('{tmp}\state')) then begin
     Result := ErrorText(ExpandConstant('{tmp}\state'));
