@@ -4,25 +4,34 @@ param(
     [Parameter(Mandatory=$true)][string]$Destination,
     [string]$SimulatorDirectory, [string]$ExeXml, [string]$PayloadDirectory,
     [Parameter(Mandatory=$true)][string]$StateDirectory,
-    [ValidateRange(0,2147483647)][int]$UpdateFromPid = 0
+    [ValidateRange(0,2147483647)][int]$UpdateFromPid = 0,
+    [switch]$ResetSettings,
+    [switch]$RemoveSettings
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 # Setup may inherit PSModulePath from PowerShell 7; load the Windows PowerShell
 # utility module by its own absolute path for Get-FileHash and JSON operations.
 Import-Module (Join-Path $PSHOME 'Modules/Microsoft.PowerShell.Utility/Microsoft.PowerShell.Utility.psd1') -ErrorAction Stop
+. (Join-Path $PSScriptRoot 'settings.ps1')
 New-Item -ItemType Directory -Force -Path $StateDirectory | Out-Null
 $statePath = Join-Path $StateDirectory 'transaction.json'
 function Restore-Transaction {
     if (-not (Test-Path -LiteralPath $statePath)) { return }
     try {
     $state = Get-Content -Raw -LiteralPath $statePath | ConvertFrom-Json
+    $settingsEntries = @($state.files | Where-Object { $_.owned -and $_.PSObject.Properties['root'] -and $_.root })
+    if ($settingsEntries.Count) {
+        Assert-TaxiSettingsClosed
+        foreach ($entry in $settingsEntries) { Assert-TaxiSettingsPath $entry.path $entry.root }
+    }
     $conflicts = @()
     foreach ($entry in $state.files) {
         if (-not $entry.owned) { continue }
         $currentHash = if (Test-Path -LiteralPath $entry.path -PathType Leaf) { (Get-FileHash -LiteralPath $entry.path).Hash } else { '' }
         if ($currentHash -ne $entry.installedHash) { $conflicts += $entry.path; continue }
-        if ($entry.existed) { Copy-Item -LiteralPath $entry.backup -Destination $entry.path -Force }
+        if ($entry.existed -and $entry.PSObject.Properties['root'] -and $entry.root) { Set-TaxiSettingsFile $entry $entry.backup }
+        elseif ($entry.existed) { Copy-Item -LiteralPath $entry.backup -Destination $entry.path -Force }
         elseif (Test-Path -LiteralPath $entry.path -PathType Leaf) { Remove-Item -LiteralPath $entry.path }
     }
     if ($state.createdLegacyBackup -and (Test-Path -LiteralPath $state.createdLegacyBackup)) {
@@ -74,9 +83,10 @@ try {
     foreach ($process in @(Get-Process -Name taxi-cam,380-taxi-cam -ErrorAction SilentlyContinue)) {
         if ($process.Path -in @((Join-Path $Destination 'taxi-cam.exe'),(Join-Path $Destination '380-taxi-cam.exe'))) { throw 'Exit the taxi camera app from its tray menu, then retry.' }
     }
+    if ($ResetSettings -or $RemoveSettings) { Assert-TaxiSettingsClosed }
     if ($Mode -eq 'CheckClosed') { exit 0 }
     if ($Mode -eq 'Uninstall') {
-        & (Join-Path $PSScriptRoot 'uninstall.ps1') -Installation $Destination
+        & (Join-Path $PSScriptRoot 'uninstall.ps1') -Installation $Destination -RemoveSettings:$RemoveSettings
         exit 0
     }
     if (Test-Path -LiteralPath $statePath) { throw 'A previous installation transaction has not finished.' }
@@ -90,6 +100,13 @@ try {
     foreach ($name in @('taxi-cam.exe','taxi-camera-bridge.dll','taxi-camera-mounts.cfg','LICENSE.txt','THIRD_PARTY_NOTICES.txt')) {
         $targets += Join-Path $destFull $name
     }
+    $settingsRoots = @{}
+    if ($ResetSettings) {
+        foreach ($target in @(Get-TaxiSettingsTargets -Installation $destFull -IncludeMount)) {
+            $targets += $target.path
+            $settingsRoots[$target.path] = $target.root
+        }
+    }
     $legacy = Join-Path $SimulatorDirectory 'taxi-camera-native.addon64'
     $legacyBackups = @(Get-ChildItem -LiteralPath $SimulatorDirectory -Filter 'taxi-camera-native.addon64.disabled-native-*' | ForEach-Object FullName)
     $targets += $legacy
@@ -98,13 +115,14 @@ try {
         $backup = Join-Path $StateDirectory ("backup-$index"); $index++
         $existed = Test-Path -LiteralPath $target -PathType Leaf
         if ($existed) { Copy-Item -LiteralPath $target -Destination $backup }
-        $snapshot += [ordered]@{path=$target; backup=$backup; existed=$existed;owned=$false;installedHash=''}
+        $settingsRoot = if ($settingsRoots.ContainsKey($target)) { $settingsRoots[$target] } else { '' }
+        $snapshot += [ordered]@{path=$target;root=$settingsRoot; backup=$backup; existed=$existed;owned=$false;installedHash=''}
     }
     $state = [ordered]@{files=$snapshot;createdLegacyBackup='';createdLegacyHash=''}
     $state | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $statePath -Encoding utf8
     $nativeSucceeded = $false
     try {
-        & (Join-Path $payloadFull 'install.ps1') -SimulatorDirectory $SimulatorDirectory -ExeXml $ExeXml -Destination $destFull -PayloadDirectory $payloadFull -NoShortcut
+        & (Join-Path $payloadFull 'install.ps1') -SimulatorDirectory $SimulatorDirectory -ExeXml $ExeXml -Destination $destFull -PayloadDirectory $payloadFull -NoShortcut -ResetSettings:$ResetSettings
         $nativeSucceeded = $true
         $installedRecord = Get-Content -Raw -LiteralPath (Join-Path $destFull 'installation.json') | ConvertFrom-Json
         if ($installedRecord.legacyBackup -and $installedRecord.legacyBackup -notin $legacyBackups) {

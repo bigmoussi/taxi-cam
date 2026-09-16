@@ -25,6 +25,8 @@ For **Windows 10/11 (64-bit)** and **MSFS 2024**, with one of the aircraft above
 2. Close MSFS and exit Taxi Cam if it is already running.
 3. Run setup and follow the prompts to confirm your simulator folder and startup settings.
 
+**Keep existing settings** is selected by default. Leave it checked to preserve camera profiles, calibration, reference guides and keyboard shortcuts. Clear it only if you want to start with the bundled defaults. Setup restores your previous settings if installation fails.
+
 Taxi Cam starts with MSFS after installation. On its first launch, **Settings** opens so you can explore the controls. Close the window or select **Hide to tray** to keep the app running in the system tray. Later automatic starts stay in the tray; opening Taxi Cam from the Windows Start menu shows Settings again. The first-launch choice is remembered across updates.
 
 ## Using Taxi Cam
@@ -80,7 +82,7 @@ Please report unexpected behaviour using **Report a bug**.
 
 ## Updates and removal
 
-Use **Check for updates** in the tray menu, or download the latest installer from [Releases](https://github.com/rthoms334/taxi-cam/releases/latest). Close MSFS and Taxi Cam before installing an update. Your saved settings are kept.
+Use **Check for updates** in the tray menu, or download the latest installer from [Releases](https://github.com/rthoms334/taxi-cam/releases/latest). Close MSFS and Taxi Cam before installing an update. Your saved settings are kept by default; setup offers an explicit reset if you want to start again.
 
 If you are running **0.8.17 or earlier**, download and run setup manually once. Those versions' updaters require the old installer filename containing a build number; **0.8.18 and later** recognise the shorter `taxi-cam-<version>-windows-x64-setup.exe` name.
 
@@ -88,7 +90,7 @@ Existing shortcut choices are kept too. To adopt **Ctrl + Shift + L / R / B**, o
 
 Click the version number at the bottom of the settings sidebar to open the Taxi Cam GitHub repository in your browser.
 
-To remove the mod, close both applications and uninstall **Taxi Cam** from Windows Installed apps.
+To remove the mod, close both applications and uninstall **Taxi Cam** from Windows Installed apps. **Keep settings** is the default choice so a later installation can reuse them. Choose **Remove saved settings** to clear camera profiles, calibration, guides, keyboard shortcuts and first-launch preferences instead. This also clears known profiles retained under the former **380 Taxi Cam** name, preventing them from being imported again. Logs and unrelated files are kept.
 
 ## Reporting a problem
 

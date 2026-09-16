@@ -75,7 +75,7 @@ $runUrl = "$env:GITHUB_SERVER_URL/$Repository/actions/runs/$env:GITHUB_RUN_ID"
 $notes = @(
     "Windows x64 native package from commit [$($Commit.Substring(0,7))](https://github.com/$Repository/commit/$Commit).",
     '',
-    'Download the Windows x64 setup EXE and run it with MSFS and Taxi Cam closed. Existing paths and calibration are preserved. SHA256SUMS.txt covers the installer and optional runtime ZIP.',
+    'Download the Windows x64 setup EXE and run it with MSFS and Taxi Cam closed. Existing paths and settings are preserved by default. Clear Keep existing settings only to reset to defaults; uninstall also keeps settings unless removal is explicitly selected. SHA256SUMS.txt covers the installer and optional runtime ZIP.',
     '',
     'Upgrading from 0.8.17 or earlier: download and run setup manually once. Those versions only recognise the old installer filename containing a build number; 0.8.18 and later support the shorter name.',
     '',
