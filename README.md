@@ -2,6 +2,10 @@
 
 Nose-wheel and tail cameras for Microsoft Flight Simulator 2024. Use the aircraft's **TAXI** button or a keyboard shortcut to see both views on the upper part of its Primary Flight Display (PFD).
 
+## Known issues
+
+- **ReShade incompatibility:** Taxi Cam is currently incompatible with ReShade. I'm working on a fix.
+
 ## Important notice
 
 Taxi Cam is **experimental** and uses an unsupported simulator integration. It is not endorsed by Microsoft or Asobo. Simulator or aircraft updates may cause problems, including crashes. **Use at your own risk.**
