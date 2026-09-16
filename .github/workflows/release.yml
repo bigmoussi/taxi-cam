@@ -1,4 +1,4 @@
-name: Windows build
+name: Windows build and release
 
 on:
   push:
@@ -19,7 +19,6 @@ on:
       - 'licenses/native-runtime-notices.txt'
       - 'LICENSE'
       - '.github/workflows/release.yml'
-      - '.github/workflows/publish.yml'
       - '!**/*.md'
       - '!**/.clang-format'
       - '!**/.gitignore'
@@ -30,6 +29,9 @@ permissions:
 
 jobs:
   build:
+    name: Build and validate
+    outputs:
+      artifact_name: ${{ steps.candidate_info.outputs.artifact_name }}
     runs-on: windows-2025
     timeout-minutes: 45
     defaults:
@@ -126,11 +128,52 @@ jobs:
             build/native/taxi-cam.exe
             build/native/taxi-camera-bridge.dll
 
-      - name: Explain manual publication
+      - name: Ready for release approval
+        id: candidate_info
         env:
-          BUILD_RUN_ID: ${{ github.run_id }}
           BUILD_NUMBER: ${{ github.run_number }}
           BUILD_ATTEMPT: ${{ github.run_attempt }}
         run: |
-          "Download windows-release-$env:BUILD_NUMBER-attempt-$env:BUILD_ATTEMPT and check the installer in packages/. Nothing has been published." >> $env:GITHUB_STEP_SUMMARY
-          "When ready, run Publish Windows release on main with build_run_id=$env:BUILD_RUN_ID and build_attempt=$env:BUILD_ATTEMPT." >> $env:GITHUB_STEP_SUMMARY
+          $artifact = "windows-release-$env:BUILD_NUMBER-attempt-$env:BUILD_ATTEMPT"
+          "artifact_name=$artifact" >> $env:GITHUB_OUTPUT
+          "Download $artifact from this run and test the installer in packages/." >> $env:GITHUB_STEP_SUMMARY
+          "When ready, select Review deployments on this run, select release, then Approve and deploy. The Publish release job will publish these exact files." >> $env:GITHUB_STEP_SUMMARY
+
+  publish:
+    name: Publish release
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: release
+    runs-on: windows-2025
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: read
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out the exact built commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download and publish approved artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BUILD_RUN_ID: ${{ github.run_id }}
+          BUILD_NUMBER: ${{ github.run_number }}
+          SOURCE_COMMIT: ${{ github.sha }}
+          RELEASE_ARTIFACT: ${{ needs.build.outputs.artifact_name }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:RELEASE_ARTIFACT)) { throw 'Build did not provide a release candidate.' }
+          & gh run download $env:BUILD_RUN_ID --repo $env:GH_REPO --name $env:RELEASE_ARTIFACT --dir build
+          if ($LASTEXITCODE -ne 0) { throw 'Release candidate missing or expired. Build and check a new candidate.' }
+          $packages = @(Get-ChildItem build/packages -Filter '*.zip' -File)
+          $installers = @(Get-ChildItem build/packages -Filter '*-setup.exe' -File)
+          if ($packages.Count -ne 1 -or $installers.Count -ne 1) { throw 'Expected exactly one package and installer.' }
+          ./ci/publish-release.ps1 -Package $packages[0].FullName -Installer $installers[0].FullName -Repository $env:GH_REPO -Commit $env:SOURCE_COMMIT -BuildNumber $env:BUILD_NUMBER -BuildRunId $env:BUILD_RUN_ID
