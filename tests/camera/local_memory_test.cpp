@@ -189,6 +189,7 @@ void cached_queries() {
             "Cache omitted an RPM/trace read or failed to reuse region metadata");
     require(cache.finish() && metrics.query_calls == 2 && metrics.query_cache_validation_failures == 0,
             "Cached region was not freshly revalidated at the inspection endpoint");
+    require(std::strcmp(cache.failure().stage, "none") == 0, "Successful cache acquired a failure diagnostic");
     require(!cache.finish(), "A finished scope was reused as a fresh proof");
     require(reader.read(allocation.address(), output.data(), 8) && metrics.query_calls == 3, "Finished scope retained its cached metadata");
   }
@@ -294,6 +295,9 @@ void fused_inspection_transactions() {
     require(VirtualProtect(allocation.data, allocation.size, PAGE_READONLY, &previous) != FALSE, "Could not change stage protection");
     require(stage(transaction, 128), "Readable second stage unexpectedly failed");
     require(!transaction.finish(), "Fused stages accepted protection changes before their single endpoint check");
+    require(std::strcmp(transaction.failure().field, "protect") == 0 && transaction.failure().expected == PAGE_READWRITE &&
+                transaction.failure().observed == PAGE_READONLY,
+            "Whole-region protection diagnostics lost the exact protection change");
     require(VirtualProtect(allocation.data, allocation.size, previous, &previous) != FALSE, "Could not restore stage protection");
   }
   {
@@ -334,6 +338,15 @@ void cache_protection_changes() {
             "Could not introduce a readable region split");
     require(reader.read(allocation.address(page * 2), output.data(), 8), "A readable cached field was spuriously rejected");
     require(!cache.finish(), "Changed protection/extent escaped endpoint validation");
+    const auto& failure = cache.failure();
+    require(std::strcmp(failure.stage, "endpoint") == 0 && failure.region_index == 0 && failure.address == allocation.address() &&
+                std::strcmp(failure.field, "region_size") == 0 && failure.expected == page * 3 &&
+                failure.observed == page * (changed_page == 0 ? 1 : changed_page) && failure.system_error == ERROR_SUCCESS,
+            "Endpoint split diagnostics did not identify the original region and exact extent change");
+    const auto detail = describe_local_memory_query_failure(failure);
+    require(detail.size() < 256 && detail.find("stage=endpoint region=0 field=") == 0 && detail.find("address=") == std::string::npos &&
+                detail.find("field=region_size expected=0x") != std::string::npos,
+            "Cache failure diagnostic was missing bounded, actionable metadata");
     require(VirtualProtect(allocation.data + page * changed_page, page, PAGE_READWRITE, &previous) != FALSE,
             "Could not restore split fixture");
   }
@@ -352,6 +365,10 @@ void cache_protection_changes() {
             "Cached metadata bypassed RPM access checks or exposed partial bytes");
     require(!cache.finish() && metrics.query_cache_validation_failures == 1 && metrics.read_calls == 2,
             "Failed RPM did not poison the stage or preserve call accounting");
+    if (!copied)
+      require(std::strcmp(cache.failure().stage, "read") == 0 && cache.failure().address == allocation.address(page) &&
+                  cache.failure().region_index == 0 && cache.failure().expected == output.size(),
+              "A failed exact RPM lost its first failure diagnostic");
     MEMORY_BASIC_INFORMATION current{};
     require(VirtualQuery(allocation.data + page, &current, sizeof(current)) == sizeof(current) && current.Protect == DWORD(access),
             "Cached RPM consumed a guard page or changed its protection");
@@ -422,6 +439,10 @@ void cache_bounds() {
     require(!reader.read(allocations.front()->address(), &output, sizeof(output)) && !cache.finish() &&
                 metrics.query_cache_validation_failures == 1,
             "Cache exhaustion did not latch refusal for the whole stage");
+    require(std::strcmp(cache.failure().stage, "capacity") == 0 && cache.failure().address == allocations.back()->address() &&
+                cache.failure().expected == ScopedLocalMemoryQueryCache::kRegionLimit &&
+                cache.failure().observed == ScopedLocalMemoryQueryCache::kRegionLimit + 1,
+            "Later refusal overwrote the initial capacity diagnostic");
   }
   {
     ScopedLocalMemoryQueryCache fresh;
@@ -503,6 +524,196 @@ void descending_cache_profile() {
               double(finish.QuadPart - start.QuadPart) * 1000 / frequency.QuadPart / repeats,
               double(metrics.query_ticks) * 1000 / frequency.QuadPart / repeats);
 }
+
+constexpr std::size_t kQueryWindow = 65536;
+constexpr unsigned kEndpointWindows = 8;
+constexpr std::size_t kWindowFieldOffset = 128;
+
+void read_descending_window_fields(Allocation& allocation, LocalMemoryReader& reader, unsigned windows = kEndpointWindows) {
+  for (unsigned window = windows; window > 0; --window) {
+    std::uint64_t value = 0;
+    require(reader.read(allocation.address((window - 1) * kQueryWindow + kWindowFieldOffset), &value, sizeof(value)) &&
+                value == 0x3939393939393939ull,
+            "Descending multiwindow field or exact reread changed");
+  }
+}
+
+void multiwindow_endpoint_queries() {
+  Allocation allocation(kQueryWindow * kEndpointWindows);
+  require(allocation.address() % kQueryWindow == 0, "Multiwindow fixture requires a 64 KiB-aligned allocation");
+  std::fill(allocation.data, allocation.data + allocation.size, 0x39);
+  LocalMemoryReader reader;
+  LocalMemoryMetrics metrics;
+  LARGE_INTEGER frequency{}, start{}, finish{};
+  require(QueryPerformanceFrequency(&frequency) && QueryPerformanceCounter(&start), "Multiwindow benchmark clock unavailable");
+  constexpr unsigned repeats = 128;
+  {
+    ScopedLocalMemoryMetrics measured(metrics);
+    for (unsigned repeat = 0; repeat < repeats; ++repeat) {
+      reader.reset_budget();
+      ScopedLocalMemoryQueryCache cache;
+      const auto queries_before = metrics.query_calls;
+      read_descending_window_fields(allocation, reader);
+      require(metrics.query_calls - queries_before == kEndpointWindows,
+              "Endpoint optimization changed initial queries or reused a previous scope");
+      read_descending_window_fields(allocation, reader);
+      require(metrics.query_calls - queries_before == kEndpointWindows && cache.finish() &&
+                  metrics.query_calls - queries_before == kEndpointWindows + 1 &&
+                  reader.attempted_bytes() == 2 * kEndpointWindows * sizeof(std::uint64_t),
+              "Overlapping suffixes did not share one fresh endpoint query with exact reads preserved");
+    }
+  }
+  require(QueryPerformanceCounter(&finish) && metrics.query_calls == (kEndpointWindows + 1) * repeats &&
+              metrics.read_calls == 2 * kEndpointWindows * repeats &&
+              metrics.requested_bytes == 2 * kEndpointWindows * sizeof(std::uint64_t) * repeats &&
+              metrics.query_cache_hits == kEndpointWindows * repeats && metrics.query_cache_validation_failures == 0,
+          "Multiwindow endpoint accounting changed reads, bytes, cache hits or validation outcomes");
+  std::printf(
+      "Descending 512 KiB own-allocation graph: queries_per_stage=%llu (previously 16), exact_reads=16 bytes=128 "
+      "stage_ms=%.6f query_ms=%.6f; live benefit unmeasured.\n",
+      static_cast<unsigned long long>(metrics.query_calls / repeats),
+      double(finish.QuadPart - start.QuadPart) * 1000 / frequency.QuadPart / repeats,
+      double(metrics.query_ticks) * 1000 / frequency.QuadPart / repeats);
+
+  // Ascending discovery already saves one encompassing record. Finishing a
+  // previous descending scope must neither add work nor supply its proof here.
+  metrics = {};
+  {
+    ScopedLocalMemoryMetrics measured(metrics);
+    ScopedLocalMemoryQueryCache cache;
+    reader.reset_budget();
+    for (unsigned pass = 0; pass < 2; ++pass)
+      for (unsigned window = 0; window < kEndpointWindows; ++window) {
+        std::uint64_t value = 0;
+        require(reader.read(allocation.address(window * kQueryWindow + kWindowFieldOffset), &value, sizeof(value)) &&
+                    value == 0x3939393939393939ull,
+                "Ascending multiwindow field or exact reread changed");
+      }
+    require(metrics.query_calls == 1 && cache.finish() && metrics.query_calls == 2 && metrics.read_calls == 2 * kEndpointWindows &&
+                metrics.query_cache_hits == 2 * kEndpointWindows - 1,
+            "Ascending cache queries changed or reused a finished endpoint proof");
+  }
+}
+
+void multiwindow_endpoint_changes() {
+  SYSTEM_INFO info{};
+  GetSystemInfo(&info);
+  const auto page = std::size_t(info.dwPageSize);
+  require(page > kWindowFieldOffset + sizeof(std::uint64_t) && page < kQueryWindow,
+          "Multiwindow mutation fixture requires fields within the first page");
+  Allocation allocation(kQueryWindow * kEndpointWindows);
+  std::fill(allocation.data, allocation.data + allocation.size, 0x39);
+  LocalMemoryReader reader;
+  // None of these pages contains a field: they cover the earlier prefix, an
+  // overlapping middle suffix and the far end of every original observation.
+  const std::array<std::size_t, 3> changed_offsets{page, 3 * kQueryWindow + page, allocation.size - page};
+  for (const auto offset : changed_offsets)
+    for (const DWORD access : {DWORD(PAGE_READONLY), DWORD(PAGE_NOACCESS), DWORD(PAGE_READWRITE | PAGE_GUARD), DWORD(0)}) {
+      LocalMemoryMetrics metrics;
+      ScopedLocalMemoryMetrics measured(metrics);
+      ScopedLocalMemoryQueryCache cache;
+      reader.reset_budget();
+      read_descending_window_fields(allocation, reader);
+      DWORD previous = 0;
+      if (access)
+        require(VirtualProtect(allocation.data + offset, page, access, &previous) != FALSE, "Could not split overlapping endpoint fixture");
+      else
+        require(VirtualFree(allocation.data + offset, page, MEM_DECOMMIT) != FALSE, "Could not decommit overlapping endpoint fixture");
+      read_descending_window_fields(allocation, reader);
+      require(metrics.query_calls == kEndpointWindows && metrics.read_calls == 2 * kEndpointWindows && !cache.finish() &&
+                  metrics.query_calls == kEndpointWindows + 1 && metrics.query_cache_validation_failures == 1,
+              "Changed unread page escaped full original extent validation or changed exact read accounting");
+      const auto& failure = cache.failure();
+      require(std::strcmp(failure.stage, "endpoint") == 0 && std::strcmp(failure.field, "region_size") == 0 &&
+                  failure.address == allocation.address() && failure.region_index == kEndpointWindows - 1 &&
+                  failure.expected == allocation.size && failure.observed == offset,
+              "Sorted endpoint failure lost the original record index or exact changed extent");
+      if (access)
+        require(VirtualProtect(allocation.data + offset, page, PAGE_READWRITE, &previous) != FALSE,
+                "Could not restore overlapping endpoint protection");
+      else {
+        require(VirtualAlloc(allocation.data + offset, page, MEM_COMMIT, PAGE_READWRITE) == allocation.data + offset,
+                "Could not recommit overlapping endpoint page");
+        std::fill(allocation.data + offset, allocation.data + offset + page, 0x39);
+      }
+    }
+
+  // The later-address record predates a change. The subsequently saved lower
+  // record agrees with the endpoint, but must not overwrite the older proof.
+  for (const bool shortened_extent : {false, true}) {
+    DWORD previous = 0;
+    const auto changed = shortened_extent ? allocation.size - page : 0;
+    const auto changed_size = shortened_extent ? page : allocation.size;
+    require(VirtualProtect(allocation.data + changed, changed_size, PAGE_READONLY, &previous) != FALSE,
+            "Could not prepare conflicting suffix metadata");
+    LocalMemoryMetrics metrics;
+    ScopedLocalMemoryMetrics measured(metrics);
+    ScopedLocalMemoryQueryCache cache;
+    reader.reset_budget();
+    std::uint64_t value = 0;
+    require(reader.read(allocation.address((kEndpointWindows - 1) * kQueryWindow + kWindowFieldOffset), &value, sizeof(value)),
+            "Conflicting suffix initial field failed");
+    require(VirtualProtect(allocation.data + changed, changed_size, PAGE_READWRITE, &previous) != FALSE,
+            "Could not change metadata between suffix observations");
+    read_descending_window_fields(allocation, reader, kEndpointWindows - 1);
+    read_descending_window_fields(allocation, reader);
+    require(metrics.query_calls == kEndpointWindows && metrics.read_calls == 2 * kEndpointWindows && !cache.finish() &&
+                metrics.query_calls == kEndpointWindows + 1 && metrics.query_cache_validation_failures == 1,
+            "A new encompassing observation hid or retried an older conflicting suffix");
+    const auto& failure = cache.failure();
+    require(std::strcmp(failure.stage, "endpoint") == 0 && std::strcmp(failure.field, shortened_extent ? "region_size" : "protect") == 0 &&
+                failure.region_index == 0 && failure.address == allocation.address((kEndpointWindows - 1) * kQueryWindow) &&
+                failure.expected == (shortened_extent ? kQueryWindow - page : PAGE_READONLY) &&
+                failure.observed == (shortened_extent ? kQueryWindow : PAGE_READWRITE),
+            "Reused fresh proof did not preserve the old suffix's exact metadata and original index");
+  }
+}
+
+void multiwindow_endpoint_regions_and_bounds() {
+  Allocation allocation(kQueryWindow * kEndpointWindows);
+  std::fill(allocation.data, allocation.data + allocation.size, 0x39);
+  DWORD previous = 0;
+  require(VirtualProtect(allocation.data + 2 * kQueryWindow, 3 * kQueryWindow, PAGE_READONLY, &previous) != FALSE,
+          "Could not create independent readable regions");
+  LocalMemoryReader reader;
+  LocalMemoryMetrics metrics;
+  {
+    ScopedLocalMemoryMetrics measured(metrics);
+    ScopedLocalMemoryQueryCache cache;
+    read_descending_window_fields(allocation, reader);
+    read_descending_window_fields(allocation, reader);
+    require(metrics.query_calls == kEndpointWindows && cache.finish() && metrics.query_calls == kEndpointWindows + 3 &&
+                metrics.read_calls == 2 * kEndpointWindows && metrics.query_cache_validation_failures == 0,
+            "Distinct RW/RO/RW regions reused an unrelated endpoint query or lost exact reads");
+  }
+  require(VirtualProtect(allocation.data + 2 * kQueryWindow, 3 * kQueryWindow, PAGE_READWRITE, &previous) != FALSE,
+          "Could not restore independent readable regions");
+
+  // Overlapping observations still consume the original fixed record budget.
+  // A larger later observation cannot merge/evict records to admit a 65th one.
+  Allocation bounded(kQueryWindow * (ScopedLocalMemoryQueryCache::kRegionLimit + 1));
+  metrics = {};
+  {
+    ScopedLocalMemoryMetrics measured(metrics);
+    ScopedLocalMemoryQueryCache cache;
+    reader.reset_budget();
+    std::uint64_t value = 0;
+    for (unsigned window = ScopedLocalMemoryQueryCache::kRegionLimit; window > 0; --window)
+      require(reader.read(bounded.address(window * kQueryWindow + kWindowFieldOffset), &value, sizeof(value)),
+              "Allowed overlapping record failed before the fixed limit");
+    value = 0x9393939393939393ull;
+    require(!reader.read(bounded.address(kWindowFieldOffset), &value, sizeof(value)) && value == 0x9393939393939393ull &&
+                metrics.query_calls == ScopedLocalMemoryQueryCache::kRegionLimit &&
+                metrics.read_calls == ScopedLocalMemoryQueryCache::kRegionLimit && !cache.finish(),
+            "Overlapping records relaxed the cap, issued an extra query or leaked a refused field");
+    require(std::strcmp(cache.failure().stage, "capacity") == 0 &&
+                cache.failure().region_index == ScopedLocalMemoryQueryCache::kRegionLimit &&
+                cache.failure().expected == ScopedLocalMemoryQueryCache::kRegionLimit &&
+                cache.failure().observed == ScopedLocalMemoryQueryCache::kRegionLimit + 1,
+            "Endpoint coalescing changed the original capacity refusal");
+  }
+}
+
 void canonical_query_ranges() {
   SYSTEM_INFO info{};
   GetSystemInfo(&info);
@@ -1029,9 +1240,30 @@ void synthetic_headers() {
   }
 }
 
+void failure_diagnostic_privacy() {
+  for (const auto* field : {"base_address", "allocation_base", "future_address_field"}) {
+    const LocalMemoryQueryFailure failure{"endpoint", field, 0x123456789000, 7, 0x234567890000, 0x345678900000, ERROR_INVALID_ADDRESS};
+    const auto detail = describe_local_memory_query_failure(failure);
+    require(detail.find("stage=endpoint region=7 field=") == 0 && detail.find(field) != std::string::npos &&
+                detail.find("expected=<redacted> observed=<redacted>") != std::string::npos &&
+                detail.find("error=" + std::to_string(ERROR_INVALID_ADDRESS)) != std::string::npos,
+            "Address-field diagnostics lost non-address failure context");
+    require(detail.find("address=") == std::string::npos && detail.find("123456789000") == std::string::npos &&
+                detail.find("234567890000") == std::string::npos && detail.find("345678900000") == std::string::npos,
+            "User-facing memory diagnostic exposed a private address");
+  }
+  const auto protection = describe_local_memory_query_failure({"endpoint", "protect", 0x123456789000, 2, PAGE_READWRITE, PAGE_READONLY});
+  require(protection == "stage=endpoint region=2 field=protect expected=0x4 observed=0x2 error=0",
+          "Address redaction removed actionable protection metadata");
+  const auto read = describe_local_memory_query_failure({"read", "exact_read", 0x123456789000, 1, 16, 0, ERROR_PARTIAL_COPY});
+  require(read == "stage=read region=1 field=exact_read expected=0x10 observed=0x0 error=299",
+          "Address redaction removed exact-read sizes or the OS error");
+}
+
 }  // namespace
 
 int main() {
+  failure_diagnostic_privacy();
   public_query_equivalence();
   measured_reads();
   cached_queries();
@@ -1040,6 +1272,9 @@ int main() {
   cache_bounds();
   cache_profile();
   descending_cache_profile();
+  multiwindow_endpoint_queries();
+  multiwindow_endpoint_changes();
+  multiwindow_endpoint_regions_and_bounds();
   canonical_query_ranges();
   private_memory_reads();
   large_private_fields();

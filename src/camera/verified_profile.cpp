@@ -2,6 +2,7 @@
 
 namespace taxi_camera::native_camera {
 
+// Historical diagnostic evidence only; excluded from the production bridge.
 // MSFS2024 1.8.16.0, PE timestamp1787653788, SizeOfImage235963904.
 // Two explicit read-only main-image captures produced identical hashes:
 // build/archives/source-layout/discovery/msfs-1.8.16.0-resize-profile-{first,second}.json

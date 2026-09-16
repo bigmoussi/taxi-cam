@@ -6,12 +6,12 @@
 #include "aircraft_inventory.hpp"
 #include "aircraft_scene_pose.hpp"
 #include "body_pose_provider.hpp"
+#include "camera_contract.hpp"
 #include "local_memory.hpp"
 #include "manager_inspection.hpp"
 #include "owned_entry_inventory.hpp"
 #include "owned_view.hpp"
 #include "probe_inspection_gate.hpp"
-#include "profile.hpp"
 #include "render_schedule.hpp"
 #include "retained_profile.hpp"
 #include "source_view.hpp"
@@ -34,10 +34,6 @@ namespace taxi_camera::native_camera {
 namespace {
 namespace ec = engine_camera;
 
-constexpr std::uint32_t kManagerTable = kManagerVtable;
-constexpr std::uint32_t kUpdateSlot = kManagerTable + 15 * 8;
-constexpr std::uint32_t kUpdate = 17648544;
-
 struct Runtime {
   std::mutex mutex;
   std::mutex start_mutex;
@@ -52,7 +48,7 @@ struct Runtime {
   const profiles::AircraftProfile* requested_profile = &profiles::A380;
   const profiles::AircraftProfile* aircraft_profile = &profiles::A380;
   RetainedProfileTransition profile_transition;
-  RetainedProfileTransition::Dimensions published_allocation_dimensions{};
+  RetainedProfileTransition::AllocationEvidence published_allocation{};
   std::uint64_t profile_transition_token = 0;
   std::uint64_t scene_session_epoch = 0;
   bool retained_restart_requested = false;
@@ -66,6 +62,7 @@ struct Runtime {
   std::atomic_flag observing = ATOMIC_FLAG_INIT;
   std::uintptr_t base = 0;
   discovery::Inventory image;
+  CameraContract contract;
   // Observer-thread fields. No borrowed camera/output pointers cross into UI.
   std::uint64_t updates = 0;
   std::uint64_t inspection_count = 0;
@@ -94,6 +91,7 @@ struct Runtime {
   unsigned creations = 0;
   bool lifecycle_touched = false;
   bool creation_valid = false;
+  bool creation_pose_unavailable = false;
   bool pose_captured = false;
   bool pose_busy = false;
   bool inspection_changed = false;
@@ -102,6 +100,9 @@ struct Runtime {
   std::uint64_t mount_revision = 0;
   std::array<MountedPose, 2> mounted_poses{};
   const char* stage_error = "";
+  std::string manager_memory_error;
+  std::string inspection_error;
+  std::string creation_error;
   std::string message;
 };
 
@@ -139,12 +140,16 @@ decltype(auto) timed(Runtime& runtime, ProbeStage stage, Operation&& operation) 
 // No private call occurs until the cache is detached and all endpoint queries
 // agree. Each helper retains its original bounded reads and full trace reread.
 template <typename Operation>
-auto inspected(Runtime& runtime, Operation&& operation) {
-  ScopedLocalMemoryQueryCache queries;
+auto inspected(Runtime& runtime, Operation&& operation, std::string* failure_detail = nullptr) {
+  ScopedLocalMemoryQueryCache queries(LocalMemoryQueryMode::private_pages);
   auto result = operation();
   if (!queries.finish()) {
     runtime.inspection_changed = true;
-    runtime.stage_error = "Memory-region metadata changed during inspection; no result was accepted.";
+    runtime.inspection_error = "Memory-region metadata changed during inspection; no result was accepted: " +
+                               describe_local_memory_query_failure(queries.failure());
+    runtime.stage_error = runtime.inspection_error.c_str();
+    if (failure_detail)
+      *failure_detail = runtime.inspection_error;
     return decltype(result){};
   }
   return result;
@@ -178,16 +183,19 @@ bool manager_context(Runtime& runtime,
     if (!shared->is_current())
       return refused({ManagerInspectionStatus::unavailable, "Manager inspection transaction is no longer current."});
   } else {
-    queries.emplace();
+    queries.emplace(LocalMemoryQueryMode::private_pages);
   }
   LocalMemoryReader reader(512);
-  LocalImageReader image(reinterpret_cast<HMODULE>(runtime.base), runtime.image.image_size);
-  const auto result =
-      inspect_manager_identity(image, reader, runtime.base, reinterpret_cast<std::uintptr_t>(current_manager), runtime.owned_control);
+  LocalImageReader image(reinterpret_cast<HMODULE>(runtime.base), runtime.image.image_size, LocalImageQueryMode::pages);
+  const auto result = inspect_manager_identity(image, reader, runtime.base, reinterpret_cast<std::uintptr_t>(current_manager),
+                                               runtime.owned_control, runtime.contract.layout);
   if (!result)
     return refused(result);
-  if (queries && !queries->finish())
-    return refused({ManagerInspectionStatus::unavailable, "Manager memory-region metadata changed during inspection."});
+  if (queries && !queries->finish()) {
+    runtime.manager_memory_error =
+        "Manager memory-region metadata changed during inspection: " + describe_local_memory_query_failure(queries->failure());
+    return refused({ManagerInspectionStatus::unavailable, runtime.manager_memory_error.c_str()});
+  }
   runtime.manager = result.manager;
   runtime.renderer = result.renderer;
   runtime.control = result.control;
@@ -201,6 +209,7 @@ bool capture_pose(Runtime& runtime) {
   runtime.pose_captured = false;
   runtime.pose_busy = false;
   runtime.mounted_poses = {};
+  std::string memory_detail;
   auto body = sample_body_pose(GetTickCount64());
   if (!body.valid && temporary_pose_unavailable(body.error)) {
     runtime.pose_busy = true;
@@ -216,20 +225,29 @@ bool capture_pose(Runtime& runtime) {
     // a fresh public CameraGet WORLD sample. Aircraft position and orientation
     // subsequently come from independent public aircraft telemetry.
     LocalMemoryReader objects;
-    LocalImageReader image(reinterpret_cast<HMODULE>(runtime.base), runtime.image.image_size);
+    LocalImageReader image(reinterpret_cast<HMODULE>(runtime.base), runtime.image.image_size, LocalImageQueryMode::pages);
     std::uint64_t source = 0;
-    const auto aircraft = inspected(runtime, [&] {
-      return discovery::inspect_aircraft_metadata(image, objects, runtime.image, runtime.base, 133538936, true, true, false, &source);
-    });
+    const auto aircraft = inspected(
+        runtime,
+        [&] {
+          return discovery::inspect_aircraft_metadata(image, objects, runtime.image, runtime.base,
+                                                      runtime.contract.layout.aircraft_facade_vtable, true, true, false, &source, nullptr,
+                                                      runtime.contract.layout);
+        },
+        &memory_detail);
     if (!aircraft.valid || !aircraft.available || !source) {
       runtime.message = "Aircraft body calibration is waiting for a stable loaded source: " + aircraft.stage + ". " + aircraft.error;
+      if (!memory_detail.empty())
+        runtime.message += " " + memory_detail;
       return false;
     }
     objects.reset_budget();
     Vector3 position{};
-    const auto camera = inspected(runtime, [&] { return inspect_source_pose(objects, source, &position); });
+    const auto camera = inspected(runtime, [&] { return inspect_source_pose(objects, source, &position); }, &memory_detail);
     if (!camera.complete || !calibrate_body_pose(position, camera.fov, GetTickCount64())) {
       runtime.message = "Aircraft body calibration is waiting for matching fresh public and private camera coordinates.";
+      if (!memory_detail.empty())
+        runtime.message += " " + memory_detail;
       return false;
     }
     body = sample_body_pose(GetTickCount64());
@@ -244,23 +262,33 @@ bool capture_pose(Runtime& runtime) {
   // transform during a taxi turn. Retain its session/freshness/plausibility
   // guards, but never use it as the mount transform or interpolate toward it.
   LocalMemoryReader objects;
-  LocalImageReader image(reinterpret_cast<HMODULE>(runtime.base), runtime.image.image_size);
+  LocalImageReader image(reinterpret_cast<HMODULE>(runtime.base), runtime.image.image_size, LocalImageQueryMode::pages);
   std::uint64_t user = 0;
-  const auto aircraft = inspected(runtime, [&] {
-    return discovery::inspect_aircraft_metadata(image, objects, runtime.image, runtime.base, 133538936, true, true, false, nullptr, &user);
-  });
+  const auto aircraft = inspected(
+      runtime,
+      [&] {
+        return discovery::inspect_aircraft_metadata(image, objects, runtime.image, runtime.base,
+                                                    runtime.contract.layout.aircraft_facade_vtable, true, true, false, nullptr, &user,
+                                                    runtime.contract.layout);
+      },
+      &memory_detail);
   if (!aircraft.valid || !aircraft.available || !user) {
     runtime.pose_busy = true;
     runtime.message = "Aircraft scene mount is waiting for a stable active aircraft: " + aircraft.stage + ". " + aircraft.error;
+    if (!memory_detail.empty())
+      runtime.message += " " + memory_detail;
     return false;
   }
   objects.reset_budget();
-  const auto scene = inspected(runtime, [&] { return inspect_aircraft_scene_pose(objects, user, runtime.base); });
+  const auto scene =
+      inspected(runtime, [&] { return inspect_aircraft_scene_pose(objects, user, runtime.base, runtime.contract.layout); }, &memory_detail);
   if (!scene.complete || !scene_body_matches_public(scene.pose, body.pose) ||
       !make_mounted_pair(scene.pose, runtime.mounts, runtime.mounted_poses)) {
     runtime.pose_busy = true;
     runtime.message = std::string("Aircraft scene mount is waiting for a consistent model pose: ") +
                       (scene.complete ? "public_pose_mismatch" : scene.error);
+    if (!memory_detail.empty())
+      runtime.message += " " + memory_detail;
     return false;
   }
   runtime.pose_captured = true;
@@ -307,7 +335,7 @@ void inspect_pair(Runtime& runtime,
   std::array<std::uint64_t, 2> resources{};
   std::optional<ScopedLocalMemoryQueryCache> queries;
   if (!shared)
-    queries.emplace();
+    queries.emplace(LocalMemoryQueryMode::private_pages);
   LocalMemoryReader reader;
   const auto pool = timed(runtime, ProbeStage::pool, [&] { return ec::inspect_view_pool(reader, runtime.renderer); });
   report.free_views = pool.valid ? pool.free_count : 0;
@@ -388,7 +416,7 @@ void inspect_pair(Runtime& runtime,
 bool close_owned_pair(Runtime& runtime, void* manager, const ec::Snapshot& pair, ProbeSnapshot& report) {
   std::array<ec::OwnedViewCloseSnapshot, 2> views{};
   {
-    ScopedLocalMemoryQueryCache queries;
+    ScopedLocalMemoryQueryCache queries(LocalMemoryQueryMode::private_pages);
     if (!timed(runtime, ProbeStage::manager, [&] { return manager_context(runtime, manager, &queries); }) || runtime.token != pair.owner)
       return false;
     LocalMemoryReader reader;
@@ -428,11 +456,11 @@ bool close_owned_pair(Runtime& runtime, void* manager, const ec::Snapshot& pair,
     // Captured return is AL: false means native lookup refused. No open call is
     // available here. Any refusal, including after a partial close, falls back
     // to the normal full inspection without trusting the cached gate booleans.
-    const auto activate = function<bool (*)(void*, std::uint64_t, bool)>(runtime, 17641776);
+    const auto activate = function<bool (*)(void*, std::uint64_t, bool)>(runtime, runtime.contract.functions.activate_entry);
     for (unsigned i = 0; i < views.size(); ++i)
       if ((views[i].flags[0] & 1u) == 0 && !activate(reinterpret_cast<void*>(runtime.manager), pair.owned_ids[i], false))
         return false;
-    ScopedLocalMemoryQueryCache queries;
+    ScopedLocalMemoryQueryCache queries(LocalMemoryQueryMode::private_pages);
     LocalMemoryReader reader(64);
     for (const auto& view : views) {
       auto expected = view.flags;
@@ -465,8 +493,8 @@ bool close_owned_pair(Runtime& runtime, void* manager, const ec::Snapshot& pair,
   return true;
 }
 bool prepare_owned_view_aa(Runtime& runtime, ec::EntryId id, ec::OwnedViewSnapshot& view) {
-  LocalImageReader image(reinterpret_cast<HMODULE>(runtime.base), runtime.image.image_size);
-  const auto result = disable_owned_view_aa(view, image);
+  LocalImageReader image(reinterpret_cast<HMODULE>(runtime.base), runtime.image.image_size, LocalImageQueryMode::pages);
+  const auto result = disable_owned_view_aa(view, image, runtime.contract.layout);
   if (!result.complete) {
     runtime.stage_error = result.error;
     return false;
@@ -489,11 +517,11 @@ bool prepare_owned_view_aa(Runtime& runtime, ec::EntryId id, ec::OwnedViewSnapsh
 
 void apply_pose(Runtime& runtime, const ec::OwnedViewSnapshot& view, const MountedPose& pose) noexcept {
   using SetVector = void (*)(void*, const double*);
-  function<SetVector>(runtime, 66324928)(reinterpret_cast<void*>(view.node_address), pose.position.data());
-  function<SetVector>(runtime, 66859376)(reinterpret_cast<void*>(view.camera_address), pose.up.data());
-  function<SetVector>(runtime, 66859344)(reinterpret_cast<void*>(view.camera_address), pose.target.data());
-  function<void (*)(void*, float)>(runtime, 66859296)(reinterpret_cast<void*>(view.camera_address), pose.fov);
-  function<void (*)(void*)>(runtime, 66825216)(reinterpret_cast<void*>(view.view_address));
+  function<SetVector>(runtime, runtime.contract.functions.set_position)(reinterpret_cast<void*>(view.node_address), pose.position.data());
+  function<SetVector>(runtime, runtime.contract.functions.set_up)(reinterpret_cast<void*>(view.camera_address), pose.up.data());
+  function<SetVector>(runtime, runtime.contract.functions.set_target)(reinterpret_cast<void*>(view.camera_address), pose.target.data());
+  function<void (*)(void*, float)>(runtime, runtime.contract.functions.set_fov)(reinterpret_cast<void*>(view.camera_address), pose.fov);
+  function<void (*)(void*)>(runtime, runtime.contract.functions.update_view)(reinterpret_cast<void*>(view.view_address));
 }
 
 void apply_gates(Runtime& runtime,
@@ -502,7 +530,7 @@ void apply_gates(Runtime& runtime,
                  const ProbeSnapshot& inspected,
                  bool initialize_gates) {
   using Activate = void (*)(void*, std::uint64_t, bool);
-  const auto activate = function<Activate>(runtime, 17641776);
+  const auto activate = function<Activate>(runtime, runtime.contract.functions.activate_entry);
   // The captured false path ORs the separately verified {1,0} mask into P48/56.
   // Close gates before opening one. On a new pair, explicitly close both even
   // when setup already left bit0 set; no original update runs between calls.
@@ -529,6 +557,30 @@ void service_profile_transition(Runtime& runtime, void* manager, ProbeSnapshot& 
   bool resume_requested;
   {
     const std::lock_guard lock(runtime.mutex);
+    if (!runtime.profile_transition.holding()) {
+      report.pair = runtime.pair.snapshot();
+      return;
+    }
+    if (runtime.profile_transition.awaiting_pair()) {
+      // Serialize with Start/profile requests while the controller separately
+      // excludes in-flight creation. This only cancels unmaterialized mailbox
+      // work; it cannot erase, create or forget an owned native camera.
+      const auto cancelled = runtime.pair.cancel_uncreated_request();
+      report.pair = runtime.pair.snapshot();
+      if (cancelled == ec::EmptyPairCancel::busy) {
+        report.message = "Waiting for the current camera operation before changing aircraft profile.";
+        return;
+      }
+      runtime.profile_transition.begin_published(runtime.profile_transition.id(), report.pair, runtime.published_allocation);
+      if (runtime.profile_transition.awaiting_pair()) {
+        report.message = "Waiting for the current camera allocation evidence before changing aircraft profile.";
+        return;
+      }
+      if (cancelled == ec::EmptyPairCancel::cancelled) {
+        report.message = "Pending camera startup cleared; ready for the aircraft profile.";
+        return;
+      }
+    }
     transition = runtime.profile_transition;
     token = runtime.profile_transition_token;
     resume_requested = runtime.retained_restart_requested;
@@ -595,6 +647,7 @@ bool initialize(void* opaque, ec::DescriptorStorage& descriptor) noexcept {
   // Only a real creation request reaches this callback, after prior cleanup.
   // Stop requests cannot call the pose getters or descriptor initializer.
   if (runtime.creations == 0) {
+    runtime.creation_pose_unavailable = false;
     runtime.allocation_panes = runtime.aircraft_profile->camera_panes;
     try {
       runtime.message.clear();
@@ -604,15 +657,19 @@ bool initialize(void* opaque, ec::DescriptorStorage& descriptor) noexcept {
       runtime.creation_valid = pool.valid && pool.free_count >= 2;
       if (!runtime.creation_valid)
         runtime.stage_error = pool.valid ? "Two free engine views are required." : "The view pool could not be validated.";
-      else if (!(runtime.creation_valid = capture_pose(runtime)))
-        runtime.stage_error = "A verified aircraft body pose is required before creating mounted views.";
+      else if (!(runtime.creation_valid = capture_pose(runtime))) {
+        runtime.creation_error =
+            runtime.message.empty() ? "A verified aircraft body pose is required before creating mounted views." : runtime.message;
+        runtime.stage_error = runtime.creation_error.c_str();
+        runtime.creation_pose_unavailable = runtime.pose_busy;
+      }
     } catch (...) {
       runtime.creation_valid = false;
     }
   }
   if (!runtime.creation_valid)
     return false;
-  function<void (*)(void*)>(runtime, 17640240)(descriptor.bytes.data());
+  function<void (*)(void*)>(runtime, runtime.contract.functions.initialize_descriptor)(descriptor.bytes.data());
   return true;
 }
 
@@ -635,8 +692,8 @@ ec::EntryId create(void* opaque, ec::ManagerToken token, const ec::DescriptorSto
     runtime.stage_error = "Available view capacity changed before camera creation.";
     return 0;
   }
-  const auto id =
-      function<std::uint64_t (*)(void*, const void*)>(runtime, 17646976)(reinterpret_cast<void*>(token.identity), descriptor.bytes.data());
+  const auto id = function<std::uint64_t (*)(void*, const void*)>(runtime, runtime.contract.functions.create_entry)(
+      reinterpret_cast<void*>(token.identity), descriptor.bytes.data());
   if (!id) {
     runtime.stage_error = "The native creation call returned no owned ID.";
     return 0;
@@ -656,7 +713,8 @@ ec::EntryId create(void* opaque, ec::ManagerToken token, const ec::DescriptorSto
     // Setup may already have queued its initial primary-size allocation. Close
     // this new owned gate before pose/resolution work, while no original update
     // has run. The existing engine mismatch path replaces its own outputs.
-    function<void (*)(void*, std::uint64_t, bool)>(runtime, 17641776)(reinterpret_cast<void*>(runtime.manager), id, false);
+    function<void (*)(void*, std::uint64_t, bool)>(runtime, runtime.contract.functions.activate_entry)(
+        reinterpret_cast<void*>(runtime.manager), id, false);
     view = inspect_entry(runtime, id);
     runtime.creation_valid = view.complete && view.ready && (view.flags[0] & 1u);
     if (!runtime.creation_valid) {
@@ -692,12 +750,13 @@ bool resize_closed_entry(Runtime& runtime, ec::EntryId id, unsigned index, bool 
       &runtime,
       [](void* opaque, std::uint64_t address) noexcept {
         auto& current = *static_cast<Runtime*>(opaque);
-        function<void (*)(void*)>(current, 66825216)(reinterpret_cast<void*>(address));
+        function<void (*)(void*)>(current, current.contract.functions.update_view)(reinterpret_cast<void*>(address));
         return true;
       },
       [](void* opaque, std::uint64_t address) noexcept -> std::uint64_t {
         auto& current = *static_cast<Runtime*>(opaque);
-        return reinterpret_cast<std::uintptr_t>(function<void* (*)(void*)>(current, 66809728)(reinterpret_cast<void*>(address)));
+        return reinterpret_cast<std::uintptr_t>(
+            function<void* (*)(void*)>(current, current.contract.functions.refresh_output)(reinterpret_cast<void*>(address)));
       }};
   const auto resized = initialize_output ? resize_owned_view(view, index, desired, resize_callbacks, runtime.allocation_panes)
                                          : restore_owned_view_dimensions(view, index, desired, resize_callbacks, runtime.allocation_panes);
@@ -741,12 +800,13 @@ bool erase(void* opaque, ec::ManagerToken token, ec::EntryId id) noexcept {
   const auto view = inspect_entry(runtime, id);
   const auto action = runtime.retirement.observe(token, id, runtime.updates, view);
   if (action == ViewRetirement::Action::close_gate) {
-    function<void (*)(void*, std::uint64_t, bool)>(runtime, 17641776)(reinterpret_cast<void*>(token.identity), id, false);
+    function<void (*)(void*, std::uint64_t, bool)>(runtime, runtime.contract.functions.activate_entry)(
+        reinterpret_cast<void*>(token.identity), id, false);
     return false;
   }
   if (action != ViewRetirement::Action::erase)
     return false;
-  function<void (*)(void*, std::uint64_t)>(runtime, 17646000)(reinterpret_cast<void*>(token.identity), id);
+  function<void (*)(void*, std::uint64_t)>(runtime, runtime.contract.functions.erase_entry)(reinterpret_cast<void*>(token.identity), id);
   reader.reset_budget();
   entries = inspected(runtime, [&] { return ec::inspect_owned_entries(reader, token.identity, {id, 0}); });
   const bool absent = entries.complete && !entries.entries[0].found;
@@ -765,9 +825,9 @@ void record_stop(Runtime& runtime,
   // state that a newer explicit Start/Stop has already replaced.
   if (expected_start_revision && runtime.requested_start_revision != *expected_start_revision)
     return;
-  // Preserve the matching detail while the recovery policy retains a fatal
-  // identity refusal. Only an explicit Start/Stop may leave that state.
-  if (runtime.recovery.reason() == SceneStopReason::identity_refused && reason != SceneStopReason::identity_refused)
+  // Preserve the matching detail while a terminal identity/startup failure is
+  // retained. Only an explicit Start/Stop may leave that state.
+  if (latched_scene_stop(runtime.recovery.reason()) && reason != runtime.recovery.reason())
     return;
   if (runtime.recovery.reason() == reason && runtime.stop_detail == detail && (runtime.recovery.pending() || !retryable_scene_stop(reason)))
     return;
@@ -837,7 +897,8 @@ void observer(void* manager) noexcept {
         else
           runtime.profile_transition.refuse();
       }
-      profile_hold = runtime.profile_transition.holding() && (before.owned_ids[0] || before.owned_ids[1]);
+      profile_hold = runtime.profile_transition.holding() &&
+                     (before.owned_ids[0] || before.owned_ids[1] || runtime.profile_transition.awaiting_pair());
       requested_start = runtime.requested_start;
       start_revision = runtime.requested_start_revision;
       recovery_pending = runtime.recovery.pending() || runtime.published.view_waiting || runtime.published.pose_waiting;
@@ -911,7 +972,7 @@ void observer(void* manager) noexcept {
     const auto inspect_manager = [&] {
       if (fuse_pair) {
         prepared_ticket = timed(runtime, ProbeStage::handoff, [] { return scene_handoff().begin_capture(); });
-        ScopedLocalMemoryQueryCache queries;
+        ScopedLocalMemoryQueryCache queries(LocalMemoryQueryMode::private_pages);
         const bool manager_valid =
             timed(runtime, ProbeStage::manager, [&] { return manager_context(runtime, manager, &queries, &manager_inspection); });
         if (manager_valid && runtime.token == before.owner)
@@ -980,25 +1041,40 @@ void observer(void* manager) noexcept {
                      [&] { return inspected(runtime, [&] { return ec::inspect_view_pool(reader, runtime.renderer); }); });
       report.free_views = pool.valid ? pool.free_count : 0;
       runtime.creations = 0;
+      runtime.creation_pose_unavailable = false;
       runtime.lifecycle_touched = false;
       runtime.creation_valid = pool.valid && pool.free_count >= 2;
       ec::EngineCallbacks callbacks{&runtime, initialize, create, erase};
       timed(runtime, ProbeStage::lifecycle, [&] { runtime.pair.process_update(runtime.token, callbacks); });
       auto pair = runtime.pair.snapshot();
+      bool retry_pose_waiting = false;
       if (!requested_start && !pair.owned_ids[0] && !pair.owned_ids[1]) {
-        bool retry_pending = false;
+        const auto retry_body = sample_body_pose(GetTickCount64());
+        bool retry_pending = false, calibrate_retry = false;
         {
           const std::lock_guard lock(runtime.mutex);
           retry_pending = runtime.recovery.pending();
+          calibrate_retry = !runtime.requested_start &&
+                            initial_retry_calibration_allowed(runtime.recovery, pair, retry_body.calibration_required,
+                                                              runtime.suspended.load(), start_revision, runtime.requested_start_revision);
         }
-        const bool fresh_pose = retry_pending && sample_body_pose(GetTickCount64()).valid;
+        bool fresh_pose = retry_pending && retry_body.valid;
+        if (calibrate_retry) {
+          // A transient manager failure may consume the initial Start before
+          // calibration has run. Progress its existing read-only pose path;
+          // do not consume a retry or call a native initializer/create until
+          // the full pose succeeds. Stop/new requests are rechecked below.
+          fresh_pose = timed(runtime, ProbeStage::pose, [&] { return capture_pose(runtime); });
+          retry_pose_waiting = report.pose_waiting = !fresh_pose;
+        }
         const std::lock_guard lock(runtime.mutex);
-        if (!runtime.requested_start && runtime.recovery.retry(GetTickCount64(), pair, fresh_pose)) {
+        if (!runtime.requested_start && runtime.requested_start_revision == start_revision && !runtime.suspended.load() &&
+            runtime.recovery.retry(GetTickCount64(), pair, fresh_pose)) {
           runtime.requested_start = requested_start = true;
           start_revision = ++runtime.requested_start_revision;
         }
       }
-      bool waiting_for_body = false;
+      bool waiting_for_body = retry_pose_waiting;
       bool resolution_pause = false;
       if (requested_start && !pair.owned_ids[0] && !pair.owned_ids[1]) {
         waiting_for_body = !timed(runtime, ProbeStage::pose, [&] { return capture_pose(runtime); });
@@ -1017,9 +1093,23 @@ void observer(void* manager) noexcept {
         if (create_requested) {
           timed(runtime, ProbeStage::lifecycle, [&] { runtime.pair.process_update(runtime.token, callbacks); });
           pair = runtime.pair.snapshot();
-          if (pair.state != ec::State::active)
-            record_stop(runtime, SceneStopReason::creation_failed,
-                        *runtime.stage_error ? runtime.stage_error : "Owned camera creation did not complete.", now);
+          if (pair.state != ec::State::active) {
+            bool deferred = false;
+            {
+              const std::lock_guard lock(runtime.mutex);
+              deferred = defer_initial_pose_failure(runtime.pair, runtime.token, runtime.recovery, runtime.creation_pose_unavailable,
+                                                    runtime.creations, start_revision, runtime.requested_start_revision, now);
+              if (deferred)
+                runtime.stop_detail = runtime.creation_error;
+            }
+            if (deferred) {
+              pair = runtime.pair.snapshot();
+              waiting_for_body = report.pose_waiting = true;
+            } else {
+              record_stop(runtime, SceneStopReason::creation_failed,
+                          *runtime.stage_error ? runtime.stage_error : "Owned camera creation did not complete.", now, start_revision);
+            }
+          }
         }
       }
       if (pair.state == ec::State::active) {
@@ -1034,16 +1124,20 @@ void observer(void* manager) noexcept {
           runtime.gates = {};
         }
         const bool closed_warmup = runtime.creations != 0 && runtime.creation_valid && runtime.resize_warmup.pending();
+        bool initial_resize_failed = false;
         if (!closed_warmup && runtime.resize_warmup.pending()) {
+          runtime.stage_error = "The initial closed-gate resize phase could not be validated.";
           runtime.creation_valid = timed(runtime, ProbeStage::lifecycle, [&] {
             return runtime.resize_warmup.may_resize(pair.owned_ids, runtime.updates) &&
                    resize_closed_entry(runtime, pair.owned_ids[0], 0) && resize_closed_entry(runtime, pair.owned_ids[1], 1);
           });
           if (runtime.creation_valid)
             runtime.resize_warmup.finish(pair.owned_ids, runtime.updates);
+          else
+            initial_resize_failed = true;
         }
         std::array<ec::OwnedViewSnapshot, 2> views{};
-        if (!closed_warmup) {
+        if (!closed_warmup && !initial_resize_failed) {
           if (prepared_pair && !runtime.lifecycle_touched && pair.owner == before.owner && pair.owned_ids == before.owned_ids &&
               pair.failure == ec::Failure::none && pair.blocked == ec::Blocked::none && !pair.request_pending && !pair.creation_pending) {
             views = prepared_views;
@@ -1065,7 +1159,21 @@ void observer(void* manager) noexcept {
         resolution_pause = runtime.resize_recovery.pending() || runtime.resize_recovery.failed() ||
                            (runtime.inspection_stop == SceneStopReason::resolution_changed && runtime.scheduled_ids == pair.owned_ids &&
                             runtime.resized_ids == pair.owned_ids);
-        if (resolution_pause) {
+        if (initial_resize_failed && hold_changed_session(runtime, pair)) {
+          report.view_waiting = true;
+          runtime.message = "Aircraft changed during initial resizing; retaining camera IDs for fresh validation.";
+        } else if (initial_resize_failed) {
+          // A refused/partial first resize is a startup failure, not drift of an
+          // established output. Preserve its cause before any further inspector
+          // can replace it, then use the existing guarded retirement path. No
+          // automatic retry may repeat an allocation whose outcome is uncertain.
+          runtime.message = std::string("Initial camera resize failed: ") + runtime.stage_error;
+          record_stop(runtime, SceneStopReason::creation_failed, runtime.message.c_str(), now, start_revision);
+          scene_handoff().stop_scene();
+          runtime.pair.request_disable();
+          timed(runtime, ProbeStage::lifecycle, [&] { runtime.pair.process_update(runtime.token, callbacks); });
+          pair = runtime.pair.snapshot();
+        } else if (resolution_pause) {
           // Never remove/recreate live camera entries for a primary-size change.
           // Mode2's original update only overwrites P16..39: restore those fields
           // if its already allocated Bitmap still has the exact desired size.
@@ -1082,8 +1190,8 @@ void observer(void* manager) noexcept {
             const auto& view = views[i];
             if (view.complete && view.ready && view.status == ec::OwnedViewStatus::ready) {
               if ((view.flags[0] & 1u) == 0)
-                function<void (*)(void*, std::uint64_t, bool)>(runtime, 17641776)(reinterpret_cast<void*>(runtime.manager),
-                                                                                  pair.owned_ids[i], false);
+                function<void (*)(void*, std::uint64_t, bool)>(runtime, runtime.contract.functions.activate_entry)(
+                    reinterpret_cast<void*>(runtime.manager), pair.owned_ids[i], false);
               runtime.gates[i] = false;
             }
           }
@@ -1135,7 +1243,8 @@ void observer(void* manager) noexcept {
           bool aa_ready = true;
           if (pose_ready && needs_pose) {
             for (unsigned i = 0; i < desired.size(); ++i) {
-              if (desired[i] && !prepare_owned_view_aa(runtime, pair.owned_ids[i], views[i])) {
+              if (desired[i] &&
+                  !timed(runtime, ProbeStage::aa, [&] { return prepare_owned_view_aa(runtime, pair.owned_ids[i], views[i]); })) {
                 aa_ready = false;
                 break;
               }
@@ -1191,8 +1300,8 @@ void observer(void* manager) noexcept {
             for (unsigned i = 0; i < pair.owned_ids.size(); ++i)
               if (report.ready[i]) {
                 if (runtime.gates[i] || (report.flags[i][0] & 1u) == 0)
-                  function<void (*)(void*, std::uint64_t, bool)>(runtime, 17641776)(reinterpret_cast<void*>(runtime.manager),
-                                                                                    pair.owned_ids[i], false);
+                  function<void (*)(void*, std::uint64_t, bool)>(runtime, runtime.contract.functions.activate_entry)(
+                      reinterpret_cast<void*>(runtime.manager), pair.owned_ids[i], false);
                 runtime.gates[i] = false;
               }
           });
@@ -1268,7 +1377,7 @@ void observer(void* manager) noexcept {
     report.mounted_poses = runtime.mounted_poses;
     timed(runtime, ProbeStage::publication, [&] {
       const std::lock_guard lock(runtime.mutex);
-      runtime.published_allocation_dimensions = runtime.resized_dimensions;
+      runtime.published_allocation = {report.pair.owner, report.pair.owned_ids, runtime.resized_dimensions};
       report.profile_transition_token = runtime.profile_transition_token;
       report.profile_transition_id = runtime.profile_transition.id();
       report.profile_transition_pending = runtime.profile_transition.pending();
@@ -1296,6 +1405,9 @@ void observer(void* manager) noexcept {
   }
   if (serviced) {
     runtime.performance.query_calls = memory_metrics.query_calls;
+    runtime.performance.query_allocation_calls = memory_metrics.query_allocation_calls;
+    runtime.performance.query_page_calls = memory_metrics.query_page_calls;
+    runtime.performance.query_fallback_calls = memory_metrics.query_fallback_calls;
     runtime.performance.read_calls = memory_metrics.read_calls;
     runtime.performance.requested_bytes = memory_metrics.requested_bytes;
     runtime.performance.query_cache_hits = memory_metrics.query_cache_hits;
@@ -1351,19 +1463,22 @@ void request_scene_test(bool reuse_calibration) noexcept {
       runtime.image = parse_verified_main_image();
       runtime.base = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
       LocalImageReader reader(reinterpret_cast<HMODULE>(runtime.base), runtime.image.image_size);
-      const auto contract = verify_code_contract(reader, runtime.image, verified_profile());
+      const auto contract = resolve_camera_contract(reader, runtime.image, runtime.base);
       if (!runtime.image.valid_image || !contract.valid) {
         const std::lock_guard lock(runtime.mutex);
         runtime.published.message =
             "Camera compatibility check failed: " + (runtime.image.valid_image ? contract.error : runtime.image.error);
         return;
       }
-      const auto disable_mask = inspect_activation_disable_mask(reader, runtime.image);
+      runtime.contract = contract.contract;
+      const auto disable_mask = inspect_activation_disable_mask(reader, runtime.image, runtime.contract.layout);
       if (!disable_mask.valid)
         throw std::runtime_error("Native activation-mask verification refused: " + disable_mask.error);
       std::uint64_t original = 0;
-      if (!reader.read(kUpdateSlot, &original, sizeof(original)) || original != runtime.base + kUpdate)
-        throw std::runtime_error("Manager update slot does not match the verified profile.");
+      const auto update_slot = runtime.contract.layout.manager_vtable + 15 * 8;
+      const auto update = runtime.contract.functions.manager_update;
+      if (!reader.read(update_slot, &original, sizeof(original)) || original != runtime.base + update)
+        throw std::runtime_error("Manager update slot does not match the resolved camera contract.");
       HMODULE pinned = nullptr;
       if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN, reinterpret_cast<LPCWSTR>(&observer),
                               &pinned))
@@ -1372,16 +1487,16 @@ void request_scene_test(bool reuse_calibration) noexcept {
       // while the Xbox loader maps its page executable/write-copy. The hook
       // rechecks the bounds and preserves execute permission through Windows'
       // copy-on-write promotion. Anonymous/executable PE sections are refused.
-      const auto section = std::find_if(runtime.image.sections.begin(), runtime.image.sections.end(), [](const auto& item) {
-        return (item.flags & 0x40000000u) && !(item.flags & 0xa2000000u) && kUpdateSlot >= item.rva &&
-               kUpdateSlot - item.rva <= item.size && sizeof(void*) <= item.size - (kUpdateSlot - item.rva);
+      const auto section = std::find_if(runtime.image.sections.begin(), runtime.image.sections.end(), [update_slot](const auto& item) {
+        return (item.flags & 0x40000000u) && !(item.flags & 0xa2000000u) && update_slot >= item.rva &&
+               update_slot - item.rva <= item.size && sizeof(void*) <= item.size - (update_slot - item.rva);
       });
       if (section == runtime.image.sections.end())
         throw std::runtime_error("Camera compatibility check failed: manager update slot moved outside static image data.");
       const engine_hook::ImageDataSlotProof image_data{reinterpret_cast<HMODULE>(runtime.base), runtime.image.image_size, section->rva,
                                                        section->size};
-      const auto hook = engine_hook::install(reinterpret_cast<void**>(runtime.base + kUpdateSlot),
-                                             reinterpret_cast<void*>(runtime.base + kUpdate), observer, &image_data);
+      const auto hook = engine_hook::install(reinterpret_cast<void**>(runtime.base + update_slot),
+                                             reinterpret_cast<void*>(runtime.base + update), observer, &image_data);
       runtime.hooked.store(hook.pointer_changed, std::memory_order_release);
       runtime.protection_ready = hook.protection_restored;
       if (!hook.pointer_changed || !hook.protection_restored) {
@@ -1450,7 +1565,11 @@ std::uint64_t request_scene_profile_transition(std::uint32_t id) noexcept {
   runtime.requested_profile = profile;
   // Observer fields are not read from this thread. Allocation expectations are
   // mailbox-protected and survive temporarily empty diagnostic reports.
-  runtime.profile_transition.begin(id, runtime.pair.snapshot(), runtime.published_allocation_dimensions);
+  const auto cancelled = runtime.pair.cancel_uncreated_request();
+  if (cancelled == ec::EmptyPairCancel::busy)
+    runtime.profile_transition.defer_pair(id);
+  else
+    runtime.profile_transition.begin_published(id, runtime.pair.snapshot(), runtime.published_allocation);
   const auto token = ++runtime.profile_transition_token;
   runtime.published.profile_transition_token = token;
   runtime.published.profile_transition_id = id;

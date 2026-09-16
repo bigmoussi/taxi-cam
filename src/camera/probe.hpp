@@ -21,16 +21,21 @@ enum class ProbeStage : std::size_t {
   pose,
   activation,
   publication,
+  aa,
   count
 };
 inline constexpr std::array<const char*, static_cast<std::size_t>(ProbeStage::count)> kProbeStageNames{
-    "manager", "pool", "lifecycle", "entries", "view 1", "view 2", "handoff", "pose", "activation", "publication"};
+    "manager", "pool", "lifecycle", "entries", "view 1", "view 2", "handoff", "pose", "activation", "publication", "AA"};
 
 struct ProbePerformance {
   // Last serviced callback only. Stages are disjoint; lifecycle includes any
-  // creation, cleanup and resize work. Unclassified overhead remains in total.
+  // creation, cleanup and resize work. AA measures recurring pulse preparation;
+  // initial AA setup remains in lifecycle. Unclassified overhead remains in total.
   std::array<double, static_cast<std::size_t>(ProbeStage::count)> stage_ms{};
   std::uint64_t query_calls = 0;
+  std::uint64_t query_allocation_calls = 0;
+  std::uint64_t query_page_calls = 0;
+  std::uint64_t query_fallback_calls = 0;
   std::uint64_t read_calls = 0;
   std::uint64_t requested_bytes = 0;
   std::uint64_t query_cache_hits = 0;

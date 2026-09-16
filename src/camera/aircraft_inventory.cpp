@@ -201,19 +201,33 @@ AircraftInventory inspect_aircraft_metadata(ImageReader& reader,
                                             bool inspect_component,
                                             bool inspect_camera_keys,
                                             std::uint64_t* verified_source,
-                                            std::uint64_t* verified_user) {
+                                            std::uint64_t* verified_user,
+                                            const native_camera::CameraImageLayout& layout) {
   if (verified_source != nullptr)
     *verified_source = 0;
   if (verified_user != nullptr)
     *verified_user = 0;
   AircraftInventory result;
   std::uint64_t aircraft_for_output = 0;
-  if ((expected_facade_vtable != 0 && expected_facade_vtable != kAircraftExpectedFacadeVtableRva) ||
-      (inspect_selected_object && expected_facade_vtable != kAircraftExpectedFacadeVtableRva) ||
+  using native_camera::camera_layout_detail::image_rva;
+  if (!image_rva(layout.aircraft_worlds_global, 8, 8) ||
+      (expected_facade_vtable &&
+       (!image_rva(layout.aircraft_facade_vtable, kAircraftFacadeMethodOffset + 8, 8) || !image_rva(layout.aircraft_facade_method, 1))) ||
+      (inspect_selected_object && (!image_rva(layout.aircraft_controller_vtable, kAircraftAccessorMethodOffset + 8, 8) ||
+                                   !image_rva(layout.aircraft_controller_method, 1) || !image_rva(layout.renderer_global, 8, 8))) ||
+      (inspect_component && (!image_rva(layout.aircraft_selected_vtable, kAircraftSelectedMethodOffset + 8, 8) ||
+                             !image_rva(layout.aircraft_selected_method, 1))) ||
+      (inspect_camera_keys && !image_rva(layout.aircraft_key_component_vtable, 8, 8))) {
+    result.stage = "image_layout";
+    result.error = "The requested aircraft image layout is absent or outside the address bounds.";
+    return result;
+  }
+  if ((expected_facade_vtable != 0 && expected_facade_vtable != layout.aircraft_facade_vtable) ||
+      (inspect_selected_object && (!expected_facade_vtable || expected_facade_vtable != layout.aircraft_facade_vtable)) ||
       (inspect_component && !inspect_selected_object) || (inspect_camera_keys && !inspect_component) ||
       ((verified_source != nullptr || verified_user != nullptr) && !inspect_component)) {
     result.stage = "accessor_profile";
-    result.error = "The accessor extension permits only the fixed captured facade vtable identity.";
+    result.error = "The accessor extension permits only the resolved facade vtable identity.";
     return result;
   }
   if (!image.valid_image || image.machine != 0x8664 || image.image_size == 0 || image.image_size > 0x80000000u ||
@@ -224,13 +238,13 @@ AircraftInventory inspect_aircraft_metadata(ImageReader& reader,
   }
 
   result.stage = "cached_global";
-  if (!section_range(image, kAircraftGlobalRva, 8, kReadable | kWritable, kExecutable | kDiscardable)) {
+  if (!section_range(image, layout.aircraft_worlds_global, 8, kReadable | kWritable, kExecutable | kDiscardable)) {
     result.error = "The fixed world-container pointer is outside readable, writable, non-executable image data.";
     return result;
   }
   std::array<std::uint8_t, 8> bytes{};
   result.image_bytes = 8;
-  if (!reader.read(kAircraftGlobalRva, bytes.data(), bytes.size())) {
+  if (!reader.read(layout.aircraft_worlds_global, bytes.data(), bytes.size())) {
     ++result.read_failures;
     result.error = "The fixed world-container pointer word is unreadable.";
     return result;
@@ -362,7 +376,7 @@ AircraftInventory inspect_aircraft_metadata(ImageReader& reader,
   std::uint64_t renderer_for_recheck = 0;
   if (expected_facade_vtable != 0) {
     result.stage = "accessor_identity";
-    if (result.facade_vtable_rva != kAircraftExpectedFacadeVtableRva || result.method_rva != kAircraftExpectedFacadeMethodRva) {
+    if (result.facade_vtable_rva != layout.aircraft_facade_vtable || result.method_rva != layout.aircraft_facade_method) {
       result.error = "The resolved facade vtable and method do not match the captured accessor extension.";
       return result;
     }
@@ -401,8 +415,7 @@ AircraftInventory inspect_aircraft_metadata(ImageReader& reader,
 
     if (inspect_selected_object) {
       result.stage = "controller_identity";
-      if (result.object_vtable_rva != kAircraftExpectedControllerVtableRva ||
-          result.object_method_rva != kAircraftExpectedControllerMethodRva) {
+      if (result.object_vtable_rva != layout.aircraft_controller_vtable || result.object_method_rva != layout.aircraft_controller_method) {
         result.error = "The controller vtable and method do not match the captured selected-object path.";
         return result;
       }
@@ -415,12 +428,12 @@ AircraftInventory inspect_aircraft_metadata(ImageReader& reader,
         return unavailable(result, "controller_unavailable");
 
       result.stage = "renderer_cached_global";
-      if (!section_range(image, kAircraftRendererGlobalRva, 8, kReadable | kWritable, kExecutable | kDiscardable)) {
+      if (!section_range(image, layout.renderer_global, 8, kReadable | kWritable, kExecutable | kDiscardable)) {
         result.error = "The fixed renderer cache is outside readable, writable, non-executable main-image data.";
         return result;
       }
       result.image_bytes += 8;
-      if (!reader.read(kAircraftRendererGlobalRva, bytes.data(), bytes.size())) {
+      if (!reader.read(layout.renderer_global, bytes.data(), bytes.size())) {
         ++result.read_failures;
         result.error = "The fixed cached-renderer pointer word is unreadable.";
         return result;
@@ -492,8 +505,8 @@ AircraftInventory inspect_aircraft_metadata(ImageReader& reader,
 
       if (inspect_component) {
         result.stage = "component_source_identity";
-        if (result.selected_object_vtable_rva != kAircraftExpectedSelectedVtableRva ||
-            result.selected_object_method_rva != kAircraftExpectedSelectedMethodRva) {
+        if (result.selected_object_vtable_rva != layout.aircraft_selected_vtable ||
+            result.selected_object_method_rva != layout.aircraft_selected_method) {
           result.error = "The selected object vtable and method do not match the captured aircraft-handle accessor.";
           return result;
         }
@@ -565,7 +578,7 @@ AircraftInventory inspect_aircraft_metadata(ImageReader& reader,
 
         if (inspect_camera_keys) {
           result.stage = "camera_key_component_identity";
-          if (result.component_vtable_rva != kAircraftExpectedKeyComponentVtableRva) {
+          if (result.component_vtable_rva != layout.aircraft_key_component_vtable) {
             result.error = "The resolved component vtable does not match the fixed zero-adjustment key-lookup profile.";
             return result;
           }
@@ -620,7 +633,7 @@ AircraftInventory inspect_aircraft_metadata(ImageReader& reader,
     return result;
   result.stage = "cached_global_recheck";
   result.image_bytes += 8;
-  if (!reader.read(kAircraftGlobalRva, bytes.data(), bytes.size())) {
+  if (!reader.read(layout.aircraft_worlds_global, bytes.data(), bytes.size())) {
     ++result.read_failures;
     result.error = "The cached world-container pointer could not be reread exactly.";
     return result;
@@ -632,7 +645,7 @@ AircraftInventory inspect_aircraft_metadata(ImageReader& reader,
   if (inspect_selected_object) {
     result.stage = "renderer_cached_global_recheck";
     result.image_bytes += 8;
-    if (!reader.read(kAircraftRendererGlobalRva, bytes.data(), bytes.size())) {
+    if (!reader.read(layout.renderer_global, bytes.data(), bytes.size())) {
       ++result.read_failures;
       result.error = "The cached-renderer pointer could not be reread exactly.";
       return result;

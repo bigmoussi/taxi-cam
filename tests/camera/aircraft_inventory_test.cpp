@@ -129,6 +129,7 @@ struct SparseMemory {
 
 struct Image final : ImageReader {
   SparseMemory memory;
+  std::uint32_t worlds_global = kAircraftGlobalRva, renderer_global = kAircraftRendererGlobalRva;
   std::uint32_t facade_vtable = Vtable;
   std::uint32_t accessor_vtable = ObjectVtable;
   std::uint32_t selected_vtable = SelectedVtable;
@@ -136,10 +137,9 @@ struct Image final : ImageReader {
   bool selected_slot_allowed = false;
   ReadWindow query(std::uint32_t, std::uint32_t) override { return {}; }
   bool read(std::uint32_t rva, void* output, std::size_t size) override {
-    require(size == 8 &&
-                (rva == kAircraftGlobalRva || rva == facade_vtable + kAircraftFacadeMethodOffset ||
-                 (accessor_slot_allowed && rva == accessor_vtable + kAircraftAccessorMethodOffset) ||
-                 (selected_slot_allowed && (rva == kAircraftRendererGlobalRva || rva == selected_vtable + kAircraftSelectedMethodOffset))),
+    require(size == 8 && (rva == worlds_global || rva == facade_vtable + kAircraftFacadeMethodOffset ||
+                          (accessor_slot_allowed && rva == accessor_vtable + kAircraftAccessorMethodOffset) ||
+                          (selected_slot_allowed && (rva == renderer_global || rva == selected_vtable + kAircraftSelectedMethodOffset))),
             "Core accessed image data beyond the profile's fixed pointer words");
     return memory.read(rva, output, size);
   }
@@ -280,9 +280,10 @@ struct Fixture {
                         bool component = false,
                         bool camera_keys = false,
                         std::uint64_t* verified_source = nullptr,
-                        std::uint64_t* verified_user = nullptr) {
+                        std::uint64_t* verified_user = nullptr,
+                        const taxi_camera::native_camera::CameraImageLayout& layout = taxi_camera::native_camera::observed_store_layout()) {
     const auto result = inspect_aircraft_metadata(image, objects, info, base, expected, selected_object, component, camera_keys,
-                                                  verified_source, verified_user);
+                                                  verified_source, verified_user, layout);
     require(result.image_bytes == image.memory.attempted && result.image_bytes <= (selected_object ? 56u
                                                                                    : expected == 0 ? 24u
                                                                                                    : 32u),
@@ -1130,6 +1131,78 @@ void borrowed_user_output() {
     require((!state.valid || !state.available) && output == 0, "unavailable/changed/incomplete graph clears active user output");
   }
 }
+void resolved_layout() {
+  namespace nc = taxi_camera::native_camera;
+  constexpr std::uint32_t delta = 0x20000;
+  for (unsigned scenario = 0; scenario < 7; ++scenario) {
+    Fixture fixture;
+    fixture.add_camera_keys(2);
+    fixture.camera_key(0, TailKey);
+    fixture.camera_key(1, GearKey);
+    auto layout = nc::observed_store_layout();
+    for (auto* rva : {&layout.aircraft_worlds_global, &layout.renderer_global, &layout.aircraft_facade_vtable,
+                      &layout.aircraft_facade_method, &layout.aircraft_controller_vtable, &layout.aircraft_controller_method,
+                      &layout.aircraft_selected_vtable, &layout.aircraft_selected_method, &layout.aircraft_key_component_vtable})
+      *rva += delta;
+    std::map<std::uint64_t, std::uint8_t> moved;
+    for (const auto& [address, value] : fixture.image.memory.bytes)
+      moved[address + delta] = value;
+    fixture.image.memory.bytes = std::move(moved);
+    for (auto& section : fixture.info.sections)
+      section.rva += delta;
+    fixture.image.worlds_global += delta;
+    fixture.image.renderer_global += delta;
+    fixture.image.facade_vtable += delta;
+    fixture.image.accessor_vtable += delta;
+    fixture.image.selected_vtable += delta;
+    fixture.image.memory.integer(layout.aircraft_facade_vtable + kAircraftFacadeMethodOffset, Base + layout.aircraft_facade_method);
+    fixture.image.memory.integer(layout.aircraft_controller_vtable + kAircraftAccessorMethodOffset,
+                                 Base + layout.aircraft_controller_method);
+    fixture.image.memory.integer(layout.aircraft_selected_vtable + kAircraftSelectedMethodOffset, Base + layout.aircraft_selected_method);
+    fixture.objects.memory.integer(Facade, Base + layout.aircraft_facade_vtable);
+    fixture.objects.memory.integer(AccessorObject, Base + layout.aircraft_controller_vtable);
+    fixture.objects.memory.integer(SelectedObject, Base + layout.aircraft_selected_vtable);
+    fixture.objects.memory.integer(Aircraft, Base + AircraftVtable + delta);
+    fixture.objects.memory.integer(FirstComponent, Base + layout.aircraft_key_component_vtable);
+    if (scenario == 1)
+      layout.aircraft_facade_method += 16;
+    if (scenario == 2)
+      layout.aircraft_controller_vtable += 8;
+    if (scenario == 3)
+      layout.aircraft_selected_method += 16;
+    if (scenario == 4)
+      layout.aircraft_key_component_vtable += 8;
+    if (scenario == 5)
+      fixture.image.memory.change_on_repeat = layout.aircraft_worlds_global;
+    if (scenario == 6)
+      fixture.image.memory.change_on_repeat = layout.renderer_global;
+    std::uint64_t aircraft = UINT64_MAX, user = UINT64_MAX;
+    const auto result = fixture.run(Base, layout.aircraft_facade_vtable, true, true, true, &aircraft, &user, layout);
+    if (!scenario)
+      require(result.valid && result.available && result.camera_keys_inspected && result.tail_matches == 1 && result.gear_matches == 1 &&
+                  aircraft == Aircraft && user == User,
+              "Shifted aircraft image layout did not preserve the complete selected graph and key inspection");
+    else
+      require(!result.valid && aircraft == 0 && user == 0, "Mismatched or changing resolved aircraft identity published borrowed objects");
+  }
+  for (const auto bad_rva : {0u, UINT32_MAX}) {
+    for (unsigned field = 0; field < 9; ++field) {
+      Fixture fixture;
+      fixture.add_camera_keys(2);
+      auto layout = nc::observed_store_layout();
+      const std::array required{&layout.aircraft_worlds_global,       &layout.renderer_global,
+                                &layout.aircraft_facade_vtable,       &layout.aircraft_facade_method,
+                                &layout.aircraft_controller_vtable,   &layout.aircraft_controller_method,
+                                &layout.aircraft_selected_vtable,     &layout.aircraft_selected_method,
+                                &layout.aircraft_key_component_vtable};
+      *required[field] = bad_rva;
+      std::uint64_t aircraft = UINT64_MAX, user = UINT64_MAX;
+      const auto result = fixture.run(Base, kAircraftExpectedFacadeVtableRva, true, true, true, &aircraft, &user, layout);
+      require(!result.valid && result.image_bytes == 0 && result.object_bytes == 0 && aircraft == 0 && user == 0,
+              "Malformed required aircraft layout read memory or retained borrowed objects");
+    }
+  }
+}
 }  // namespace
 
 int main() {
@@ -1145,6 +1218,7 @@ int main() {
   camera_key_extension();
   borrowed_aircraft_output();
   borrowed_user_output();
+  resolved_layout();
   std::printf("PASS: %u bounded aircraft-facade metadata checks. Synthetic readers only.\n", checks);
   return 0;
 }

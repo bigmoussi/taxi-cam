@@ -1,5 +1,6 @@
 #pragma once
 
+#include "camera_layout.hpp"
 #include "image_inventory.hpp"
 
 #include <array>
@@ -16,12 +17,14 @@ struct ActivationMaskInventory {
   std::array<std::uint64_t, 2> words{};
 };
 
-// Read the 16-byte flag pair at the integration profile's fixed RVA130434096
+// Read the 16-byte flag pair at the resolved layout's activation-disable RVA
 // from declared readable, nonwritable, nonexecutable, nondiscardable image data.
 // Require the complete pair {1,0} and an identical full reread (32B maximum).
 // Caller separately verifies the current code contract before using the native
 // activation(false) call; this helper performs no calls or memory writes and
 // cannot guarantee future immutability or an engine scheduling contract.
-ActivationMaskInventory inspect_activation_disable_mask(discovery::ImageReader& reader, const discovery::Inventory& image);
+ActivationMaskInventory inspect_activation_disable_mask(discovery::ImageReader& reader,
+                                                        const discovery::Inventory& image,
+                                                        const CameraImageLayout& layout = observed_store_layout());
 
 }  // namespace taxi_camera::native_camera

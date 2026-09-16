@@ -8,6 +8,16 @@ The graphics implementation uses standard Direct3D 12 interfaces without NVIDIA-
 
 Setup checks the presence and x64 headers of required DLLs, but does not load simulator code or probe the GPU. Xbox/MS Store installations can protect executable contents, so setup checks that `FlightSimulator2024.exe` exists; the launcher validates the loaded AMD64 image when connecting. These prerequisite checks do not establish live simulator compatibility.
 
+## Automatic startup
+
+Setup can register Taxi Cam in the simulator's `exe.xml`, or leave startup unchanged when **Launch manually** is selected. The usual Steam path is `%APPDATA%\Microsoft Flight Simulator 2024\exe.xml`; the Microsoft Store path is `%LOCALAPPDATA%\Packages\Microsoft.Limitless_8wekyb3d8bbwe\LocalCache\exe.xml`.
+
+Changing the simulator installation clears an inherited XML choice. An explicitly supplied or edited choice is preserved. Without an explicit path or saved choice for the same simulator, discovery uses a file only when exactly one candidate exists. If both candidates exist, select the intended file; Setup will not guess which one belongs to the simulator.
+
+Setup preserves unrelated add-ons and comments, backs up the original bytes and updates a single Taxi Cam entry. It can repair a recognized launch-only document with a copied `Type="SimConnect"` / `Filename=SimConnect.xml` header. Real or mixed SimConnect configurations, ambiguous headers and globally disabled/manual startup remain refused. Concurrent edits and physical-path redirection are checked before startup can be reported as configured.
+
+When startup cannot be configured and the original file is verified unchanged, installation can finish with a manual-start notice and `setup-diagnostics.log`. Rerun Setup with automatic startup selected to retry. A concurrent edit or uncertain partial write follows the existing rollback checks. Successful XML configuration does not by itself verify that MSFS launches the companion. Start Taxi Cam before loading a flight; see [startup timing](reshade-compatibility.md#startup-timing).
+
 ## Settings window controls
 
 | Control | Location and behaviour |
@@ -210,6 +220,8 @@ Source: [IPC](../src/shared/protocol.hpp), [control loop](../src/bridge/bridge_m
 
 ## Diagnostics
 
+Native camera access uses dynamic instruction and object-identity discovery in the loaded executable. Moved code and data may be accepted when the complete reviewed contract still matches; executable hashes and storefront names are not compatibility gates. Changed instructions, layouts or ambiguous identities keep the camera disabled. A successful discovery check is separate from live rendering validation. See [Dynamic camera compatibility](dynamic-camera-compatibility.md) for the model and its limits.
+
 The bridge writes a status snapshot to the companion and appends metadata to:
 
 ~~~text
@@ -220,6 +232,8 @@ Control-transition logs include companion connectivity, cached-read contention c
 When an established camera entry is pending or its inspection changes during a read, the observer retains the pair and waits for fresh validation. It closes only independently validated ready views and makes no pose, resize or activation calls against unavailable views. A timeout does not authorize removing an unavailable camera. Completed images remain subject to resource-generation checks.
 
 A primary-resolution or AA-mode change also retains the pair. Recovery requires the same owned IDs, both render gates observed closed across distinct manager updates, mode2 entries, and existing bitmap dimensions equal to the configured panes. Upscaling can leave different primary render and display sizes in the three camera-size pairs; recovery bounds all six values independently before restoring them to the original pane dimensions. Only the 24 camera-size bytes and projection are restored; no output allocator or entry deletion is called. A refused or partial restoration remains paused, with a restart message instead of repeated recreation. A local regression test covers mixed-size DLSS-to-TAA recovery; live simulator recovery remains unverified.
+
+Initial camera setup also accepts independently bounded render, display and output sizes after its first closed-gate manager update. It still requests three identical size pairs matching the profile pane, rereads the full owned-view chain and checks every field around the exact 24-byte write. An initial resize failure preserves its original cause as `creation_failed`, uses guarded cleanup and does not automatically repeat a possibly partial allocation. It is not reported as retained resolution recovery.
 
 OBS Game Capture's [D3D11On12 capture path](https://github.com/obsproject/obs-studio/blob/master/plugins/win-capture/graphics-hook/d3d12-capture.cpp) copies a wrapped backbuffer on an application queue. A null-buffer [SetPredication call](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12graphicscommandlist-setpredication) disables conditional execution and does not invalidate capture evidence. A non-null predicate still invalidates injection for the entire recording, including after a later null call, until a successful native Reset. Hardware and WARP validation exercise the D3D11On12 copy sequence followed by fresh camera capture and both PFD pixel checks; this is separate from live OBS/MSFS validation.
 
@@ -234,7 +248,7 @@ Use the counters in pipeline order:
 | `composed` | Paired compositions submitted |
 | `stamps` | Camera copies or draws recorded into PFD command lists |
 
-Private-code mismatch diagnostics include the failed RVA and byte count. Code that moves also fails the current fixed-address profile; the runtime does not guess a new address or call an unverified match.
+Private-code mismatch diagnostics identify the failed discovery or validation stage. Relocated code is accepted only when the complete reviewed instruction and object-identity contract has one consistent result; partial or ambiguous matches never authorize native calls.
 
 A counter measures work at its stage, not frames visibly presented. For example, increasing compositions with zero stamps points to display routing or PFD draw eligibility.
 
@@ -242,12 +256,15 @@ The frame-rate setting limits activation opportunities for each camera. Each ope
 
 `probe_ms`, `query_ms` and `read_ms` describe the last serviced inspection callback, not every simulator frame. `inspections` counts serviced callbacks; its change over a log interval gives their frequency. Skipped callbacks leave the last timings visible. `clear_states` counts observed application graphics-state resets. These measurements exclude MSFS scene rendering and GPU time.
 
-For an established pair, manager and pair inspection share one fresh read-only memory-region transaction. Field values and trace rereads are still checked, then the region metadata is revalidated before publication or any native call. No cached metadata or field values carry across engine calls or frames. Lifecycle changes invalidate the provisional result and require fresh inspection.
+For an established pair, manager and pair inspection share one fresh read-only memory transaction. Field values and trace rereads are still checked. Private reads and explicitly enabled hot image reads validate typed allocation identity and requested-page permissions, with full-region fallback for unavailable page information or cache capacity. Image allocations must match the main module exactly. Every recorded proof is revalidated before publication or any native call. Default image readers, startup/code scanners and direct MBI queries retain full-region checks. Explicit image-page reads outside a transaction query fresh metadata each time. No cached metadata or field values carry across writes, engine calls or frames. Lifecycle changes invalidate the provisional result and require fresh inspection.
+
+The log's `queries` and `query_ms` cover actual calls to the instrumented memory metadata APIs, including the fresh AA writable-span check. `allocation_queries`, `page_queries` and `region_queries` distinguish allocation information, page working-set information and legacy `VirtualQueryEx` calls; they sum to `queries`. A page query can validate a batch. Region queries include default image checks and private/image-page fallbacks. The exact AA flag reads also contribute to `read_ms`. These are last serviced callback metrics, not FPS or whole-session averages; they remain stale while inspection is idle. AA requires one private allocation and current `PAGE_READWRITE` protection for the complete 16-byte flag span; its writable check retains no cached proof across the operation.
 
 | Symptom | Inspect |
 | --- | --- |
 | No bridge status | Companion connection, executable path/structure and bridge startup |
-| Camera compatibility check failed | Reported code RVA, image bounds, activation data or manager layout; the camera remains disabled |
+| Empty PFD texture list after starting Taxi Cam inside a loaded flight | The bridge may have missed existing texture/RTV creation. Reload the aircraft or flight with Taxi Cam running so the display resources are recreated; a panel redraw alone does not recover them. If the list stays empty after recreation, investigate display dimensions and formats. |
+| Camera compatibility check failed | Reported instruction-discovery, function-boundary, object-identity or activation-data failure; include the launcher and bridge logs in the support report |
 | Scenes not ready | Camera lifecycle and fresh aircraft/camera telemetry |
 | Scenes ready, zero captures | Scene-to-texture match, source state and queue observation |
 | Captures increase, no compositions | Both feeds, current scene identity and GPU completion |
@@ -257,7 +274,7 @@ For an established pair, manager and pair inspection share one fresh read-only m
 
 Status also contains the active side mask, target IDs, hook failures, applied exposure and GS. A status GS of −1 means unavailable. The candidate list contains up to 16 IDs, cumulative draw counts, dimensions, mip counts and formats for the selected profile.
 
-`probe_cpu_ms` and `probe_max_ms` measure camera-observer CPU time. They exclude engine rendering and GPU time. The ten `stage_ms` values are manager, pool, lifecycle, entries, view 1, view 2, handoff, pose, activation and publication.
+`probe_cpu_ms` and `probe_max_ms` record elapsed camera-observer callback time, not OS thread-CPU or GPU time. The ten IPC `stage_ms` values remain manager, pool, lifecycle, entries, view 1, view 2, handoff, pose, activation and publication. The separate log field `aa_ms` records recurring AA preparation, including its verification work; initial AA setup remains within lifecycle timing. It does not add an eleventh IPC stage or change the shared-memory layout. Memory-query/read timings overlap the stage that performs them, so these values must not be added as independent costs.
 
 For installation and local build commands, see the [README](../README.md). For automated validation and downloadable assets, see [Releases](releases.md).
 
@@ -268,3 +285,5 @@ Status includes `active_profile`, `detected_profile`, `identity_sample_ms`, `air
 The PFD assignment lists refresh when candidate allocation IDs change. Opening a list freezes its contents until it closes, preserving selection while drawing continues. Entries show dimensions, mips and format; their allocation IDs are session-only. Automatic assignment stays automatic unless a texture is explicitly chosen.
 
 After a TAXI telemetry gap exceeds the existing two-second intent grace, output is hidden and render gates are suspended. Existing owned views remain allocated through TAXI OFF, cutoff, service pause and companion disconnection. Aircraft/profile changes suspend and revalidate that pair, clear the old feed and body calibration, and require fresh captures after the new profile is applied. Native identity failures retain their separate guards; a profile change does not authorize camera removal or replacement. Fresh ON resumes that pair; this does not remove native memory/lifetime guards or establish the cause of a simulator crash.
+
+A session change during initial loading can arrive while an empty camera reset is queued. The transition cancels that unmaterialized request only after excluding an in-flight controller operation and confirming no internal owned IDs or manager owner exist. A busy controller leaves the transition pending for the observer; existing or partial camera pairs retain the normal ownership checks. Allocation dimensions are published together with their owned IDs and manager lifetime, so newly created cameras wait for matching evidence before a transition can validate them. Waiting transitions report the live graphics connection and a specific transition message, with periodic log entries, rather than recycling an earlier camera-demand message.

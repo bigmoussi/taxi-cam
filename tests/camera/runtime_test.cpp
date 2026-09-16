@@ -137,6 +137,18 @@ void profile_transition_mailbox() {
   require(nc::request_scene_profile_transition(9999) == 0 && nc::scene_snapshot().profile_transition_token == next,
           "Invalid profile changed the accepted transition");
   require_inert(next_status);
+  // Loading a flight can advance the aircraft epoch before the observer has
+  // consumed the empty disable queued by Start/Stop. The transition must clear
+  // that request without requiring a native callback or render demand.
+  nc::request_scene_stop(true);
+  require(nc::scene_snapshot().pair.request_pending, "Empty stop did not queue the transition regression setup");
+  const auto after_stop = nc::request_scene_profile_transition(2);
+  const auto settled = nc::scene_snapshot();
+  require(after_stop > next && settled.profile_transition_token == after_stop && settled.profile_transition_ready &&
+              !settled.profile_transition_pending && !settled.profile_transition_failed && !settled.pair.request_pending &&
+              !settled.pair.creation_pending,
+          "Queued empty stop blocked an aircraft-session transition");
+  require_inert(settled);
 }
 void wrong_host_public_flow() {
   require_wrong_host();

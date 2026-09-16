@@ -1,15 +1,16 @@
 #pragma once
 
-#include "owned_view.hpp"
 #include "../profiles/catalog.hpp"
+#include "owned_view.hpp"
 
 namespace taxi_camera::native_camera {
 
 using ViewDimensions = std::array<std::array<std::int32_t, 2>, 3>;
 
 // Native outputs fit inside the profile camera border: A380 panes are736x251 and736x496.
-// The four-row separator belongs only to the compositor. All three inherited
-// pairs must agree, but their aspect/size does not determine the requested size.
+// The four-row separator belongs only to the compositor. Inherited render,
+// display and output pairs are independently bounded and may differ under
+// upscaling; the requested three pairs must equal the exact profile pane.
 inline constexpr auto kCameraPaneDimensions = profiles::A380.camera_panes;
 bool plan_view_resize(const ViewDimensions& inherited,
                       unsigned feed,

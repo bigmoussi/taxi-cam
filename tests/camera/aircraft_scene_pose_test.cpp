@@ -122,9 +122,40 @@ void refusal() {
     value = -value;
   require(!scene_body_matches_public(valid, reversed), "wrong orientation refused");
 }
+void resolved_layout() {
+  auto layout = observed_store_layout();
+  layout.aircraft_controller_vtable += 0x10000;
+  layout.scene_node_vtable += 0x20000;
+  layout.scene_model_vtable += 0x30000;
+  Fixture fixture;
+  fixture.put(user, base + layout.aircraft_controller_vtable);
+  fixture.put(node, base + layout.scene_node_vtable);
+  fixture.put(attached, base + layout.scene_model_vtable);
+  require(inspect_aircraft_scene_pose(fixture, user, base, layout).complete,
+          "Resolved scene identities did not preserve the body-pose inspection");
+  auto wrong = layout;
+  wrong.scene_node_vtable += 8;
+  require(!inspect_aircraft_scene_pose(fixture, user, base, wrong).complete, "Different resolved scene-node identity was accepted");
+  for (const auto bad : {CameraImageLayout{},
+                         [&] {
+                           auto value = layout;
+                           value.scene_model_vtable = UINT32_MAX;
+                           return value;
+                         }(),
+                         [&] {
+                           auto value = layout;
+                           ++value.aircraft_controller_vtable;
+                           return value;
+                         }()}) {
+    Fixture invalid;
+    require(!inspect_aircraft_scene_pose(invalid, user, base, bad).complete && invalid.reads.empty(),
+            "Malformed scene layout read objects or published a pose");
+  }
+}
 }  // namespace
 int main() {
   fixed_mounts();
   refusal();
+  resolved_layout();
   std::printf("PASS: %u scene-body snapshot, lifetime and rigid mount checks.\n", checks);
 }

@@ -2,10 +2,10 @@
 
 Nose-wheel and tail cameras for Microsoft Flight Simulator 2024. Use the aircraft's **TAXI** button or a keyboard shortcut to see both views on the upper part of its Primary Flight Display (PFD).
 
-## Known issues
+## Compatibility
 
-- **ReShade incompatibility:** Taxi Cam is currently incompatible with ReShade. I'm working on a fix.
-- **Steam version:** Tracking an issue with the steam signature of MSFS preventing loading.
+- **ReShade compatibility is experimental.** Taxi Cam now handles ReShade's graphics-hook ordering. If camera output is missing, include the bridge log in your bug report. See [startup order, compatibility and validation details](docs/reshade-compatibility.md).
+- **Steam and Microsoft Store:** Taxi Cam checks the loaded simulator's camera interfaces automatically. Simulator updates that change those interfaces can still prevent loading. See [simulator build compatibility](docs/dynamic-camera-compatibility.md).
 
 ## Important notice
 
@@ -32,7 +32,9 @@ For **Windows 10/11 (64-bit)** and **MSFS 2024**, with one of the aircraft above
 
 **Keep existing settings** is selected by default. Leave it checked to preserve camera profiles, calibration, reference guides and keyboard shortcuts. Clear it only if you want to start with the bundled defaults. Setup restores your previous settings if installation fails.
 
-If Setup cannot configure automatic startup and can verify the startup file is unchanged, installation completes with a notice explaining how to launch Taxi Cam from the Start menu. Details are saved in `setup-diagnostics.log` in the installation folder. You can rerun Setup to retry automatic startup.
+If Setup cannot configure automatic startup and can verify the startup file is unchanged, installation completes with a notice explaining how to launch Taxi Cam from the Start menu. Details are saved in `setup-diagnostics.log` in the installation folder. You can rerun Setup to retry automatic startup. See [Automatic startup](docs/runtime-reference.md#automatic-startup) for Steam and Microsoft Store startup file locations and selection behavior.
+
+For manual launch, start Taxi Cam while MSFS is at the main menu, before loading a flight. Starting after the cockpit displays already exist can leave PFD detection incomplete. If this happens, keep Taxi Cam running and restart the flight; this recovered the observed iniBuilds A380 case. See [startup timing](docs/reshade-compatibility.md#startup-timing).
 
 On its first launch, **Settings** opens so you can explore the controls. Close the window or select **Hide to tray** to keep the app running in the system tray. Later automatic starts stay in the tray; opening Taxi Cam from the Windows Start menu shows Settings again. The first-launch choice is remembered across updates.
 

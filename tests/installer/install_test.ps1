@@ -120,3 +120,130 @@ if (Test-TaxiRedirectedInstallPath $redirected $redirected) { throw 'An explicit
 $fixturePhysical = Get-TaxiPhysicalFilePath (Join-Path $sim 'dxgi.dll')
 if (-not $fixturePhysical.EndsWith('\sim\dxgi.dll', [StringComparison]::OrdinalIgnoreCase)) { throw 'Physical file path lookup failed.' }
 Write-Output 'PASS installation visibility: ordinary paths, physical aliases, explicit cache paths, Local/Roaming redirection and real handle resolution.'
+
+# Steam launch files can contain real Launch.Addon entries but carry the
+# SimConnect document header. Repair belongs to the explicit installer path;
+# preserve the exact original file and every unrelated launch entry/comment.
+$steamRepair = Join-Path $fixture 'steam-header-repair'
+$steamRepairXml = Join-Path $steamRepair 'exe.xml'
+$steamRepairApp = Join-Path $steamRepair 'app'
+New-Item -ItemType Directory -Path $steamRepair -Force | Out-Null
+$mislabelledSteamLaunch = @'
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Steam launch configuration: keep this comment -->
+<SimBase.Document Type="SimConnect" version="1,0">
+  <Descr>SimConnect</Descr>
+  <Filename>SimConnect.xml</Filename>
+  <Disabled>False</Disabled>
+  <!-- Keep both existing launchers and their parameters -->
+  <Launch.Addon><Name>Steam Utility A</Name><Disabled>False</Disabled><Path>C:\Other Apps\utility-a.exe</Path><CommandLine>--keep &amp; preserve</CommandLine></Launch.Addon>
+  <Launch.Addon><Name>Steam Utility B</Name><ManualLoad>False</ManualLoad><Path>D:\Other Apps\utility-b.exe</Path><NewConsole>False</NewConsole></Launch.Addon>
+</SimBase.Document>
+'@
+[IO.File]::WriteAllText($steamRepairXml, $mislabelledSteamLaunch, [Text.UTF8Encoding]::new($true))
+$steamOriginalHash = (Get-FileHash -LiteralPath $steamRepairXml).Hash
+$steamOriginalDocument = [Xml.XmlDocument]::new()
+$steamOriginalDocument.PreserveWhitespace = $true
+$steamOriginalDocument.Load($steamRepairXml)
+$steamOriginalAddons = @($steamOriginalDocument.SelectNodes('/SimBase.Document/Launch.Addon') | ForEach-Object OuterXml)
+$steamOriginalComments = @($steamOriginalDocument.SelectNodes('//comment()') | ForEach-Object Value)
+& (Join-Path $root 'installer/install.ps1') -SimulatorDirectory $sim -ExeXml $steamRepairXml -Destination $steamRepairApp -NoShortcut
+$steamRepairRecord = Get-Content -Raw -LiteralPath (Join-Path $steamRepairApp 'installation.json') | ConvertFrom-Json
+if ($steamRepairRecord.startupStatus -ne 'configured' -or -not $steamRepairRecord.startupUpdated -or $steamRepairRecord.startupError) {
+    throw 'Recognized Steam launch-header repair did not configure automatic startup.'
+}
+if (-not $steamRepairRecord.exeXmlBackup -or (Get-FileHash -LiteralPath $steamRepairRecord.exeXmlBackup).Hash -ne $steamOriginalHash) {
+    throw 'Steam header repair did not retain the byte-exact original launch file.'
+}
+$steamRepairedDocument = [Xml.XmlDocument]::new()
+$steamRepairedDocument.PreserveWhitespace = $true
+$steamRepairedDocument.Load($steamRepairXml)
+if ($steamRepairedDocument.DocumentElement.GetAttribute('Type') -ne 'Launch' -or
+    $steamRepairedDocument.SelectSingleNode('/SimBase.Document/Filename').InnerText -ne 'exe.xml' -or
+    $steamRepairedDocument.SelectNodes('/SimBase.Document/Launch.Addon').Count -ne 3 -or
+    $steamRepairedDocument.SelectNodes('/SimBase.Document/Launch.Addon[Name="Taxi Cam"]').Count -ne 1) {
+    throw 'Steam repair did not normalize the header and add one Taxi Cam entry.'
+}
+$steamRetainedAddons = @($steamRepairedDocument.SelectNodes('/SimBase.Document/Launch.Addon[Name!="Taxi Cam"]') | ForEach-Object OuterXml)
+$steamRetainedComments = @($steamRepairedDocument.SelectNodes('//comment()') | ForEach-Object Value)
+if (@(Compare-Object $steamOriginalAddons $steamRetainedAddons).Count -or
+    @(Compare-Object $steamOriginalComments $steamRetainedComments).Count) {
+    throw 'Steam header repair changed unrelated launch nodes or comments.'
+}
+$steamRepairedHash = (Get-FileHash -LiteralPath $steamRepairXml).Hash
+& (Join-Path $root 'installer/install.ps1') -SimulatorDirectory $sim -ExeXml $steamRepairXml -Destination $steamRepairApp -NoShortcut
+$steamReinstalledRecord = Get-Content -Raw -LiteralPath (Join-Path $steamRepairApp 'installation.json') | ConvertFrom-Json
+if ($steamReinstalledRecord.startupStatus -ne 'configured' -or
+    (Get-FileHash -LiteralPath $steamRepairXml).Hash -ne $steamRepairedHash -or
+    (Get-FileHash -LiteralPath $steamRepairRecord.exeXmlBackup).Hash -ne $steamOriginalHash) {
+    throw 'Repeated Steam install changed repaired startup contents or the original backup.'
+}
+Write-Output 'PASS Steam launch repair: configured startup, exact original backup, unrelated add-ons/comments preserved and idempotent repeat install.'
+
+# Candidate discovery is isolated to temporary profile roots, restored even on
+# failure. A previous Store exe.xml is reusable only for the identical simulator.
+$savedInstallerAppData = $env:APPDATA
+$savedInstallerLocalAppData = $env:LOCALAPPDATA
+try {
+    $env:APPDATA = Join-Path $fixture 'cross-store/profile-roaming'
+    $env:LOCALAPPDATA = Join-Path $fixture 'cross-store/profile-local'
+    $crossStoreSim = Join-Path $fixture 'cross-store/store-sim'
+    $crossSteamSim = Join-Path $fixture 'cross-store/steam-sim'
+    foreach ($simulatorFixture in @($crossStoreSim, $crossSteamSim)) {
+        New-TaxiFixtureImage (Join-Path $simulatorFixture 'FlightSimulator2024.exe') $false
+        New-TaxiFixtureImage (Join-Path $simulatorFixture 'SimConnect_internal.dll')
+    }
+    $crossApp = Join-Path $fixture 'cross-store/app'
+    $customStoreXml = Join-Path $fixture 'cross-store/custom-store/exe.xml'
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $customStoreXml) | Out-Null
+    [IO.File]::WriteAllText($customStoreXml, '<SimBase.Document Type="Launch"><Launch.Addon><Name>Store Utility</Name><Path>C:\StoreUtility.exe</Path></Launch.Addon></SimBase.Document>')
+    & (Join-Path $root 'installer/install.ps1') -SimulatorDirectory $crossStoreSim -ExeXml $customStoreXml -Destination $crossApp -NoShortcut
+    $customStoreHash = (Get-FileHash -LiteralPath $customStoreXml).Hash
+    $discoveredSteamXml = Join-Path $env:APPDATA 'Microsoft Flight Simulator 2024/exe.xml'
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $discoveredSteamXml) | Out-Null
+    [IO.File]::WriteAllText($discoveredSteamXml, $mislabelledSteamLaunch)
+    $discoveredSteamOriginalHash = (Get-FileHash -LiteralPath $discoveredSteamXml).Hash
+    & (Join-Path $root 'installer/install.ps1') -SimulatorDirectory $crossSteamSim -Destination $crossApp -NoShortcut
+    $crossRecord = Get-Content -Raw -LiteralPath (Join-Path $crossApp 'installation.json') | ConvertFrom-Json
+    if ($crossRecord.simulator -ne (Join-Path $crossSteamSim 'FlightSimulator2024.exe') -or
+        $crossRecord.exeXml -ne $discoveredSteamXml -or $crossRecord.startupStatus -ne 'configured' -or
+        -not $crossRecord.startupUpdated -or $crossRecord.startupError -or
+        (Get-FileHash -LiteralPath $customStoreXml).Hash -ne $customStoreHash -or
+        (Get-FileHash -LiteralPath $crossRecord.exeXmlBackup).Hash -ne $discoveredSteamOriginalHash) {
+        throw 'Store-to-Steam update reused the previous Store launch file or failed to discover and back up Steam startup.'
+    }
+    [xml]$crossSteamDocument = Get-Content -Raw -LiteralPath $discoveredSteamXml
+    if ($crossSteamDocument.SelectSingleNode('/SimBase.Document/Launch.Addon[Name="Taxi Cam"]/CommandLine').InnerText -ne
+        ('--background --simulator "' + (Join-Path $crossSteamSim 'FlightSimulator2024.exe') + '"')) {
+        throw 'Discovered Steam startup retained the previous simulator executable.'
+    }
+
+    # With both standard paths present, same-simulator updates may retain their
+    # prior explicit path; changing simulators must not guess between candidates.
+    $discoveredStoreXml = Join-Path $env:LOCALAPPDATA 'Packages/Microsoft.Limitless_8wekyb3d8bbwe/LocalCache/exe.xml'
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $discoveredStoreXml) | Out-Null
+    [IO.File]::WriteAllText($discoveredStoreXml, '<SimBase.Document Type="Launch"><Launch.Addon><Name>Other Store Utility</Name><Path>C:\OtherStore.exe</Path></Launch.Addon></SimBase.Document>')
+    $ambiguousApp = Join-Path $fixture 'cross-store/ambiguous-app'
+    & (Join-Path $root 'installer/install.ps1') -SimulatorDirectory $crossStoreSim -ExeXml $discoveredStoreXml -Destination $ambiguousApp -NoShortcut
+    & (Join-Path $root 'installer/install.ps1') -SimulatorDirectory $crossStoreSim -Destination $ambiguousApp -NoShortcut
+    $sameStoreRecord = Get-Content -Raw -LiteralPath (Join-Path $ambiguousApp 'installation.json') | ConvertFrom-Json
+    if ($sameStoreRecord.startupStatus -ne 'configured' -or $sameStoreRecord.exeXml -ne $discoveredStoreXml) {
+        throw 'Same-simulator update failed to retain its prior explicit launch file.'
+    }
+    $storeBeforeAmbiguous = (Get-FileHash -LiteralPath $discoveredStoreXml).Hash
+    $steamBeforeAmbiguous = (Get-FileHash -LiteralPath $discoveredSteamXml).Hash
+    & (Join-Path $root 'installer/install.ps1') -SimulatorDirectory $crossSteamSim -Destination $ambiguousApp -NoShortcut
+    $ambiguousRecord = Get-Content -Raw -LiteralPath (Join-Path $ambiguousApp 'installation.json') | ConvertFrom-Json
+    if ($ambiguousRecord.startupRequested -ne 'automatic' -or $ambiguousRecord.startupUpdated -or
+        $ambiguousRecord.startupStatus -notin @('manual','unchanged') -or
+        $ambiguousRecord.startupError -notlike '*Select the simulator exe.xml*' -or
+        $ambiguousRecord.exeXml -eq $discoveredStoreXml -or
+        (Get-FileHash -LiteralPath $discoveredStoreXml).Hash -ne $storeBeforeAmbiguous -or
+        (Get-FileHash -LiteralPath $discoveredSteamXml).Hash -ne $steamBeforeAmbiguous) {
+        throw 'Ambiguous Store-to-Steam discovery guessed a launch file instead of preserving both and reporting manual-startup fallback.'
+    }
+    Write-Output 'PASS simulator-specific startup inheritance: Store-to-Steam discovery, old-file preservation, matching-simulator reuse and ambiguous-candidate fallback.'
+} finally {
+    $env:APPDATA = $savedInstallerAppData
+    $env:LOCALAPPDATA = $savedInstallerLocalAppData
+}

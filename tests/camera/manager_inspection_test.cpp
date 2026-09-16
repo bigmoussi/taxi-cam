@@ -33,19 +33,19 @@ struct Fixture : discovery::ImageReader, engine_camera::MemoryReader {
     std::memcpy(field.bytes.data(), &value, sizeof(value));
     fields.push_back(field);
   }
-  explicit Fixture(std::uint32_t generation = 7) {
+  explicit Fixture(std::uint32_t generation = 7, const CameraImageLayout& layout = observed_store_layout()) {
     struct Handle {
       std::uint64_t control;
       std::uint32_t generation, extra;
     };
     for (unsigned pass = 0; pass < 2; ++pass) {
-      add(true, kManagerOwnerGlobal, Owner);
-      add(true, kManagerRendererGlobal, Renderer);
+      add(true, layout.manager_owner_global, Owner);
+      add(true, layout.renderer_global, Renderer);
       add(false, Owner + 2496, Manager);
       add(false, Owner + 2480, Handle{Control, generation, 23});
       add(false, Control + 28, generation);
       add(false, Control, Manager);
-      add(false, Manager, Base + kManagerVtable);
+      add(false, Manager, Base + layout.manager_vtable);
     }
   }
   discovery::ReadWindow query(std::uint32_t, std::uint32_t) override {
@@ -96,6 +96,36 @@ void refusals() {
   require(owner_overflow.run().status == ManagerInspectionStatus::identity_refused && owner_overflow.next == 2,
           "Overflowing owner fields were followed");
 }
+void resolved_layout() {
+  auto layout = observed_store_layout();
+  layout.manager_owner_global += 0x10000;
+  layout.renderer_global += 0x20000;
+  layout.manager_vtable += 0x30000;
+  Fixture moved(7, layout);
+  require(bool(inspect_manager_identity(moved, moved, Base, Manager, Control, layout)) && moved.next == 14,
+          "Resolved manager RVAs did not preserve the complete identity trace");
+  Fixture mismatch(7, layout);
+  auto wrong = layout;
+  wrong.manager_vtable += 8;
+  require(inspect_manager_identity(mismatch, mismatch, Base, Manager, Control, wrong).status == ManagerInspectionStatus::identity_refused,
+          "Resolved layout accepted a different manager vtable");
+  for (const auto bad : {CameraImageLayout{},
+                         [&] {
+                           auto value = layout;
+                           value.manager_owner_global = UINT32_MAX;
+                           return value;
+                         }(),
+                         [&] {
+                           auto value = layout;
+                           value.renderer_global = value.manager_owner_global;
+                           return value;
+                         }()}) {
+    Fixture invalid;
+    require(inspect_manager_identity(invalid, invalid, Base, Manager, Control, bad).status == ManagerInspectionStatus::identity_refused &&
+                invalid.next == 0,
+            "Malformed manager layout triggered reads or bypassed identity");
+  }
+}
 }  // namespace
 
 int main() {
@@ -134,5 +164,6 @@ int main() {
     require(fixture.run().temporary() && fixture.next == absent + 1, "Absent service was followed or permanently latched");
   }
   refusals();
+  resolved_layout();
   std::printf("Manager inspection: PASS %u checks\n", checks);
 }

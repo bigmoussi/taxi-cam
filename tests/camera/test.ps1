@@ -11,12 +11,32 @@ $common = @('-std=c++20', '-O2', '-Wall', '-Wextra', '-Werror', '-DNOMINMAX', '-
 foreach ($component in @('local_memory', 'code_contract', 'source_view', 'activation_mask', 'view_resize', 'view_aa')) {
     $output = Join-Path $outputDirectory ($component + '-test.exe')
     $testSource = $component + '_test.cpp'
-    & $compiler @common (Join-Path $repoRoot ('src/camera/' + $component + '.cpp')) `
+    $componentSources = @((Join-Path $repoRoot ('src/camera/' + $component + '.cpp')))
+    if ($component -eq 'view_aa') { $componentSources += (Join-Path $repoRoot 'src/camera/local_memory.cpp') }
+    & $compiler @common @componentSources `
         (Join-Path $PSScriptRoot $testSource) '-o' $output
     if ($LASTEXITCODE -ne 0) { throw "Native camera component compilation failed: $component" }
     & $output
     if ($LASTEXITCODE -ne 0) { throw "Native camera component validation failed: $component" }
 }
+$privatePageTest = Join-Path $outputDirectory 'private-page-memory-test.exe'
+& $compiler @common (Join-Path $repoRoot 'src/camera/local_memory.cpp') `
+    (Join-Path $PSScriptRoot 'private_page_memory_test.cpp') '-o' $privatePageTest
+if ($LASTEXITCODE -ne 0) { throw 'Private-page memory test compilation failed.' }
+& $privatePageTest
+if ($LASTEXITCODE -ne 0) { throw 'Private-page memory test failed.' }
+$imagePageTest = Join-Path $outputDirectory 'image-page-memory-test.exe'
+& $compiler @common '-DTAXI_LOCAL_MEMORY_TESTING' (Join-Path $repoRoot 'src/camera/local_memory.cpp') `
+    (Join-Path $PSScriptRoot 'image_page_memory_test.cpp') '-o' $imagePageTest
+if ($LASTEXITCODE -ne 0) { throw 'Image-page memory test compilation failed.' }
+& $imagePageTest
+if ($LASTEXITCODE -ne 0) { throw 'Image-page memory test failed.' }
+$writableSpanTest = Join-Path $outputDirectory 'writable-span-memory-test.exe'
+& $compiler @common '-DTAXI_LOCAL_MEMORY_TESTING' (Join-Path $repoRoot 'src/camera/local_memory.cpp') `
+    (Join-Path $PSScriptRoot 'writable_span_memory_test.cpp') '-o' $writableSpanTest
+if ($LASTEXITCODE -ne 0) { throw 'Writable-span memory test compilation failed.' }
+& $writableSpanTest
+if ($LASTEXITCODE -ne 0) { throw 'Writable-span memory test failed.' }
 & (Join-Path $repoRoot 'tests/camera/ownership_test.ps1')
 & (Join-Path $repoRoot 'tests/camera/validate-abi.ps1')
 $scheduleTest = Join-Path $outputDirectory 'render-schedule-test.exe'
@@ -87,7 +107,11 @@ $runtimeSources = @(
     'src/camera/code_contract.cpp',
     'src/camera/source_view.cpp',
     'src/camera/activation_mask.cpp',
-    'src/camera/verified_profile.cpp',
+    'src/camera/camera_contract.cpp',
+    'src/camera/camera_contract_model.cpp',
+    'src/camera/relocatable_contract.cpp',
+    'src/camera/rtti_vtables.cpp',
+    'tools/diagnostics/image_inventory.cpp',
     'src/camera/view_resize.cpp',
     'src/camera/view_aa.cpp',
     'src/camera/aircraft_inventory.cpp',

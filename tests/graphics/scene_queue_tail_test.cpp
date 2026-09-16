@@ -3,8 +3,8 @@
 #include "scene_capture_manager_test.cpp"
 #undef main
 #include <future>
-#include "../../src/hooks/queue_submit_observer.hpp"
 #include "../../src/graphics/native_device_identity.hpp"
+#include "../../src/hooks/queue_submit_observer.hpp"
 
 namespace {
 namespace submission_lock_fixture {
@@ -18,7 +18,10 @@ struct Queue {
   unsigned waits = 0, signals = 0;
   bool future_wait = false;
 };
-HRESULT STDMETHODCALLTYPE identity(void* self, REFIID, void** result) {
+HRESULT STDMETHODCALLTYPE identity(void* self, REFIID iid, void** result) {
+  *result = nullptr;
+  if (iid != __uuidof(IUnknown))
+    return E_NOINTERFACE;
   *result = self;
   return S_OK;
 }
@@ -155,6 +158,7 @@ class SourceLifetimeMarker final : public IUnknown {
     }
     return remaining;
   }
+
  private:
   std::atomic<ULONG> references_{1};
   std::atomic<unsigned>& deaths_;
@@ -206,12 +210,18 @@ void tail_after(void* opaque, ID3D12CommandQueue* queue, std::uint64_t receipt) 
 void tail_refused(void* opaque, ID3D12CommandQueue* queue, taxi_camera::engine_hook::queue_submit::Refusal reason) noexcept {
   static_cast<TailQueueContext*>(opaque)->manager->submission_refused(queue, reason);
 }
-void tail_legacy(void* context, ID3D12GraphicsCommandList* list, std::uint64_t generation,
-                 const D3D12_RESOURCE_BARRIER& value, std::uint32_t) noexcept {
+void tail_legacy(void* context,
+                 ID3D12GraphicsCommandList* list,
+                 std::uint64_t generation,
+                 const D3D12_RESOURCE_BARRIER& value,
+                 std::uint32_t) noexcept {
   static_cast<TailContext*>(context)->manager->observe_source_legacy(list, generation, value);
 }
-void tail_enhanced(void* context, ID3D12GraphicsCommandList7* list, std::uint64_t generation,
-                   const D3D12_TEXTURE_BARRIER& value, std::uint32_t) noexcept {
+void tail_enhanced(void* context,
+                   ID3D12GraphicsCommandList7* list,
+                   std::uint64_t generation,
+                   const D3D12_TEXTURE_BARRIER& value,
+                   std::uint32_t) noexcept {
   static_cast<TailContext*>(context)->manager->observe_source_enhanced(list, generation, value);
 }
 void tail_draw(void* context, ID3D12GraphicsCommandList* list, std::uint64_t generation, bool allowed) noexcept {
@@ -274,7 +284,8 @@ void tail_run(bool warp_requested, bool enhanced, bool born_render_target) {
   callbacks.observe_legacy = tail_legacy;
   callbacks.observe_enhanced = tail_enhanced;
   callbacks.after_draw = tail_draw;
-  callbacks.recording_invalidated = [](void* raw, ID3D12GraphicsCommandList* native, std::uint64_t generation, std::uint32_t reasons) noexcept {
+  callbacks.recording_invalidated = [](void* raw, ID3D12GraphicsCommandList* native, std::uint64_t generation,
+                                       std::uint32_t reasons) noexcept {
     static_cast<TailContext*>(raw)->manager->invalidate_source_recording(native, generation, true, reasons);
   };
   require(Boundary::register_list(producer.list.p, Generation, callbacks).ready, "Register actual native draw/barrier observer");
@@ -334,13 +345,14 @@ void tail_run(bool warp_requested, bool enhanced, bool born_render_target) {
       desc1.SampleDesc = desc.SampleDesc;
       desc1.Format = desc.Format;
       desc1.Flags = desc.Flags;
-      check(device10->CreateCommittedResource3(&default_heap, D3D12_HEAP_FLAG_NONE, &desc1, D3D12_BARRIER_LAYOUT_RENDER_TARGET,
-                                               nullptr, nullptr, 0, nullptr, IID_PPV_ARGS(sources[feed].put())),
+      check(device10->CreateCommittedResource3(&default_heap, D3D12_HEAP_FLAG_NONE, &desc1, D3D12_BARRIER_LAYOUT_RENDER_TARGET, nullptr,
+                                               nullptr, 0, nullptr, IID_PPV_ARGS(sources[feed].put())),
             "Create persistent source directly in enhanced RT layout");
     } else {
       check(device->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE, &desc,
-                                            born_render_target ? D3D12_RESOURCE_STATE_RENDER_TARGET : D3D12_RESOURCE_STATE_COMMON,
-                                            nullptr, IID_PPV_ARGS(sources[feed].put())), "Create persistent tail source");
+                                            born_render_target ? D3D12_RESOURCE_STATE_RENDER_TARGET : D3D12_RESOURCE_STATE_COMMON, nullptr,
+                                            IID_PPV_ARGS(sources[feed].put())),
+            "Create persistent tail source");
     }
     auto* marker = new SourceLifetimeMarker(queue_context->source_deaths);
     const GUID lifetime_id{0xe7bd8641, 0xea37, 0x451c, {0x8f, 0x64, 0x46, 0xe4, 0x8a, 0x39, 0x22, 0x80}};
@@ -348,8 +360,10 @@ void tail_run(bool warp_requested, bool enhanced, bool born_render_target) {
     marker->Release();
     handoff->register_resource(DeviceKey, reinterpret_cast<std::uint64_t>(sources[feed].p), ids[feed]);
     const auto initial_model = !born_render_target ? taxi_camera::source_state::Model::unknown
-                               : enhanced ? taxi_camera::source_state::Model::enhanced_rt : taxi_camera::source_state::Model::legacy_rt;
-    require(manager->register_source_candidate(DeviceKey, sources[feed].p, ids[feed], desc, initial_model), "Register exact pane candidate");
+                               : enhanced          ? taxi_camera::source_state::Model::enhanced_rt
+                                                   : taxi_camera::source_state::Model::legacy_rt;
+    require(manager->register_source_candidate(DeviceKey, sources[feed].p, ids[feed], desc, initial_model),
+            "Register exact pane candidate");
     handles[feed].ptr = rtvs->GetCPUDescriptorHandleForHeapStart().ptr + feed * rtv_stride;
     device->CreateRenderTargetView(sources[feed].p, nullptr, handles[feed]);
     device->GetCopyableFootprints(&desc, 0, 1, 0, &footprints[feed], nullptr, nullptr, &readback_bytes[feed]);
@@ -361,7 +375,8 @@ void tail_run(bool warp_requested, bool enhanced, bool born_render_target) {
     buffer.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
     const auto readback_heap = heap(D3D12_HEAP_TYPE_READBACK);
     check(device->CreateCommittedResource(&readback_heap, D3D12_HEAP_FLAG_NONE, &buffer, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
-                                          IID_PPV_ARGS(readbacks[feed].put())), "Create tail test readback");
+                                          IID_PPV_ARGS(readbacks[feed].put())),
+          "Create tail test readback");
     // This actual initial barrier runs BEFORE publication and capture enable.
     if (born_render_target) {
       // No transition is emitted anywhere before these resources' first draw.
@@ -375,10 +390,12 @@ void tail_run(bool warp_requested, bool enhanced, bool born_render_target) {
   {
     const auto desc = sources[0]->GetDesc();
     const auto default_heap = heap(D3D12_HEAP_TYPE_DEFAULT);
-    check(device->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_RENDER_TARGET,
-                                          nullptr, IID_PPV_ARGS(unrelated_source.put())), "Create unrelated pane-sized pass target");
+    check(device->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr,
+                                          IID_PPV_ARGS(unrelated_source.put())),
+          "Create unrelated pane-sized pass target");
     require(manager->register_source_candidate(DeviceKey, unrelated_source.p, UnrelatedGeneration, desc,
-                                               taxi_camera::source_state::Model::legacy_rt), "Register unrelated pass target");
+                                               taxi_camera::source_state::Model::legacy_rt),
+            "Register unrelated pass target");
   }
   check(producer.list->Close(), "Close initial state recording");
   ID3D12CommandList* original = producer.list.p;
@@ -393,11 +410,10 @@ void tail_run(bool warp_requested, bool enhanced, bool born_render_target) {
   manager->begin_source_tracking();
   DrawFixture draw;
   draw.initialize(device.p, DXGI_FORMAT_R11G11B10_FLOAT);
-  constexpr float colors[2][2][4] = {
-      {{0.25f, 0.5f, 0.75f, 1}, {2, 4, 0.125f, 1}}, {{1, 0, 0.5f, 1}, {0.125f, 1, 2, 1}}};
-  constexpr std::array<std::array<std::uint32_t, 2>, 2> words{{
-      {0x340u | (0x380u << 11) | (0x1d0u << 22), 0x400u | (0x440u << 11) | (0x180u << 22)},
-      {0x3c0u | (0x1c0u << 22), 0x300u | (0x3c0u << 11) | (0x200u << 22)}}};
+  constexpr float colors[2][2][4] = {{{0.25f, 0.5f, 0.75f, 1}, {2, 4, 0.125f, 1}}, {{1, 0, 0.5f, 1}, {0.125f, 1, 2, 1}}};
+  constexpr std::array<std::array<std::uint32_t, 2>, 2> words{
+      {{0x340u | (0x380u << 11) | (0x1d0u << 22), 0x400u | (0x440u << 11) | (0x180u << 22)},
+       {0x3c0u | (0x1c0u << 22), 0x300u | (0x3c0u << 11) | (0x200u << 22)}}};
   std::uint64_t checked_pixels = 0;
   for (unsigned frame = 0; frame < 3; ++frame) {
     Sleep(70);  // Production15..20Hz cap also applies to this real GPU fixture.
@@ -436,14 +452,18 @@ void tail_run(bool warp_requested, bool enhanced, bool born_render_target) {
     auto* queue = frame == 1 ? second_queue.queue.p : producer.queue.p;
     queue_context->reset_after_execute = frame == 0;
     queue->ExecuteCommandLists(1, &original);  // Frame2 replays exact closed frame1.
-    require(manager->device(DeviceKey)->source_states.state({reinterpret_cast<std::uint64_t>(unrelated_source.p), UnrelatedGeneration}).model ==
-                taxi_camera::source_state::Model::other,
-            "Scoped target invalidation was not applied to its exact source");
+    require(
+        manager->device(DeviceKey)->source_states.state({reinterpret_cast<std::uint64_t>(unrelated_source.p), UnrelatedGeneration}).model ==
+            taxi_camera::source_state::Model::other,
+        "Scoped target invalidation was not applied to its exact source");
     require(!queue_context->reset_failed && queue_context->receipt_lease_proven,
             "Receipt failed to retain actual sources across Reset and application reference release");
     std::array<Manager::Frame, 2> frames{};
     std::size_t frame_count = 0;
-    wait([&] { frame_count += manager->poll_completed_frames(frames.data() + frame_count, frames.size() - frame_count); return frame_count == 2; });
+    wait([&] {
+      frame_count += manager->poll_completed_frames(frames.data() + frame_count, frames.size() - frame_count);
+      return frame_count == 2;
+    });
     if (frame) {
       check(consumer.allocator->Reset(), "Reset completed consumer allocator");
       check(consumer.list->Reset(consumer.allocator.p, nullptr), "Reset consumer list");
@@ -477,8 +497,10 @@ void tail_run(bool warp_requested, bool enhanced, bool born_render_target) {
       for (UINT y = 0; y < heights[feed]; ++y)
         for (UINT x = 0; x < width; ++x) {
           std::uint32_t pixel = 0;
-          std::memcpy(&pixel, static_cast<const std::uint8_t*>(mapped) + footprints[feed].Offset +
-                               UINT64(y) * footprints[feed].Footprint.RowPitch + x * 4, 4);
+          std::memcpy(
+              &pixel,
+              static_cast<const std::uint8_t*>(mapped) + footprints[feed].Offset + UINT64(y) * footprints[feed].Footprint.RowPitch + x * 4,
+              4);
           require(pixel == words[frame == 0 ? 0 : 1][feed], "Tail snapshot is not the last actual draw's packed RGB");
           ++checked_pixels;
         }

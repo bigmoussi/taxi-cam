@@ -4,15 +4,17 @@
 
 namespace taxi_camera::native_camera {
 
-ActivationMaskInventory inspect_activation_disable_mask(discovery::ImageReader& reader, const discovery::Inventory& image) {
+ActivationMaskInventory inspect_activation_disable_mask(discovery::ImageReader& reader,
+                                                        const discovery::Inventory& image,
+                                                        const CameraImageLayout& layout) {
   ActivationMaskInventory result;
-  constexpr std::uint32_t rva = 130434096;
+  const auto rva = layout.activation_disable_mask;
   constexpr std::uint32_t size = 16;
   constexpr std::uint32_t required = 0x40000000;
   constexpr std::uint32_t excluded = 0xa2000000;
-  if (!image.valid_image || image.machine != 0x8664 || image.image_size == 0 || image.image_size > 0x80000000u ||
-      image.section_count == 0 || image.section_count > 96 || image.sections.empty() || image.sections.size() > image.section_count ||
-      rva > image.image_size || size > image.image_size - rva) {
+  if (!camera_layout_detail::image_rva(rva, size, 8) || !image.valid_image || image.machine != 0x8664 || image.image_size == 0 ||
+      image.image_size > 0x80000000u || image.section_count == 0 || image.section_count > 96 || image.sections.empty() ||
+      image.sections.size() > image.section_count || rva > image.image_size || size > image.image_size - rva) {
     result.error = "The activation-mask image metadata or bounds are invalid.";
     return result;
   }

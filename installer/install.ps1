@@ -89,7 +89,19 @@ if (Test-Path -LiteralPath $previousRecordPath) {
     # Older records predate optional startup and always owned their exe.xml entry.
     if ($previousRecord.PSObject.Properties['startupPaths']) { $startupPaths = @($previousRecord.startupPaths) }
     elseif ($previousRecord.exeXml) { $startupPaths = @($previousRecord.exeXml) }
-    if (-not $ExeXml) { $ExeXml = $previousRecord.exeXml }
+    # A Store installation's remembered XML must not follow an upgrade that
+    # selects a different simulator, such as Steam. Keep ambiguous discovery
+    # explicit rather than silently configuring the previous simulator.
+    $sameSimulator = $false
+    if ($previousRecord.PSObject.Properties['simulator'] -and $previousRecord.simulator) {
+        try {
+            $sameSimulator = [IO.Path]::IsPathRooted($previousRecord.simulator) -and
+                [IO.Path]::GetFullPath($previousRecord.simulator) -eq [IO.Path]::GetFullPath($simExe)
+        } catch { $sameSimulator = $false }
+    }
+    if (-not $ExeXml -and $sameSimulator) {
+        $ExeXml = $previousRecord.exeXml
+    }
     if ($previousRecord.legacyBackup -and (Test-Path -LiteralPath $previousRecord.legacyBackup -PathType Leaf) -and
         (Split-Path -Parent $previousRecord.legacyBackup) -eq $sim -and
         (Split-Path -Leaf $previousRecord.legacyBackup) -like 'taxi-camera-native.addon64.disabled-native-*') {
@@ -130,7 +142,7 @@ if ($StartupMode -eq 'Automatic') {
         $ExeXml = [IO.Path]::GetFullPath($ExeXml)
         if ([IO.Path]::GetFileName($ExeXml) -ine 'exe.xml') { throw 'Startup target must be named exe.xml.' }
         $hash = if (Test-Path -LiteralPath $ExeXml) { (Get-FileHash -LiteralPath $ExeXml).Hash } else { '' }
-        $document = Read-TaxiLaunchXml $ExeXml
+        $document = Read-TaxiLaunchXml $ExeXml -RepairLaunchHeader
         $globalDisabled = $document.DocumentElement.SelectSingleNode('Disabled')
         $globalManual = $document.DocumentElement.SelectSingleNode('Launch.ManualLoad')
         if (($globalDisabled -and $globalDisabled.InnerText -ieq 'True') -or
@@ -204,7 +216,7 @@ try {
     }
     if ($startupReady) {
         try {
-            $xmlBackup = Save-TaxiLaunchXml $document $ExeXml $hash ([ref]$xmlWrittenHash)
+            $xmlBackup = Save-TaxiLaunchXml $document $ExeXml $hash ([ref]$xmlWrittenHash) -RequireVisiblePath
             $xmlWritten = $true
             $writtenHashes[$ExeXml] = $xmlWrittenHash
             $startupPaths = @(@($startupPaths) + @($ExeXml) | Select-Object -Unique)
