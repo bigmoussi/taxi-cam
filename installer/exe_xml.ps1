@@ -45,6 +45,7 @@ function Save-TaxiLaunchXml([Xml.XmlDocument]$Document,[string]$Path,[string]$Ex
     $parent = Split-Path -Parent $absolute
     $temporary = $null
     $backup = $null
+    $backupVerified = $false
     $encrypted = $null
     $committed = $false
     $operation = 'Prepare startup directory'
@@ -99,6 +100,7 @@ function Save-TaxiLaunchXml([Xml.XmlDocument]$Document,[string]$Path,[string]$Ex
             if ($encrypted -and ([IO.File]::GetAttributes($backup) -band [IO.FileAttributes]::Encrypted) -eq 0) {
                 throw 'Could not preserve exe.xml encryption on the backup file.'
             }
+            $backupVerified = $true
             $operation = 'Verify original startup file before replacement'
             $operationDestination = $absolute
             if ((Get-FileHash -LiteralPath $absolute).Hash -ne $ExpectedHash) { throw (New-TaxiStartupConflict 'exe.xml changed before replacement.') }
@@ -125,6 +127,22 @@ function Save-TaxiLaunchXml([Xml.XmlDocument]$Document,[string]$Path,[string]$Ex
         $failure.Exception.Data['TaxiStartupOperation'] = $operation
         $failure.Exception.Data['TaxiStartupSource'] = $operationSource
         $failure.Exception.Data['TaxiStartupDestination'] = $operationDestination
+        if ($backup -and -not $backupVerified) {
+            try {
+                # Copy can leave partial or plaintext data even when it fails.
+                # Delete only this invocation's unverified backup before fallback.
+                # File.Delete also handles short paths and a missing file safely.
+                [IO.File]::Delete($backup)
+            } catch {
+                $cleanupFailure = [InvalidOperationException]::new(
+                    "Could not remove unverified startup backup '$backup': $($_.Exception.Message)", $failure.Exception)
+                $cleanupFailure.Data['TaxiStartupUnsafe'] = $true
+                $cleanupFailure.Data['TaxiStartupOperation'] = 'Remove unverified startup backup'
+                $cleanupFailure.Data['TaxiStartupSource'] = $backup
+                $cleanupFailure.Data['TaxiStartupDestination'] = $backup
+                throw $cleanupFailure
+            }
+        }
         if (-not $failure.Exception.Data['TaxiStartupConflict']) {
             $unchanged = $false
             if (-not $committed) {
@@ -142,7 +160,8 @@ function Save-TaxiLaunchXml([Xml.XmlDocument]$Document,[string]$Path,[string]$Ex
         throw $failure
     } finally {
         # Cleanup is best effort and cannot turn an already committed write into
-        # a recoverable startup error. Verified sibling backups remain available.
+        # a recoverable startup error. Only verified sibling backups are retained;
+        # failed backup cleanup above must prevent the manual-startup fallback.
         if ($temporary -and [IO.File]::Exists($temporary)) {
             try { Remove-Item -LiteralPath $temporary -ErrorAction Stop } catch { }
         }

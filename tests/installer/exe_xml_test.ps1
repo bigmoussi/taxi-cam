@@ -64,6 +64,15 @@ function Copy-Item {
         switch ($script:copyFailure) {
             'encryption' { throw [ComponentModel.Win32Exception]::new(6000) }
             'permission' { throw [UnauthorizedAccessException]::new('Fixture denies the backup operation.') }
+            'partial-backup' {
+                [IO.File]::WriteAllText($Destination, '<SimBase.Document')
+                throw [ComponentModel.Win32Exception]::new(6000)
+            }
+            'cleanup-failure' {
+                [IO.File]::WriteAllText($Destination, '<SimBase.Document')
+                [IO.File]::SetAttributes($Destination, [IO.FileAttributes]::ReadOnly)
+                throw [ComponentModel.Win32Exception]::new(6000)
+            }
             'changed-source' {
                 [IO.File]::AppendAllText($LiteralPath, '<!-- concurrent edit during failed backup -->')
                 throw [ComponentModel.Win32Exception]::new(6000)
@@ -74,7 +83,7 @@ function Copy-Item {
     Microsoft.PowerShell.Management\Copy-Item -LiteralPath $LiteralPath -Destination $Destination
 }
 try {
-    foreach ($kind in @('encryption','permission')) {
+    foreach ($kind in @('encryption','permission','partial-backup')) {
         $script:copyFailure = $kind
         $failure = $null; $writtenHash = 'not committed'
         try { Save-TaxiLaunchXml $failureDocument $failurePath $failureHash ([ref]$writtenHash) } catch { $failure = $_ }
@@ -87,11 +96,27 @@ try {
         }
         if ($writtenHash -or (Get-FileHash -LiteralPath $failurePath).Hash -ne $failureHash) { throw "Failed $kind backup changed the original XML or reported a commit." }
         if (@(Get-ChildItem -LiteralPath $failureRoot -Filter 'exe.xml.taxi-*.tmp').Count) { throw "Failed $kind backup left temporary XML." }
+        if (@(Get-ChildItem -LiteralPath $failureRoot -Filter 'exe.xml.taxi-backup-*').Count) { throw "Failed $kind backup left an unverified copy." }
     }
     $script:copyFailure = 'corrupt-backup'; $failure = $null
     try { Save-TaxiLaunchXml $failureDocument $failurePath $failureHash } catch { $failure = $_ }
     if (-not $failure -or -not $failure.Exception.Data['TaxiStartupConflict']) { throw 'Backup verification failure did not retain the conflict guard.' }
     if ((Get-FileHash -LiteralPath $failurePath).Hash -ne $failureHash) { throw 'Bad backup changed the original XML.' }
+    if (@(Get-ChildItem -LiteralPath $failureRoot -Filter 'exe.xml.taxi-backup-*').Count) { throw 'Hash-mismatched backup was retained.' }
+
+    $script:copyFailure = 'cleanup-failure'; $failure = $null
+    try {
+        try { Save-TaxiLaunchXml $failureDocument $failurePath $failureHash } catch { $failure = $_ }
+        if (-not $failure -or -not $failure.Exception.Data['TaxiStartupUnsafe']) { throw 'Unverified backup cleanup failure was allowed to fall back to manual startup.' }
+        $remaining = @(Get-ChildItem -LiteralPath $failureRoot -Filter 'exe.xml.taxi-backup-*')
+        if ($remaining.Count -ne 1 -or -not $failure.Exception.Message.Contains($remaining[0].FullName)) { throw 'Cleanup failure did not identify the retained unverified backup.' }
+        if ((Get-FileHash -LiteralPath $failurePath).Hash -ne $failureHash) { throw 'Cleanup failure changed the original XML.' }
+    } finally {
+        foreach ($item in @(Get-ChildItem -LiteralPath $failureRoot -Filter 'exe.xml.taxi-backup-*')) {
+            [IO.File]::SetAttributes($item.FullName, [IO.FileAttributes]::Normal)
+            [IO.File]::Delete($item.FullName)
+        }
+    }
 
     $script:copyFailure = 'changed-source'; $failure = $null
     try { Save-TaxiLaunchXml $failureDocument $failurePath $failureHash } catch { $failure = $_ }
@@ -99,6 +124,37 @@ try {
     if (-not [IO.File]::ReadAllText($failurePath).Contains('<!-- concurrent edit during failed backup -->')) { throw 'Failure handler erased another writer''s XML edit.' }
     if (@(Get-ChildItem -LiteralPath $failureRoot -Filter 'exe.xml.taxi-*.tmp').Count) { throw 'Failure paths left temporary XML.' }
 } finally { Remove-Item Function:\Copy-Item }
+
+# Simulate the EFS attribute/encryption calls in a private copy of the helper.
+# The backup copy succeeds with matching bytes but without its expected EFS flag.
+# No personal EFS key or encrypted fixture is created by this default test.
+[IO.File]::WriteAllText($failurePath, $failureContents)
+& {
+    $helper = Get-Content -Raw -LiteralPath (Join-Path $repoRoot 'installer/exe_xml.ps1')
+    foreach ($argument in @('$absolute','$temporary','$backup')) {
+        $call = '[IO.File]::GetAttributes(' + $argument + ')'
+        if (-not $helper.Contains($call)) { throw 'The simulated encryption attribute hook no longer matches.' }
+        $helper = $helper.Replace($call, ('(Get-FixtureAttributes ' + $argument + ')'))
+    }
+    $encryptCall = '[IO.File]::Encrypt($temporary)'
+    if (-not $helper.Contains($encryptCall)) { throw 'The simulated encryption operation hook no longer matches.' }
+    $helper = $helper.Replace($encryptCall, 'Set-FixtureEncryption $temporary')
+    . ([scriptblock]::Create($helper))
+    $encryptedPaths = @{$failurePath = $true}
+    function Get-FixtureAttributes([string]$Path) {
+        $attributes = [IO.File]::GetAttributes($Path)
+        if ($encryptedPaths.ContainsKey($Path)) { return $attributes -bor [IO.FileAttributes]::Encrypted }
+        return $attributes
+    }
+    function Set-FixtureEncryption([string]$Path) { $encryptedPaths[$Path] = $true }
+    $failure = $null; $writtenHash = 'not committed'
+    try { Save-TaxiLaunchXml $failureDocument $failurePath $failureHash ([ref]$writtenHash) } catch { $failure = $_ }
+    if (-not $failure -or $failure.Exception.Message -ne 'Could not preserve exe.xml encryption on the backup file.') { throw 'The encryption-mismatched backup fixture did not reach verification.' }
+    if ($failure.Exception.Data['TaxiStartupUnsafe'] -or $failure.Exception.Data['TaxiStartupConflict']) { throw 'Successful unverified backup cleanup blocked safe manual startup.' }
+    if ($writtenHash -or (Get-FileHash -LiteralPath $failurePath).Hash -ne $failureHash) { throw 'Encryption-mismatched backup changed the original XML or reported a commit.' }
+    if (@(Get-ChildItem -LiteralPath $failureRoot -Filter 'exe.xml.taxi-backup-*').Count) { throw 'Encryption-mismatched backup left an unencrypted copy.' }
+    if (@(Get-ChildItem -LiteralPath $failureRoot -Filter 'exe.xml.taxi-*.tmp').Count) { throw 'Encryption-mismatched backup left temporary XML.' }
+}
 
 # A real access-denied replacement, after a verified backup exists, is still safe
 # to downgrade only when the original bytes and encryption remain unchanged.
@@ -122,7 +178,7 @@ Set-TaxiStartupEntry $newDocument 'C:\Native Camera\taxi-cam.exe' 'C:\MSFS\Fligh
 $writtenHash = ''
 $newBackup = Save-TaxiLaunchXml $newDocument $newPath '' ([ref]$writtenHash)
 if ($newBackup -or $writtenHash -ne (Get-FileHash -LiteralPath $newPath).Hash) { throw 'New-file transaction ownership is incorrect.' }
-Write-Output 'PASS exe.xml failure resilience: encryption error 6000 and access denial preserve original, typed conflicts, unsafe-state detection, exact committed hashes, temporary cleanup and retained verified backups.'
+Write-Output 'PASS exe.xml failure resilience: encryption error 6000 and access denial preserve original, partial/hash/encryption-mismatched backups removed, cleanup failure blocks fallback, typed conflicts, exact committed hashes and retained verified backups.'
 
 # Real EFS coverage is opt-in through tests/installer/test-encryption.ps1 -RunEfsFixture.
 # That fixture requires an existing EFS key; this default test must not cause

@@ -231,6 +231,10 @@ Assert-That ($originalHelper.Contains($copyXmlBackup)) 'The encrypted-backup fau
 $faultMarker = Join-Path (Split-Path -Parent $xmlPath) 'inject-encryption-failure'
 $injectedCopy = @'
 if (Test-Path -LiteralPath (Join-Path (Split-Path -Parent $absolute) 'inject-encryption-failure')) {
+            [IO.File]::WriteAllText($backup, '<SimBase.Document')
+            if ([IO.File]::ReadAllText((Join-Path (Split-Path -Parent $absolute) 'inject-encryption-failure')).Contains('deny-cleanup')) {
+                [IO.File]::SetAttributes($backup, [IO.FileAttributes]::ReadOnly)
+            }
             throw [ComponentModel.Win32Exception]::new(6000, 'Injected encrypted XML backup failure (Windows error 6000).')
         }
         Copy-Item -LiteralPath $absolute -Destination $backup
@@ -247,6 +251,7 @@ $encryptionFixture = Join-Path $testRoot 'encryption-setup.exe'
 $encryptionApp = Join-Path $testRoot 'encryption-app'
 $xml | Set-Content -LiteralPath $xmlPath
 $xmlHash = (Get-FileHash -LiteralPath $xmlPath).Hash
+$backupsBeforeFailure = @(Get-ChildItem -LiteralPath (Split-Path -Parent $xmlPath) -Filter 'exe.xml.taxi-backup-*' | ForEach-Object FullName)
 'Enable private fixture fault' | Set-Content -LiteralPath $faultMarker
 try {
     $encryptionLog = Join-Path $testRoot 'encryption-install.log'
@@ -256,6 +261,8 @@ try {
         Assert-That ((Get-FileHash -LiteralPath (Join-Path $encryptionApp $name)).Hash -eq $receipt.files.PSObject.Properties[$name].Value) "Encrypted XML fallback did not install the verified $name."
     }
     Assert-That ((Get-FileHash -LiteralPath $xmlPath).Hash -eq $xmlHash) 'Encrypted XML fallback changed the existing startup configuration.'
+    $backupsAfterFailure = @(Get-ChildItem -LiteralPath (Split-Path -Parent $xmlPath) -Filter 'exe.xml.taxi-backup-*' | ForEach-Object FullName)
+    Assert-That ($backupsAfterFailure.Count -eq $backupsBeforeFailure.Count -and @($backupsAfterFailure | Where-Object { $_ -notin $backupsBeforeFailure }).Count -eq 0) 'Manual-startup fallback retained a partial backup or removed a previous verified backup.'
     $encryptionRecord = Get-Content -Raw -LiteralPath (Join-Path $encryptionApp 'installation.json') | ConvertFrom-Json
     Assert-That ($encryptionRecord.startupRequested -eq 'automatic' -and $encryptionRecord.startupStatus -eq 'manual' -and -not $encryptionRecord.startupUpdated) 'Encrypted XML fallback did not record automatic intent and manual-launch status.'
     Assert-That (@($encryptionRecord.startupPaths).Count -eq 0) 'Encrypted XML fallback claimed ownership of unchanged startup configuration.'
@@ -264,6 +271,26 @@ try {
     Assert-That ($setupLog.Contains('Taxi Cam startup notice:')) 'Silent setup did not log its startup warning.'
     $diagnostics = Get-Content -Raw -LiteralPath (Join-Path $encryptionApp 'setup-diagnostics.log')
     Assert-That ($diagnostics.Contains($xmlPath) -and $diagnostics.Contains('6000')) 'Encrypted XML diagnostics omitted the failing path or Windows error.'
+
+    # Failure to remove an unverified copy must stop installation, even when the
+    # original XML is intact. Keep this lock simulation inside the fixture only.
+    'deny-cleanup' | Set-Content -LiteralPath $faultMarker
+    try {
+        $cleanupApp = Join-Path $testRoot 'backup-cleanup-failure-app'
+        $cleanupLog = Join-Path $testRoot 'backup-cleanup-failure.log'
+        $exitCode = Invoke-Setup $encryptionFixture $cleanupApp $cleanupLog -Paths
+        Assert-That ($exitCode -ne 0) 'Unverified backup cleanup failure incorrectly completed installation.'
+        Assert-That (-not (Test-Path -LiteralPath (Join-Path $cleanupApp 'taxi-cam.exe'))) 'Unverified backup cleanup failure did not roll back the application.'
+        Assert-That ((Get-FileHash -LiteralPath $xmlPath).Hash -eq $xmlHash) 'Unverified backup cleanup failure changed the original XML.'
+        $unverified = @(Get-ChildItem -LiteralPath (Split-Path -Parent $xmlPath) -Filter 'exe.xml.taxi-backup-*' | Where-Object { $_.FullName -notin $backupsBeforeFailure })
+        Assert-That ($unverified.Count -eq 1 -and (Get-Content -Raw -LiteralPath $cleanupLog).Contains($unverified[0].FullName)) 'Cleanup failure omitted the unverified backup path from the setup log.'
+    } finally {
+        foreach ($item in @(Get-ChildItem -LiteralPath (Split-Path -Parent $xmlPath) -Filter 'exe.xml.taxi-backup-*' | Where-Object { $_.FullName -notin $backupsBeforeFailure })) {
+            [IO.File]::SetAttributes($item.FullName, [IO.FileAttributes]::Normal)
+            [IO.File]::Delete($item.FullName)
+        }
+        'Enable private fixture fault' | Set-Content -LiteralPath $faultMarker
+    }
 
     $cancelledApp = Join-Path $testRoot 'encryption-cancelled-app'
     $exitCode = Invoke-Setup (Join-Path $testRoot 'encryption-rollback-setup.exe') $cancelledApp (Join-Path $testRoot 'encryption-cancelled.log') -Paths
@@ -455,7 +482,7 @@ if ($shortLength -gt 0 -and $shortLength -lt $shortBuffer.Capacity -and $shortPa
 }
 Write-Output "Short-path install and rollback: $shortPathResult"
 
-[ordered]@{passed=$true;installerSha256=$receipt.installerSha256;shortPathValidation=$shortPathResult;tests=@('exact production rejection','missing SimConnect refused before application and startup writes','isolated first install preserves known current and legacy settings','remembered upgrade paths and former name migration','calibration preservation','post-transaction Setup reset rollback restores settings, mount, former executable and startup','retry after rename rollback','default uninstall keeps settings','opt-in reset installs packaged defaults and preserves unknown files/logs','opt-in uninstall removes known settings and mount but preserves unknown files/logs','retained installation receipt prevents legacy calibration resurrection on default-keep reinstall','encrypted XML backup falls back to manual launch with diagnostics','outer rollback after encrypted XML fallback preserves startup','startup fallback permits requested settings reset and cancellation restores settings and calibration','automatic retry after encrypted XML fallback','upgrade fallback preserves existing startup ownership','manual preference preserves prior automatic startup','manual install upgrade and uninstall without XML selection','globally disabled startup falls back without XML changes','post-native journal failure rolls back from in-memory transaction','inner concurrent XML edit preserved','post-transaction concurrent XML edit preserved with recovery snapshot and sibling XML backup');simulatorVerified=$false} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $testRoot 'result.json') -Encoding utf8
+[ordered]@{passed=$true;installerSha256=$receipt.installerSha256;shortPathValidation=$shortPathResult;tests=@('exact production rejection','missing SimConnect refused before application and startup writes','isolated first install preserves known current and legacy settings','remembered upgrade paths and former name migration','calibration preservation','post-transaction Setup reset rollback restores settings, mount, former executable and startup','retry after rename rollback','default uninstall keeps settings','opt-in reset installs packaged defaults and preserves unknown files/logs','opt-in uninstall removes known settings and mount but preserves unknown files/logs','retained installation receipt prevents legacy calibration resurrection on default-keep reinstall','partial encrypted XML backup is removed before manual fallback with diagnostics','unverified backup cleanup failure blocks fallback and rolls back application','outer rollback after encrypted XML fallback preserves startup','startup fallback permits requested settings reset and cancellation restores settings and calibration','automatic retry after encrypted XML fallback','upgrade fallback preserves existing startup ownership','manual preference preserves prior automatic startup','manual install upgrade and uninstall without XML selection','globally disabled startup falls back without XML changes','post-native journal failure rolls back from in-memory transaction','inner concurrent XML edit preserved','post-transaction concurrent XML edit preserved with recovery snapshot and sibling XML backup');simulatorVerified=$false} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $testRoot 'result.json') -Encoding utf8
 Write-Output "Installer checks passed: $testRoot"
 } finally {
     $env:LOCALAPPDATA = $savedLocalAppData
