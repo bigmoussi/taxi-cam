@@ -1,6 +1,6 @@
-# Windows builds and manual releases
+# Windows builds and approved releases
 
-The [Windows build workflow](../.github/workflows/release.yml) runs on pushes to `main` that change application source, tests, diagnostic tools, installer or CI code, the root build scripts, dependency or version configuration, camera defaults, the project licence, bundled runtime notices, or the release workflow itself. A successful run retains a downloadable Windows x64 release candidate for checking. It does not publish a release.
+The [Windows build and release workflow](../.github/workflows/release.yml) runs on pushes to `main` that change application source, tests, diagnostic tools, installer or CI code, the root build scripts, dependency or version configuration, camera defaults, the project licence, bundled runtime notices, or the release workflow itself. A successful run retains a downloadable Windows x64 release candidate for checking. Publication waits for your approval in the same workflow run.
 
 README, documentation, issue-template and other repository-only changes do not trigger an automatic build. Markdown files and formatting/ignore files are excluded even inside the code directories. A push containing both documentation and a qualifying code change still runs. Keep the workflow's `paths` list current when adding a new build input outside the listed directories.
 
@@ -8,14 +8,15 @@ The build workflow can also be started manually from GitHub Actions. Only succes
 
 ## Download, check, then publish
 
-1. Open the completed **Windows build** run in GitHub Actions.
-2. Download `windows-release-<build-number>-attempt-<attempt>` from its Artifacts section. Extract it and use the setup EXE in `packages/` for your checks. The runtime ZIP is beside it; `native/` contains the validated binaries and receipt used to verify publication.
-3. Copy the **build run ID** and **build attempt** from the run summary. The run ID is the number in the Actions run URL, not the build number in the filename.
-4. Once satisfied, open **Publish Windows release**, select **Run workflow** on `main`, and enter those two values.
+1. Open the **Windows build and release** run in GitHub Actions. Wait for **Build and validate** to finish; **Publish release** will show **Waiting** for approval.
+2. Download `windows-release-<build-number>-attempt-<attempt>` from that run's Artifacts section. Extract it and test the setup EXE in `packages/`. The runtime ZIP is beside it; `native/` contains the validated binaries and receipt.
+3. Return to the same run and click **Review deployments**. Select **release**, then **Approve and deploy**.
 
-The [publication workflow](../.github/workflows/publish.yml) downloads that exact candidate and checks its original commit, build number and binary hashes before publishing to [GitHub Releases](https://github.com/rthoms334/taxi-cam/releases). It does not compile or repackage the application. A later merge does not change the selected candidate. No environment approval configuration is required; the manual dispatch is the publication step.
+The publish job downloads the exact candidate produced by the build job and checks its commit, build number and binary hashes before publishing to [GitHub Releases](https://github.com/rthoms334/taxi-cam/releases). It does not compile or repackage the application. There is no second workflow or run-ID form. If testing fails, reject the deployment or cancel the run.
 
-Candidates expire after 30 days. If a candidate is missing or expired, build and check a new one. Each rerun has a separate attempt number: publish the attempt you downloaded and checked.
+The `release` repository environment must have **Required reviewers** enabled with `rthoms334` as reviewer. **Prevent self-review** is disabled so you can approve your own builds, and administrator bypass is disabled. These settings live in **Settings > Environments > release**, not in YAML; keep them enabled to preserve the gate. GitHub pauses the publish job before starting its runner until approval is granted.
+
+Candidates expire after 30 days. If a candidate is missing or expired, build and check a new one. A full rerun creates a new candidate that needs checking and approval again. Rerunning only a failed publish job uses the original build job's artifact name, even though the workflow attempt number changes.
 
 ## Build pipeline
 
@@ -25,7 +26,7 @@ Candidates expire after 30 days. If a candidate is missing or expired, build and
 4. Test installation, rollback and package contents using isolated fixtures.
 5. Create the minimal runtime ZIP and compile the Windows installer with pinned Inno Setup.
 6. Test the installer using isolated fixtures and retain diagnostic artifacts.
-7. Retain a release candidate and show the inputs for the separate manual publication workflow.
+7. Retain a release candidate, then wait for approval before the publish job starts.
 
 The runner is `windows-2025`. Official actions are pinned to commit SHAs. The native compiler archive and Inno Setup compiler download are pinned in `dependencies.json` and verified before use.
 
@@ -87,12 +88,12 @@ Notes contain installation guidance, GPLv3 licence information, links to the exa
 
 ## Failures and reruns
 
-Build, validation or packaging failure prevents creation of a publishable candidate. Workflow artifacts retain logs and available package output for 30 days. The publication workflow also rejects unsuccessful attempts, other workflows and builds from branches other than `main`.
+Build, validation or packaging failure prevents creation of a publishable candidate. Workflow artifacts retain logs and available package output for 30 days. The publish job depends on a successful build and only runs from `main` after environment approval.
 
-Publication keeps the release in draft until all four assets are uploaded. Rerun publication with the same build run ID and attempt to finish an incomplete draft. If the release is already published, the script preserves its assets and returns its link. Release tags and filenames use the original build workflow's run number, never the publication workflow's run number. Rebuilding an already published build number cannot replace its release assets.
+Publication keeps the release in draft until all four assets are uploaded. Use **Re-run failed jobs** to retry a failed publication and finish an incomplete draft; approve the deployment again if prompted. If the release is already published, the script preserves its assets and returns its link. Release tags and filenames use the shared workflow run number. Rebuilding an already published build number cannot replace its release assets.
 
 Independent pushes each receive a build; they are not cancelled by a newer push. A newer push can arrive during publication, so the Latest check is not a transactional lock.
 
-The build workflow uses read-only repository permissions. Only the manually dispatched release job uses `contents: write`; it also uses `actions: read` to retrieve the selected build. Both use GitHub's built-in token. No personal access token or additional repository secret is required.
+The build job uses read-only repository permissions. Only the approval-gated publish job uses `contents: write`; it also uses `actions: read` to retrieve the candidate from the same run. Both use GitHub's built-in token. No personal access token or additional repository secret is required.
 
 CI validates the build and isolated rendering pipeline. Hardware GPU behaviour and live MSFS operation require their own checks.

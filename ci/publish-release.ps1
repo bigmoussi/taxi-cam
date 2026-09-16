@@ -10,7 +10,7 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:GITHUB_REF -ne 'refs/heads/main') { throw 'Release publication runs only in the main-branch workflow.' }
-if ($env:GITHUB_EVENT_NAME -ne 'workflow_dispatch') { throw 'Release publication requires a manual workflow dispatch.' }
+if ($BuildRunId -ne $env:GITHUB_RUN_ID) { throw 'Release publication must use artifacts from this workflow run.' }
 $root = Split-Path -Parent $PSScriptRoot
 . (Join-Path $root 'installer/validation_receipt.ps1')
 $receiptPath = Join-Path $root 'build/native/validation.json'
