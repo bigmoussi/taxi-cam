@@ -33,29 +33,118 @@ function Set-TaxiStartupEntry([Xml.XmlDocument]$Document, [string]$Executable, [
     }
     if (-not $entry.ParentNode) { [void]$root.AppendChild($entry) }
 }
-function Save-TaxiLaunchXml([Xml.XmlDocument]$Document,[string]$Path,[string]$ExpectedHash) {
+function New-TaxiStartupConflict([string]$Message) {
+    $exception = [InvalidOperationException]::new($Message)
+    $exception.Data['TaxiStartupConflict'] = $true
+    return $exception
+}
+function Save-TaxiLaunchXml([Xml.XmlDocument]$Document,[string]$Path,[string]$ExpectedHash,[ref]$WrittenHash) {
+    if ($null -ne $WrittenHash) { $WrittenHash.Value = '' }
     $absolute = [IO.Path]::GetFullPath($Path)
     if ([IO.Path]::GetFileName($absolute) -ine 'exe.xml') { throw 'Startup target must be named exe.xml.' }
     $parent = Split-Path -Parent $absolute
-    New-Item -ItemType Directory -Force -Path $parent | Out-Null
-    if (Test-Path -LiteralPath $absolute) {
-        if (-not $ExpectedHash -or (Get-FileHash -LiteralPath $absolute).Hash -ne $ExpectedHash) { throw 'exe.xml changed during installation; no startup entry was written.' }
-    } elseif ($ExpectedHash) { throw 'exe.xml disappeared during installation.' }
-    $temporary = Join-Path $parent ('exe.xml.taxi-' + [Guid]::NewGuid().ToString('N') + '.tmp')
-    $settings = [Xml.XmlWriterSettings]::new()
-    $settings.Encoding = [Text.UTF8Encoding]::new($false)
-    $settings.Indent = $true
-    $settings.NewLineHandling = [Xml.NewLineHandling]::None
-    $writer = [Xml.XmlWriter]::Create($temporary, $settings)
-    try { $Document.Save($writer) } finally { $writer.Dispose() }
-    [void](Read-TaxiLaunchXml $temporary)
+    $temporary = $null
     $backup = $null
-    if (Test-Path -LiteralPath $absolute) {
-        $backup = $absolute + '.taxi-backup-' + [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss-fff')
-        Copy-Item -LiteralPath $absolute -Destination $backup
-        if ((Get-FileHash -LiteralPath $backup).Hash -ne $ExpectedHash) { throw 'Startup backup verification failed.' }
-        if ((Get-FileHash -LiteralPath $absolute).Hash -ne $ExpectedHash) { throw 'exe.xml changed before replacement.' }
-        [IO.File]::Replace($temporary, $absolute, [NullString]::Value)
-    } else { [IO.File]::Move($temporary, $absolute) }
-    return $backup
+    $encrypted = $null
+    $committed = $false
+    $operation = 'Prepare startup directory'
+    $operationSource = $absolute
+    $operationDestination = $parent
+    try {
+        New-Item -ItemType Directory -Force -Path $parent | Out-Null
+        $operation = 'Verify original startup file'
+        $operationDestination = $absolute
+        if (Test-Path -LiteralPath $absolute) {
+            if (-not $ExpectedHash -or (Get-FileHash -LiteralPath $absolute).Hash -ne $ExpectedHash) {
+                throw (New-TaxiStartupConflict 'exe.xml changed during installation; no startup entry was written.')
+            }
+            $encrypted = ([IO.File]::GetAttributes($absolute) -band [IO.FileAttributes]::Encrypted) -ne 0
+        } elseif ($ExpectedHash) { throw (New-TaxiStartupConflict 'exe.xml disappeared during installation.') }
+        $temporary = Join-Path $parent ('exe.xml.taxi-' + [Guid]::NewGuid().ToString('N') + '.tmp')
+        # Reserve a private sibling and apply EFS before writing XML content. Never
+        # copy encrypted user configuration into an unencrypted temporary folder.
+        $operation = 'Create startup replacement'
+        $operationDestination = $temporary
+        $stream = [IO.File]::Open($temporary, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        $stream.Dispose()
+        if ($encrypted) {
+            $operation = 'Encrypt startup replacement'
+            [IO.File]::Encrypt($temporary)
+            if (([IO.File]::GetAttributes($temporary) -band [IO.FileAttributes]::Encrypted) -eq 0) {
+                throw 'Could not preserve exe.xml encryption on the replacement file.'
+            }
+        }
+        $settings = [Xml.XmlWriterSettings]::new()
+        $settings.Encoding = [Text.UTF8Encoding]::new($false)
+        $settings.Indent = $true
+        $settings.NewLineHandling = [Xml.NewLineHandling]::None
+        $operation = 'Write startup replacement'
+        $writer = [Xml.XmlWriter]::Create($temporary, $settings)
+        try { $Document.Save($writer) } finally { $writer.Dispose() }
+        $operation = 'Verify startup replacement'
+        [void](Read-TaxiLaunchXml $temporary)
+        $preparedHash = (Get-FileHash -LiteralPath $temporary).Hash
+        if ($ExpectedHash) {
+            $operation = 'Verify original startup file before backup'
+            $operationDestination = $absolute
+            if (-not (Test-Path -LiteralPath $absolute) -or (Get-FileHash -LiteralPath $absolute).Hash -ne $ExpectedHash) {
+                throw (New-TaxiStartupConflict 'exe.xml changed before backup.')
+            }
+            $backup = $absolute + '.taxi-backup-' + [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss-fff') + '-' + [Guid]::NewGuid().ToString('N')
+            $operation = 'Back up startup file'
+            $operationDestination = $backup
+            Copy-Item -LiteralPath $absolute -Destination $backup
+            $operation = 'Verify startup backup'
+            if ((Get-FileHash -LiteralPath $backup).Hash -ne $ExpectedHash) { throw (New-TaxiStartupConflict 'Startup backup verification failed.') }
+            if ($encrypted -and ([IO.File]::GetAttributes($backup) -band [IO.FileAttributes]::Encrypted) -eq 0) {
+                throw 'Could not preserve exe.xml encryption on the backup file.'
+            }
+            $operation = 'Verify original startup file before replacement'
+            $operationDestination = $absolute
+            if ((Get-FileHash -LiteralPath $absolute).Hash -ne $ExpectedHash) { throw (New-TaxiStartupConflict 'exe.xml changed before replacement.') }
+            if ((([IO.File]::GetAttributes($absolute) -band [IO.FileAttributes]::Encrypted) -ne 0) -ne $encrypted) {
+                throw (New-TaxiStartupConflict 'exe.xml encryption changed before replacement.')
+            }
+            $operation = 'Replace startup file'
+            $operationSource = $temporary
+            [IO.File]::Replace($temporary, $absolute, [NullString]::Value)
+        } else {
+            $operation = 'Create startup file'
+            $operationSource = $temporary
+            $operationDestination = $absolute
+            if (Test-Path -LiteralPath $absolute) { throw (New-TaxiStartupConflict 'exe.xml appeared during installation; no startup entry was written.') }
+            [IO.File]::Move($temporary, $absolute)
+        }
+        $committed = $true
+        # Nothing that accesses the filesystem may fail after the atomic commit.
+        # Callers use this prepared digest to distinguish our write from later edits.
+        if ($null -ne $WrittenHash) { $WrittenHash.Value = $preparedHash }
+        return $backup
+    } catch {
+        $failure = $_
+        $failure.Exception.Data['TaxiStartupOperation'] = $operation
+        $failure.Exception.Data['TaxiStartupSource'] = $operationSource
+        $failure.Exception.Data['TaxiStartupDestination'] = $operationDestination
+        if (-not $failure.Exception.Data['TaxiStartupConflict']) {
+            $unchanged = $false
+            if (-not $committed) {
+                try {
+                    if ($ExpectedHash) {
+                        $unchanged = (Test-Path -LiteralPath $absolute -PathType Leaf) -and (Get-FileHash -LiteralPath $absolute).Hash -eq $ExpectedHash
+                        if ($unchanged -and $null -ne $encrypted) {
+                            $unchanged = (([IO.File]::GetAttributes($absolute) -band [IO.FileAttributes]::Encrypted) -ne 0) -eq $encrypted
+                        }
+                    } else { $unchanged = -not (Test-Path -LiteralPath $absolute) }
+                } catch { $unchanged = $false }
+            }
+            if (-not $unchanged) { $failure.Exception.Data['TaxiStartupUnsafe'] = $true }
+        }
+        throw $failure
+    } finally {
+        # Cleanup is best effort and cannot turn an already committed write into
+        # a recoverable startup error. Verified sibling backups remain available.
+        if ($temporary -and [IO.File]::Exists($temporary)) {
+            try { Remove-Item -LiteralPath $temporary -ErrorAction Stop } catch { }
+        }
+    }
 }

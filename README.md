@@ -23,11 +23,13 @@ For **Windows 10/11 (64-bit)** and **MSFS 2024**, with one of the aircraft above
 
 1. Download the **Windows x64 setup EXE** from [the latest release](https://github.com/rthoms334/taxi-cam/releases/latest).
 2. Close MSFS and exit Taxi Cam if it is already running.
-3. Run setup and follow the prompts to confirm your simulator folder and startup settings.
+3. Run setup, confirm your simulator folder, and choose **Configure automatic startup with MSFS** or **Launch manually**. Setup remembers this choice on updates. Manual launch skips startup configuration and leaves any existing startup entry unchanged.
 
 **Keep existing settings** is selected by default. Leave it checked to preserve camera profiles, calibration, reference guides and keyboard shortcuts. Clear it only if you want to start with the bundled defaults. Setup restores your previous settings if installation fails.
 
-Taxi Cam starts with MSFS after installation. On its first launch, **Settings** opens so you can explore the controls. Close the window or select **Hide to tray** to keep the app running in the system tray. Later automatic starts stay in the tray; opening Taxi Cam from the Windows Start menu shows Settings again. The first-launch choice is remembered across updates.
+If Setup cannot configure automatic startup and can verify the startup file is unchanged, installation completes with a notice explaining how to launch Taxi Cam from the Start menu. Details are saved in `setup-diagnostics.log` in the installation folder. You can rerun Setup to retry automatic startup.
+
+On its first launch, **Settings** opens so you can explore the controls. Close the window or select **Hide to tray** to keep the app running in the system tray. Later automatic starts stay in the tray; opening Taxi Cam from the Windows Start menu shows Settings again. The first-launch choice is remembered across updates.
 
 ## Using Taxi Cam
 

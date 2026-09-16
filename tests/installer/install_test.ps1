@@ -72,13 +72,23 @@ if (@(Compare-Object (@(Get-ChildItem -LiteralPath $app -File | ForEach-Object N
 $firstLegacyBackup = $record.legacyBackup
 # Updates replace bundled legal text, and a failed transaction must restore it.
 foreach ($name in @('LICENSE.txt','THIRD_PARTY_NOTICES.txt')) { [IO.File]::WriteAllText((Join-Path $app $name), "prior $name fixture") }
-$xmlLock = [IO.File]::Open($xml, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+# A concurrent edit is still fatal, unlike a safe optional-startup failure.
+$xmlReadState = @{Count = 0}
+function Get-FileHash {
+    param([string]$LiteralPath)
+    if ($LiteralPath -eq $xml) {
+        $xmlReadState.Count++
+        if ($xmlReadState.Count -eq 2) { Add-Content -LiteralPath $xml -Value '<!-- concurrent update -->' }
+    }
+    Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $LiteralPath
+}
 $refused = $false
 try {
     & (Join-Path $root 'installer/install.ps1') -SimulatorDirectory $sim -ExeXml $xml -Destination $app -PayloadDirectory $payload -NoShortcut
 } catch { $refused = $true }
-finally { $xmlLock.Dispose() }
-if (-not $refused) { throw 'Locked startup configuration did not fail the update transaction.' }
+finally { Remove-Item Function:\Get-FileHash }
+if (-not $refused) { throw 'Concurrent startup edit did not fail the update transaction.' }
+if (-not ([IO.File]::ReadAllText($xml)).Contains('<!-- concurrent update -->')) { throw 'Failed update lost the concurrent startup edit.' }
 foreach ($name in @('LICENSE.txt','THIRD_PARTY_NOTICES.txt')) {
     if ([IO.File]::ReadAllText((Join-Path $app $name)) -ne "prior $name fixture") { throw "Failed update did not restore $name." }
 }

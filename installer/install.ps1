@@ -5,7 +5,9 @@ param(
     [string]$Destination = (Join-Path $env:LOCALAPPDATA 'Taxi Cam\app'),
     [string]$PayloadDirectory,
     [switch]$NoShortcut,
-    [switch]$ResetSettings
+    [switch]$ResetSettings,
+    [ValidateSet('Automatic','Manual')][string]$StartupMode = 'Automatic',
+    [ref]$InstallResult
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -21,16 +23,6 @@ $receipt = Assert-TaxiNativeReceipt $payload
 $sim = (Resolve-Path -LiteralPath $SimulatorDirectory).Path
 $simExe = Join-Path $sim 'FlightSimulator2024.exe'
 if (-not (Test-Path -LiteralPath $simExe -PathType Leaf)) { throw 'Select the MSFS 2024 Content directory containing FlightSimulator2024.exe.' }
-if (-not $ExeXml) {
-    $choices = @(
-        (Join-Path $env:LOCALAPPDATA 'Packages/Microsoft.Limitless_8wekyb3d8bbwe/LocalCache/exe.xml'),
-        (Join-Path $env:APPDATA 'Microsoft Flight Simulator 2024/exe.xml')
-    )
-    $existing = @($choices | Where-Object { Test-Path -LiteralPath $_ })
-    if ($existing.Count -ne 1) { throw 'Provide -ExeXml with the simulator launch configuration path.' }
-    $ExeXml = $existing[0]
-}
-$ExeXml = [IO.Path]::GetFullPath($ExeXml)
 $dest = [IO.Path]::GetFullPath($Destination)
 if ($dest -eq [IO.Path]::GetPathRoot($dest) -or $dest -eq $sim) { throw 'Use a dedicated companion installation directory.' }
 $exe = Join-Path $dest 'taxi-cam.exe'
@@ -70,15 +62,6 @@ if ($ResetSettings) {
         else { Join-Path $payload 'taxi-camera-mounts.cfg' }
     if (-not (Test-Path -LiteralPath $defaultMount -PathType Leaf)) { throw 'Bundled default camera mounts are required to reset settings.' }
 }
-$hash = if (Test-Path -LiteralPath $ExeXml) { (Get-FileHash -LiteralPath $ExeXml).Hash } else { '' }
-$document = Read-TaxiLaunchXml $ExeXml
-$globalDisabled = $document.DocumentElement.SelectSingleNode('Disabled')
-$globalManual = $document.DocumentElement.SelectSingleNode('Launch.ManualLoad')
-if (($globalDisabled -and $globalDisabled.InnerText -ieq 'True') -or
-    ($globalManual -and $globalManual.InnerText -ieq 'True')) {
-    throw 'The simulator launch document disables automatic startup globally; retain its settings and resolve that explicitly.'
-}
-Set-TaxiStartupEntry $document $exe $simExe
 $tag = [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss-fff')
 New-Item -ItemType Directory -Force -Path $dest | Out-Null
 $staging = Join-Path ([IO.Path]::GetTempPath()) ('taxi-cam-install-' + [Guid]::NewGuid().ToString('N'))
@@ -94,17 +77,69 @@ if ($ResetSettings) {
 $settingsSnapshot = @()
 $prior = @{}
 $installed = @()
+$writtenHashes = @{}
+$legacyHash = ''
 $legacy = Join-Path $sim 'taxi-camera-native.addon64'
 $disabled = $null
 $previousLegacy = $null
+$startupPaths = @()
 $previousRecordPath = Join-Path $dest 'installation.json'
 if (Test-Path -LiteralPath $previousRecordPath) {
     $previousRecord = Get-Content -Raw -LiteralPath $previousRecordPath | ConvertFrom-Json
+    # Older records predate optional startup and always owned their exe.xml entry.
+    if ($previousRecord.PSObject.Properties['startupPaths']) { $startupPaths = @($previousRecord.startupPaths) }
+    elseif ($previousRecord.exeXml) { $startupPaths = @($previousRecord.exeXml) }
+    if (-not $ExeXml) { $ExeXml = $previousRecord.exeXml }
     if ($previousRecord.legacyBackup -and (Test-Path -LiteralPath $previousRecord.legacyBackup -PathType Leaf) -and
         (Split-Path -Parent $previousRecord.legacyBackup) -eq $sim -and
         (Split-Path -Leaf $previousRecord.legacyBackup) -like 'taxi-camera-native.addon64.disabled-native-*') {
         $previousLegacy = $previousRecord.legacyBackup
     }
+}
+$startupReady = $false
+$startupError = ''
+$startupWarning = ''
+$startupStatus = if ($startupPaths.Count) { 'unchanged' } else { 'manual' }
+function Get-StartupErrorDetail($Failure) {
+    # Never convert a concurrency conflict or an uncertain partial write into success.
+    $exception = $Failure.Exception
+    $codes = @()
+    while ($exception) {
+        if ($exception.Data['TaxiStartupConflict'] -or $exception.Data['TaxiStartupUnsafe']) { throw $Failure }
+        $codes += ('{0}: HRESULT 0x{1:X8}' -f $exception.GetType().FullName, $exception.HResult)
+        if ($exception -is [ComponentModel.Win32Exception]) { $codes += "Windows error: $($exception.NativeErrorCode)" }
+        foreach ($key in @('TaxiStartupOperation','TaxiStartupSource','TaxiStartupDestination')) {
+            if ($exception.Data.Contains($key)) { $codes += "${key}: $($exception.Data[$key])" }
+        }
+        $exception = $exception.InnerException
+    }
+    return (@("Startup file: $ExeXml") + $codes + @($Failure.Exception.ToString(),
+        $Failure.InvocationInfo.PositionMessage, $Failure.ScriptStackTrace)) -join [Environment]::NewLine
+}
+if ($StartupMode -eq 'Automatic') {
+    try {
+        if (-not $ExeXml) {
+            $choices = @(
+                (Join-Path $env:LOCALAPPDATA 'Packages/Microsoft.Limitless_8wekyb3d8bbwe/LocalCache/exe.xml'),
+                (Join-Path $env:APPDATA 'Microsoft Flight Simulator 2024/exe.xml')
+            )
+            $existing = @($choices | Where-Object { Test-Path -LiteralPath $_ })
+            if ($existing.Count -ne 1) { throw 'Select the simulator exe.xml in Setup to configure automatic startup.' }
+            $ExeXml = $existing[0]
+        }
+        $ExeXml = [IO.Path]::GetFullPath($ExeXml)
+        if ([IO.Path]::GetFileName($ExeXml) -ine 'exe.xml') { throw 'Startup target must be named exe.xml.' }
+        $hash = if (Test-Path -LiteralPath $ExeXml) { (Get-FileHash -LiteralPath $ExeXml).Hash } else { '' }
+        $document = Read-TaxiLaunchXml $ExeXml
+        $globalDisabled = $document.DocumentElement.SelectSingleNode('Disabled')
+        $globalManual = $document.DocumentElement.SelectSingleNode('Launch.ManualLoad')
+        if (($globalDisabled -and $globalDisabled.InnerText -ieq 'True') -or
+            ($globalManual -and $globalManual.InnerText -ieq 'True')) {
+            throw 'The simulator launch document disables automatic startup globally.'
+        }
+        Set-TaxiStartupEntry $document $exe $simExe
+        $startupReady = $true
+    } catch { $startupError = Get-StartupErrorDetail $_ }
 }
 $xmlBackup = $null
 $xmlWritten = $false
@@ -126,6 +161,7 @@ try {
         $prior['380-taxi-cam.exe'] = $oldBackup
         $installed += '380-taxi-cam.exe'
         Remove-Item -LiteralPath $oldExe
+        $writtenHashes[$oldExe] = ''
     }
     foreach ($name in $installSources.Keys) {
         $target = Join-Path $dest $name
@@ -137,6 +173,7 @@ try {
         $installed += $name
         Copy-Item -LiteralPath (Join-Path $staging $name) -Destination $target -Force
         if ((Get-FileHash -LiteralPath $target).Hash -ne $installHashes[$name]) { throw "Installed file verification failed: $name" }
+        $writtenHashes[$target] = $installHashes[$name]
         Assert-TaxiVisibleInstallPath $target
     }
     $mount = Join-Path $dest 'taxi-camera-mounts.cfg'
@@ -144,27 +181,59 @@ try {
         Remove-TaxiSettingsSnapshot $settingsSnapshot
         $mountEntry = @($settingsSnapshot | Where-Object { $_.path -eq $mount })[0]
         Set-TaxiSettingsFile $mountEntry $defaultMount
+        foreach ($entry in $settingsSnapshot) {
+            if ($entry.owned) { $writtenHashes[$entry.path] = $entry.installedHash }
+        }
     } elseif (-not (Test-Path -LiteralPath $mount)) {
         # A missing mount in a known installation may follow explicit settings
         # removal. Do not resurrect old simulator calibration in that case.
         $sourceMount = if (-not (Test-Path -LiteralPath $previousRecordPath) -and (Test-Path -LiteralPath (Join-Path $sim 'taxi-camera-mounts.cfg'))) { Join-Path $sim 'taxi-camera-mounts.cfg' }
             elseif (Test-Path -LiteralPath (Join-Path $payload 'taxi-camera-mounts.cfg')) { Join-Path $payload 'taxi-camera-mounts.cfg' }
             else { Join-Path $PSScriptRoot '../taxi-camera-mounts.cfg' }
+        $mountSourceHash = (Get-FileHash -LiteralPath $sourceMount).Hash
         Copy-Item -LiteralPath $sourceMount -Destination $mount
+        if ((Get-FileHash -LiteralPath $mount).Hash -ne $mountSourceHash) { throw 'Installed calibration verification failed.' }
+        $writtenHashes[$mount] = $mountSourceHash
     }
     Assert-Closed
     if (Test-Path -LiteralPath $legacy) {
+        $legacyHash = (Get-FileHash -LiteralPath $legacy).Hash
         $disabled = $legacy + '.disabled-native-' + $tag
         Move-Item -LiteralPath $legacy -Destination $disabled
+        $writtenHashes[$legacy] = ''
     }
-    $xmlBackup = Save-TaxiLaunchXml $document $ExeXml $hash
-    $xmlWritten = $true
-    $xmlWrittenHash = (Get-FileHash -LiteralPath $ExeXml).Hash
-    [ordered]@{
+    if ($startupReady) {
+        try {
+            $xmlBackup = Save-TaxiLaunchXml $document $ExeXml $hash ([ref]$xmlWrittenHash)
+            $xmlWritten = $true
+            $writtenHashes[$ExeXml] = $xmlWrittenHash
+            $startupPaths = @(@($startupPaths) + @($ExeXml) | Select-Object -Unique)
+            $startupStatus = 'configured'
+        } catch { $startupError = Get-StartupErrorDetail $_ }
+    }
+    if (-not $xmlWritten) {
+        $startupWarning = if ($StartupMode -eq 'Manual') { 'Automatic startup was not changed.' }
+            else { 'Taxi Cam was installed, but automatic startup could not be configured.' }
+        $startupWarning += ' Open Taxi Cam from the Start menu when you use MSFS. Existing startup entries were left unchanged.'
+        if ($startupError) { $startupWarning += ' Details are saved in installation.json in the installation folder. Run Setup again to retry automatic startup.' }
+    }
+    $newRecord = [ordered]@{
         version=$receipt.version; buildNumber=$receipt.buildNumber; installedUtc=[DateTime]::UtcNow.ToString('o'); destination=$dest;
         simulator=$simExe; exeXml=$ExeXml; exeXmlBackup=$xmlBackup; legacyBackup=$(if ($disabled) { $disabled } else { $previousLegacy });
-        files=$receipt.files; shortcut=$startMenu; simulatorVerified=$false
-    } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $previousRecordPath -Encoding utf8
+        files=$receipt.files; shortcut=$startMenu; simulatorVerified=$false;
+        startupRequested=$StartupMode.ToLowerInvariant(); startupStatus=$startupStatus; startupPaths=@($startupPaths);
+        startupWarning=$startupWarning; startupError=$startupError; startupUpdated=$xmlWritten; exeXmlInstalledHash=$xmlWrittenHash
+    }
+    $recordBytes = [Text.UTF8Encoding]::new($false).GetBytes(($newRecord | ConvertTo-Json -Depth 5))
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try { $recordHash = [BitConverter]::ToString($sha256.ComputeHash($recordBytes)).Replace('-','') }
+    finally { $sha256.Dispose() }
+    [IO.File]::WriteAllBytes($previousRecordPath, $recordBytes)
+    $writtenHashes[$previousRecordPath] = $recordHash
+    # Return ownership from known prepared bytes, without adopting subsequent edits.
+    if ($null -ne $InstallResult) {
+        $InstallResult.Value = @{Record=$newRecord; Writes=$writtenHashes; CreatedLegacyBackup=$disabled; CreatedLegacyHash=$legacyHash}
+    }
 } catch {
     $installFailure = $_
     $rollbackComplete = $false
@@ -192,7 +261,8 @@ try {
 } finally {
     # The GUID staging directory was created by this invocation; no installed file is removed here.
     if ($rollbackComplete -and [IO.Path]::GetFullPath($staging).StartsWith([IO.Path]::GetFullPath([IO.Path]::GetTempPath()), [StringComparison]::OrdinalIgnoreCase)) {
-        Remove-Item -LiteralPath $staging -Recurse -Force
+        try { Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction Stop }
+        catch { Write-Warning "Installation staging cleanup could not finish: $staging" }
     }
 }
 try {
@@ -207,7 +277,8 @@ try {
     }
 } catch { Write-Warning 'Installed successfully, but the Start menu shortcut could not be created.' }
 Write-Output "Installed Taxi Cam: $exe"
-Write-Output "Automatic tray startup: $ExeXml"
+if ($xmlWritten) { Write-Output "Automatic tray startup: $ExeXml" }
+else { Write-Warning $startupWarning }
 Write-Output "Legacy taxi add-on retained: $disabled"
 Write-Output 'Unrelated simulator files and startup entries were preserved.'
 if ($ResetSettings) { Write-Output 'Saved settings and known legacy profile imports were reset; bundled camera defaults restored. Logs and unknown files were retained.' }
