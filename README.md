@@ -6,7 +6,7 @@ Nose-wheel and tail cameras for Microsoft Flight Simulator 2024. Use the aircraf
 
 Taxi Cam is **experimental** and uses an unsupported simulator integration. It is not endorsed by Microsoft or Asobo. Simulator or aircraft updates may cause problems, including crashes. **Use at your own risk.**
 
-If you find this mod useful, please consider a donation. The Windows app also has a **Donate** button above the bug-report icon; it opens the PayPal donation page in your browser.
+If you find Taxi Cam useful, please consider donating.
 
 [![Donate with PayPal](https://www.paypalobjects.com/en_US/i/btn/btn_donate_LG.gif)](https://www.paypal.com/donate/?hosted_button_id=EPVELD44P6NXW)
 
