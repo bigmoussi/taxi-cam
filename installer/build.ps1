@@ -47,7 +47,7 @@ $installerBase = "taxi-cam-$version-windows-x64-setup"
 $asset = Join-Path $output ($installerBase + '.exe')
 if (Test-Path -LiteralPath $asset) { throw 'Installer already exists; retain release assets and use a fresh worktree or application version.' }
 $log = Join-Path $work 'compiler.log'
-& $compiler "/DPayloadDir=$payload" "/DInternalDir=$work" "/DAppVersion=$version" "/DBuildNumber=$buildNumber" "/DOutputBase=$installerBase" "/O$output" (Join-Path $repoRoot 'installer/taxi-cam.iss') *> $log
+& $compiler "/DPayloadDir=$payload" "/DInternalDir=$work" "/DAppIcon=$(Join-Path $repoRoot 'src/app/taxi-cam.ico')" "/DAppVersion=$version" "/DBuildNumber=$buildNumber" "/DOutputBase=$installerBase" "/O$output" (Join-Path $repoRoot 'installer/taxi-cam.iss') *> $log
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $asset)) { throw "Installer compilation failed. See $log" }
 [ordered]@{version=$version;buildNumber=$buildNumber;sourceCommit=$info.sourceCommit;sourceDirty=$info.sourceDirty;installerSha256=(Get-FileHash -LiteralPath $asset).Hash;packageSha256=(Get-FileHash -LiteralPath $zip).Hash;files=$receipt.files;compilerPayload=$payload;compilerInternal=$work} | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath ($asset + '.json') -Encoding utf8
 Write-Output $asset

@@ -7,6 +7,9 @@
 #ifndef BuildNumber
   #error BuildNumber is required
 #endif
+#ifndef AppIcon
+  #error AppIcon is required
+#endif
 #ifndef OutputBase
   #define OutputBase "taxi-cam-test-setup"
 #endif
@@ -41,6 +44,7 @@ OutputBaseFilename={#OutputBase}
 Compression=lzma2
 SolidCompression=yes
 UninstallDisplayIcon={app}\taxi-cam.exe
+SetupIconFile={#AppIcon}
 #ifdef InstallerTest
 CreateUninstallRegKey=no
 UsePreviousAppDir=no

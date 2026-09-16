@@ -673,39 +673,9 @@ void build_controls() {
   InvalidateRect(window, nullptr, TRUE);
 }
 HICON make_icon() {
-  constexpr int n = 32;
-  BITMAPINFO info{};
-  info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-  info.bmiHeader.biWidth = n;
-  info.bmiHeader.biHeight = -n;
-  info.bmiHeader.biPlanes = 1;
-  info.bmiHeader.biBitCount = 32;
-  info.bmiHeader.biCompression = BI_RGB;
-  void* bits{};
-  HBITMAP bitmap = CreateDIBSection(nullptr, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
-  if (!bitmap)
-    return LoadIconW(nullptr, IDI_APPLICATION);
-  auto* pixels = static_cast<DWORD*>(bits);
-  for (int y = 0; y < n; ++y)
-    for (int x = 0; x < n; ++x) {
-      DWORD c = (x - 16) * (x - 16) + (y - 16) * (y - 16) < 240 ? 0xff42dbb8 : 0;
-      if (x >= 7 && x < 25 && y >= 11 && y < 23)
-        c = 0xff11151c;
-      if (x >= 10 && x < 16 && y >= 8 && y < 12)
-        c = 0xff11151c;
-      if ((x - 16) * (x - 16) + (y - 17) * (y - 17) < 16)
-        c = 0xffe8eef6;
-      pixels[y * n + x] = c;
-    }
-  HBITMAP mask = CreateBitmap(n, n, 1, 1, nullptr);
-  ICONINFO ii{};
-  ii.fIcon = TRUE;
-  ii.hbmColor = bitmap;
-  ii.hbmMask = mask;
-  HICON result = CreateIconIndirect(&ii);
-  DeleteObject(bitmap);
-  DeleteObject(mask);
-  return result;
+  // LoadIcon returns shared handles, including the fallback: do not destroy them.
+  const auto resource = LoadIconW(instance, MAKEINTRESOURCEW(101));
+  return resource ? resource : LoadIconW(nullptr, IDI_APPLICATION);
 }
 void tray(bool add) {
   NOTIFYICONDATAW data{};
