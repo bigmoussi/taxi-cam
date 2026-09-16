@@ -4,6 +4,14 @@
 
 namespace taxi_camera {
 
+inline const char* camera_transition_message(const native_camera::ProbeSnapshot& scene) noexcept {
+  if (scene.profile_transition_failed)
+    return "Aircraft change paused: camera lifecycle validation failed. Restart MSFS to retry.";
+  if (!scene.pair.owned_ids[0] && !scene.pair.owned_ids[1])
+    return "Waiting for pending camera startup to finish before changing aircraft profile.";
+  return "Closing and validating retained camera views for the aircraft profile.";
+}
+
 // A retained stop reason can outlive successful recovery. Only temporary
 // failures on a stopped pair (or pending cleanup) override normal capture status.
 inline const char* camera_stop_message(const native_camera::ProbeSnapshot& scene) noexcept {

@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstring>
 #include <stdexcept>
+#include "../../src/camera/local_memory.hpp"
 
 namespace {
 namespace nc = taxi_camera::native_camera;
@@ -15,14 +16,22 @@ void require(bool value, const char* message) {
     throw std::runtime_error(message);
 }
 struct Image final : taxi_camera::discovery::ImageReader {
+  nc::CameraImageLayout layout = nc::observed_store_layout();
   std::array<std::uint64_t, 2> overrides{4, 0};
   unsigned reads = 0, fail_at = 0, change_at = 0;
+  unsigned protect_at = 0;
+  void* protect_address = nullptr;
+  DWORD protection = PAGE_NOACCESS;
   taxi_camera::discovery::ReadWindow query(std::uint32_t, std::uint32_t) override { return {}; }
   bool read(std::uint32_t rva, void* output, std::size_t size) override {
     ++reads;
-    if (reads == fail_at || size != 8 || (rva != nc::kViewFlagClearOverride && rva != nc::kViewFlagSetOverride))
+    if (reads == protect_at) {
+      DWORD previous = 0;
+      require(VirtualProtect(protect_address, 4096, protection, &previous) != FALSE, "override-time protection change failed");
+    }
+    if (reads == fail_at || size != 8 || (rva != layout.view_flag_clear_override && rva != layout.view_flag_set_override))
       return false;
-    auto value = overrides[rva == nc::kViewFlagSetOverride];
+    auto value = overrides[rva == layout.view_flag_set_override];
     if (reads == change_at)
       value ^= 16;
     std::memcpy(output, &value, 8);
@@ -30,12 +39,13 @@ struct Image final : taxi_camera::discovery::ImageReader {
   }
 };
 struct Fixture {
-  unsigned char* allocation = static_cast<unsigned char*>(VirtualAlloc(nullptr, 8192, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+  unsigned char* allocation = nullptr;
   unsigned char* view_memory = nullptr;
   ec::OwnedViewSnapshot view;
   Image image;
   std::array<unsigned char, 128> before{};
-  explicit Fixture(unsigned offset = 0) {
+  explicit Fixture(unsigned offset = 0, DWORD protection = PAGE_READWRITE)
+      : allocation(static_cast<unsigned char*>(VirtualAlloc(nullptr, 8192, MEM_RESERVE | MEM_COMMIT, protection))) {
     require(allocation != nullptr, "allocation failed");
     std::memset(allocation, 0xa5, 8192);
     view_memory = allocation + offset;
@@ -53,10 +63,25 @@ struct Fixture {
   void unchanged() { require(!std::memcmp(before.data(), view_memory, before.size()), "refusal modified view"); }
   ~Fixture() { VirtualFree(allocation, 0, MEM_RELEASE); }
 };
+void accounting(const nc::LocalMemoryMetrics& metrics) {
+  require(metrics.query_calls == metrics.query_allocation_calls + metrics.query_page_calls + metrics.query_fallback_calls,
+          "AA query families did not sum to the total");
+  require(metrics.query_calls > 0, "AA mapping queries bypassed local-memory metrics");
+}
 void success(unsigned offset) {
   Fixture fixture(offset);
-  const auto result = nc::disable_owned_view_aa(fixture.view, fixture.image);
+  require(VirtualLock(fixture.allocation, 8192) != FALSE, "could not pin the small AA fixture");
+  nc::LocalMemoryMetrics metrics;
+  const auto result = [&] {
+    nc::ScopedLocalMemoryMetrics measured(metrics);
+    return nc::disable_owned_view_aa(fixture.view, fixture.image);
+  }();
   require(result.complete && result.write_attempted && !*result.error, "AA disable failed");
+  accounting(metrics);
+  require(metrics.query_allocation_calls > 0 && metrics.query_page_calls > 0 && metrics.query_fallback_calls == 0,
+          "resident AA flags did not use bounded page validation");
+  // The mock image owns its override reads. Only the two exact flag reads count.
+  require(metrics.read_calls == 2 && metrics.requested_bytes == 32, "AA flag reads were uncounted or widened");
   auto expected = fixture.before;
   auto flags = fixture.view.flags;
   flags[0] &= ~nc::kViewAaFlag;
@@ -66,9 +91,122 @@ void success(unsigned offset) {
   require(fixture.image.reads == 4, "override bracket incomplete");
   fixture.view.flags = flags;
   fixture.save();
-  const auto repeated = nc::disable_owned_view_aa(fixture.view, fixture.image);
+  metrics = {};
+  const auto repeated = [&] {
+    nc::ScopedLocalMemoryMetrics measured(metrics);
+    return nc::disable_owned_view_aa(fixture.view, fixture.image);
+  }();
   require(repeated.complete && !repeated.write_attempted, "already-disabled view rewritten");
+  accounting(metrics);
+  require(metrics.read_calls == 2 && metrics.requested_bytes == 32, "already-disabled AA skipped its exact read bracket");
+  require(fixture.image.reads == 8, "already-disabled AA skipped its override bracket");
   fixture.unchanged();
+  require(VirtualUnlock(fixture.allocation, 8192) != FALSE, "could not unpin the AA fixture");
+}
+void protected_flags() {
+  for (const DWORD protection : {DWORD(PAGE_READONLY), DWORD(PAGE_NOACCESS), DWORD(PAGE_READWRITE | PAGE_GUARD), DWORD(PAGE_EXECUTE_READ),
+                                 DWORD(PAGE_EXECUTE_READWRITE)}) {
+    for (const unsigned offset : {0u, 4096u - 56u}) {
+      for (const bool already_clear : {false, true}) {
+        Fixture fixture(offset);
+        if (already_clear) {
+          fixture.view.flags[0] &= ~nc::kViewAaFlag;
+          fixture.save();
+        }
+        // In the straddling case only P+56 is protected: the first word alone
+        // must never authorize the write or the no-op success path.
+        auto* protected_page = fixture.allocation + (offset ? 4096 : 0);
+        DWORD previous = 0;
+        require(VirtualProtect(protected_page, 4096, protection, &previous) != FALSE, "AA protection setup failed");
+        nc::LocalMemoryMetrics metrics;
+        const auto result = [&] {
+          nc::ScopedLocalMemoryMetrics measured(metrics);
+          return nc::disable_owned_view_aa(fixture.view, fixture.image);
+        }();
+        require(!result.complete && !result.write_attempted && std::strcmp(result.error, "aa_flags_not_writable") == 0,
+                "non-RW AA flags accepted");
+        require(fixture.image.reads == 0 && metrics.read_calls == 0 && metrics.requested_bytes == 0,
+                "invalid AA mapping reached object or override reads");
+        accounting(metrics);
+        MEMORY_BASIC_INFORMATION observed{};
+        require(VirtualQuery(protected_page, &observed, sizeof(observed)) == sizeof(observed) && observed.Protect == protection,
+                "AA validation consumed a guard or changed protection");
+        require(VirtualProtect(protected_page, 4096, PAGE_READWRITE, &previous) != FALSE, "AA protection restore failed");
+        fixture.unchanged();
+      }
+    }
+  }
+  for (const DWORD modifier : {DWORD(PAGE_NOCACHE), DWORD(PAGE_WRITECOMBINE)}) {
+    Fixture fixture(0, PAGE_READWRITE | modifier);
+    MEMORY_BASIC_INFORMATION observed{};
+    require(VirtualQuery(fixture.allocation, &observed, sizeof(observed)) == sizeof(observed) &&
+                observed.Protect == (PAGE_READWRITE | modifier),
+            "AA protection modifier fixture was not established");
+    const auto result = nc::disable_owned_view_aa(fixture.view, fixture.image);
+    require(!result.complete && !result.write_attempted && fixture.image.reads == 0, "AA accepted an RW protection modifier");
+    fixture.unchanged();
+  }
+}
+void invalid_allocation_types() {
+  struct Mapping {
+    HANDLE handle = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, 8192, nullptr);
+    void* view = nullptr;
+    ~Mapping() {
+      if (view)
+        UnmapViewOfFile(view);
+      if (handle)
+        CloseHandle(handle);
+    }
+  } mapping;
+  require(mapping.handle != nullptr, "AA mapping fixture creation failed");
+  for (const DWORD access : {DWORD(FILE_MAP_READ | FILE_MAP_WRITE), DWORD(FILE_MAP_COPY)}) {
+    mapping.view = MapViewOfFile(mapping.handle, access, 0, 0, 8192);
+    require(mapping.view != nullptr, "AA mapping fixture view failed");
+    Fixture fixture;
+    fixture.view.view_address = reinterpret_cast<std::uintptr_t>(mapping.view);
+    // Writing the copy-on-write view makes that page private to this process;
+    // it still belongs to a mapped allocation and must remain refused.
+    std::memcpy(static_cast<unsigned char*>(mapping.view) + 48, fixture.view.flags.data(), 16);
+    std::array<unsigned char, 128> before{};
+    std::memcpy(before.data(), mapping.view, before.size());
+    const auto result = nc::disable_owned_view_aa(fixture.view, fixture.image);
+    require(!result.complete && !result.write_attempted && fixture.image.reads == 0, "AA accepted mapped or copy-on-write flags");
+    require(std::memcmp(before.data(), mapping.view, before.size()) == 0, "AA refusal modified mapped flags");
+    require(UnmapViewOfFile(mapping.view) != FALSE, "AA mapping fixture unmap failed");
+    mapping.view = nullptr;
+  }
+  Fixture decommitted(4096 - 56);
+  require(VirtualFree(decommitted.allocation + 4096, 4096, MEM_DECOMMIT) != FALSE, "AA decommit fixture failed");
+  const auto result = nc::disable_owned_view_aa(decommitted.view, decommitted.image);
+  require(!result.complete && !result.write_attempted && decommitted.image.reads == 0, "AA accepted a decommitted second flag word");
+  require(std::memcmp(decommitted.view_memory + 48, decommitted.before.data() + 48, 8) == 0,
+          "AA modified the first word before rejecting the second");
+}
+void access_changes_during_update() {
+  for (const bool already_clear : {false, true}) {
+    Fixture fixture;
+    if (already_clear) {
+      fixture.view.flags[0] &= ~nc::kViewAaFlag;
+      fixture.save();
+    }
+    // The second initial override read changes access after the first flag
+    // read. Both the attempted write and the no-op's reread must fail safely.
+    fixture.image.protect_at = 2;
+    fixture.image.protect_address = fixture.allocation;
+    nc::LocalMemoryMetrics metrics;
+    const auto result = [&] {
+      nc::ScopedLocalMemoryMetrics measured(metrics);
+      return nc::disable_owned_view_aa(fixture.view, fixture.image);
+    }();
+    require(!result.complete && result.write_attempted == !already_clear, "AA accepted flags made inaccessible during update");
+    require(std::strcmp(result.error, already_clear ? "aa_recheck_failed" : "aa_write_failed") == 0,
+            "AA changed-access failure was misclassified");
+    require(metrics.read_calls == (already_clear ? 2u : 1u) && metrics.requested_bytes == (already_clear ? 32u : 16u),
+            "AA failed access attempts were uncounted or widened");
+    DWORD previous = 0;
+    require(VirtualProtect(fixture.allocation, 4096, PAGE_READWRITE, &previous) != FALSE, "AA changed-access restore failed");
+    fixture.unchanged();
+  }
 }
 void refusals() {
   for (unsigned failure = 0; failure < 14; ++failure) {
@@ -144,12 +282,47 @@ void refusals() {
   global_clear.image.overrides = {nc::kViewAaFlag, nc::kViewAaFlag};
   require(nc::disable_owned_view_aa(global_clear.view, global_clear.image).complete, "clear override precedence ignored");
 }
+void resolved_layout() {
+  auto layout = nc::observed_store_layout();
+  layout.view_flag_clear_override += 0x10000;
+  layout.view_flag_set_override += 0x20000;
+  Fixture moved;
+  moved.image.layout = layout;
+  const auto result = nc::disable_owned_view_aa(moved.view, moved.image, layout);
+  require(result.complete && result.write_attempted && moved.image.reads == 4,
+          "Resolved AA globals did not preserve the complete override bracket");
+  Fixture mismatch;
+  mismatch.image.layout = layout;
+  require(!nc::disable_owned_view_aa(mismatch.view, mismatch.image).write_attempted,
+          "Legacy AA globals were used after image addresses moved");
+  mismatch.unchanged();
+  for (const auto bad : {nc::CameraImageLayout{},
+                         [&] {
+                           auto value = layout;
+                           value.view_flag_set_override = UINT32_MAX;
+                           return value;
+                         }(),
+                         [&] {
+                           auto value = layout;
+                           value.view_flag_set_override = value.view_flag_clear_override;
+                           return value;
+                         }()}) {
+    Fixture invalid;
+    const auto refused = nc::disable_owned_view_aa(invalid.view, invalid.image, bad);
+    require(!refused.complete && !refused.write_attempted && invalid.image.reads == 0, "Malformed AA layout reached reads or writes");
+    invalid.unchanged();
+  }
+}
 }  // namespace
 int main() {
   try {
     success(0);
     success(4096 - 56);  // The two flag words straddle writable pages.
+    protected_flags();
+    invalid_allocation_types();
+    access_changes_during_update();
     refusals();
+    resolved_layout();
     std::printf("View AA guard tests passed: %u checks\n", checks);
     return 0;
   } catch (const std::exception& error) {

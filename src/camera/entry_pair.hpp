@@ -57,6 +57,7 @@ enum class Failure {
   manager_destroyed
 };
 enum class Blocked { none, invalid_manager, missing_callbacks, manager_mismatch };
+enum class EmptyPairCancel { cancelled, busy, owned };
 
 struct Snapshot {
   State state = State::disabled;
@@ -75,6 +76,12 @@ class PairController {
   void request_independent_pose() noexcept;
   void request_disable() noexcept;
   Snapshot snapshot() const noexcept;
+
+  // Cancel only uncreated work, without a manager or engine callback. This may
+  // run on a request thread: the processing guard excludes in-flight creation
+  // even when its last published snapshot still looks empty. Busy/owned leave
+  // every request and ownership field unchanged.
+  EmptyPairCancel cancel_uncreated_request() noexcept;
 
   // Call ONLY from the approved update observer with a live manager. All engine
   // callbacks happen here, synchronously and without the mailbox mutex held.
@@ -104,7 +111,7 @@ class PairController {
   Request mailbox_{};
   Snapshot published_{};
   std::atomic_flag processing_ = ATOMIC_FLAG_INIT;
-  // Below: accessed only while processing_ is held by the update/lifetime API.
+  // Below: accessed only while processing_ is held by update/lifetime/cancel.
   ManagerToken owner_{};
   std::array<EntryId, 2> ids_{};
   PairKeys desired_keys_{};

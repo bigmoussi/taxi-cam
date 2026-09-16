@@ -55,6 +55,22 @@ Snapshot PairController::snapshot() const noexcept {
   return result;
 }
 
+EmptyPairCancel PairController::cancel_uncreated_request() noexcept {
+  if (processing_.test_and_set(std::memory_order_acquire))
+    return EmptyPairCancel::busy;
+  const ProcessingGuard guard{processing_};
+  const std::lock_guard lock(mailbox_mutex_);
+  if (has_owned_ids() || owner_ != ManagerToken{})
+    return EmptyPairCancel::owned;
+  mailbox_ = {};
+  desired_enabled_ = false;
+  creation_pending_ = false;
+  active_pair_ = false;
+  failure_ = Failure::none;
+  published_ = {};
+  return EmptyPairCancel::cancelled;
+}
+
 bool PairController::has_owned_ids() const noexcept {
   return ids_[0] != 0 || ids_[1] != 0;
 }

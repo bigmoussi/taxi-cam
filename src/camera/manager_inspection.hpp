@@ -1,5 +1,6 @@
 #pragma once
 
+#include "camera_layout.hpp"
 #include "image_inventory.hpp"
 #include "memory_reader.hpp"
 
@@ -8,9 +9,9 @@
 
 namespace taxi_camera::native_camera {
 
-inline constexpr std::uint32_t kManagerOwnerGlobal = 173790440;
-inline constexpr std::uint32_t kManagerRendererGlobal = 173790384;
-inline constexpr std::uint32_t kManagerVtable = 133571232;
+inline constexpr std::uint32_t kManagerOwnerGlobal = observed_store_layout().manager_owner_global;
+inline constexpr std::uint32_t kManagerRendererGlobal = observed_store_layout().renderer_global;
+inline constexpr std::uint32_t kManagerVtable = observed_store_layout().manager_vtable;
 
 enum class ManagerInspectionStatus { ready, unavailable, identity_refused };
 
@@ -30,9 +31,14 @@ inline ManagerInspection inspect_manager_identity(discovery::ImageReader& image,
                                                   engine_camera::MemoryReader& objects,
                                                   std::uint64_t image_base,
                                                   std::uint64_t current_manager,
-                                                  std::uint64_t owned_control) {
+                                                  std::uint64_t owned_control,
+                                                  const CameraImageLayout& layout = observed_store_layout()) {
   const auto unavailable = [](const char* detail) { return ManagerInspection{ManagerInspectionStatus::unavailable, detail}; };
   const auto refused = [](const char* detail) { return ManagerInspection{ManagerInspectionStatus::identity_refused, detail}; };
+  if (!camera_layout_detail::image_rva(layout.manager_owner_global, 8, 8) ||
+      !camera_layout_detail::image_rva(layout.renderer_global, 8, 8) || !camera_layout_detail::image_rva(layout.manager_vtable, 8, 8) ||
+      layout.manager_owner_global == layout.renderer_global || !image_base || image_base > UINT64_MAX - layout.manager_vtable)
+    return refused("Manager image layout is absent or outside the address bounds.");
   struct Handle {
     std::uint64_t control = 0;
     std::uint32_t generation = 0, extra = 0;
@@ -42,11 +48,11 @@ inline ManagerInspection inspect_manager_identity(discovery::ImageReader& image,
   std::uint64_t owner = 0, renderer = 0, cached = 0, payload = 0, vptr = 0;
   std::uint32_t generation = 0;
   Handle handle{};
-  if (!image.read(kManagerOwnerGlobal, &owner, sizeof(owner)))
+  if (!image.read(layout.manager_owner_global, &owner, sizeof(owner)))
     return unavailable("Manager owner global could not be read.");
   if (!owner)
     return unavailable("Manager owner is temporarily absent.");
-  if (!image.read(kManagerRendererGlobal, &renderer, sizeof(renderer)))
+  if (!image.read(layout.renderer_global, &renderer, sizeof(renderer)))
     return unavailable("Manager renderer global could not be read.");
   if (!renderer)
     return unavailable("Manager renderer is temporarily absent.");
@@ -70,17 +76,17 @@ inline ManagerInspection inspect_manager_identity(discovery::ImageReader& image,
     return refused("Manager weak-control payload does not match the cached manager.");
   if (!word(cached, vptr))
     return unavailable("Manager vtable pointer could not be read.");
-  if (image_base > UINT64_MAX - kManagerVtable || vptr != image_base + kManagerVtable)
+  if (vptr != image_base + layout.manager_vtable)
     return refused("Manager vtable does not match the verified image.");
 
   std::uint64_t second = 0;
   Handle handle_again{};
   std::uint32_t generation_again = 0;
-  if (!image.read(kManagerOwnerGlobal, &second, sizeof(second)))
+  if (!image.read(layout.manager_owner_global, &second, sizeof(second)))
     return unavailable("Manager owner global could not be reread.");
   if (second != owner)
     return unavailable("Manager owner changed during inspection.");
-  if (!image.read(kManagerRendererGlobal, &second, sizeof(second)))
+  if (!image.read(layout.renderer_global, &second, sizeof(second)))
     return unavailable("Manager renderer global could not be reread.");
   if (second != renderer)
     return unavailable("Manager renderer changed during inspection.");

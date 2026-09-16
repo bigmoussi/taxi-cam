@@ -10,11 +10,18 @@ class RetainedProfileTransition {
   using Pair = engine_camera::Snapshot;
   using Views = std::array<engine_camera::OwnedViewSnapshot, 2>;
   using Dimensions = std::array<decltype(engine_camera::OwnedViewSnapshot::dimensions), 2>;
+  struct AllocationEvidence {
+    engine_camera::ManagerToken owner{};
+    std::array<engine_camera::EntryId, 2> ids{};
+    Dimensions dimensions{};
+    bool matches(const Pair& pair) const noexcept { return owner == pair.owner && ids == pair.owned_ids; }
+  };
   enum class Decision { wait, close, ready, refused };
   static bool session_changed(const Pair& pair, std::uint64_t started, std::uint64_t current) noexcept {
     return (pair.owned_ids[0] || pair.owned_ids[1]) && started != current;
   }
   void begin(std::uint32_t id, const Pair& pair, const Dimensions& dimensions) noexcept {
+    awaiting_pair_ = false;
     id_ = id;
     owner_ = pair.owner;
     ids_ = pair.owned_ids;
@@ -27,9 +34,30 @@ class RetainedProfileTransition {
     else if (!valid_pair(pair))
       state_ = Decision::refused;
   }
+  // The controller is still processing. Its published empty snapshot cannot
+  // prove absence until cancel_uncreated_request or a fresh owned pair settles.
+  void defer_pair(std::uint32_t id) noexcept {
+    id_ = id;
+    owner_ = {};
+    ids_ = {};
+    dimensions_ = {};
+    awaiting_pair_ = id != 0;
+    state_ = id ? Decision::wait : Decision::refused;
+  }
+  // PairController publishes ownership before the probe can publish allocation
+  // expectations. Never bind a new pair to an earlier pair's dimensions during
+  // that gap; the observer will publish matching evidence before retrying.
+  void begin_published(std::uint32_t id, const Pair& pair, const AllocationEvidence& evidence) noexcept {
+    if (id && valid_pair(pair) && !evidence.matches(pair))
+      defer_pair(id);
+    else
+      begin(id, pair, evidence.dimensions);
+  }
   Decision inspect(engine_camera::ManagerToken manager, const Pair& pair, const Views& views) noexcept {
     if (state_ == Decision::refused)
       return state_;
+    if (awaiting_pair_)
+      return Decision::wait;
     if (!matches(pair) || manager != owner_)
       return state_ = Decision::refused;
     bool open = false;
@@ -50,9 +78,16 @@ class RetainedProfileTransition {
   }
   bool matches(const Pair& pair) const noexcept { return valid_pair(pair) && pair.owner == owner_ && pair.owned_ids == ids_; }
   bool can_resume(const Pair& pair) const noexcept { return ready() && matches(pair); }
-  void refuse() noexcept { state_ = Decision::refused; }
-  void consume() noexcept { id_ = 0; }
+  void refuse() noexcept {
+    awaiting_pair_ = false;
+    state_ = Decision::refused;
+  }
+  void consume() noexcept {
+    id_ = 0;
+    awaiting_pair_ = false;
+  }
   bool holding() const noexcept { return id_ != 0; }
+  bool awaiting_pair() const noexcept { return holding() && awaiting_pair_; }
   bool pending() const noexcept { return holding() && (state_ == Decision::wait || state_ == Decision::close); }
   bool ready() const noexcept { return holding() && state_ == Decision::ready; }
   bool failed() const noexcept { return holding() && state_ == Decision::refused; }
@@ -68,6 +103,7 @@ class RetainedProfileTransition {
   engine_camera::ManagerToken owner_{};
   std::array<engine_camera::EntryId, 2> ids_{};
   Dimensions dimensions_{};
+  bool awaiting_pair_ = false;
   Decision state_ = Decision::wait;
 };
 }  // namespace taxi_camera::native_camera

@@ -15,23 +15,24 @@ void require(bool value, const char* error) {
     throw std::runtime_error(error);
 }
 struct Reader final : discovery::ImageReader {
+  std::uint32_t pair_rva = kRva;
   std::array<std::uint8_t, 16> bytes{1};
   unsigned reads = 0, queries = 0, read_bytes = 0, window = 16;
   bool inaccessible = false, fail = false, change = false, oversized = false;
   discovery::ReadWindow query(std::uint32_t rva, std::uint32_t maximum) override {
     ++queries;
-    require(rva >= kRva && rva - kRva < 16 && maximum <= 16 - (rva - kRva), "Query escaped the fixed pair");
+    require(rva >= pair_rva && rva - pair_rva < 16 && maximum <= 16 - (rva - pair_rva), "Query escaped the fixed pair");
     return {oversized ? maximum + 1 : std::min(window, maximum), !inaccessible};
   }
   bool read(std::uint32_t rva, void* destination, std::size_t size) override {
     ++reads;
-    require(rva >= kRva && rva - kRva < 16 && size <= 16 - (rva - kRva), "Read escaped the fixed pair");
+    require(rva >= pair_rva && rva - pair_rva < 16 && size <= 16 - (rva - pair_rva), "Read escaped the fixed pair");
     if (change && read_bytes == 16)
       bytes[0] ^= 2;
     read_bytes += static_cast<unsigned>(size);
     if (fail)
       return false;
-    std::memcpy(destination, bytes.data() + (rva - kRva), size);
+    std::memcpy(destination, bytes.data() + (rva - pair_rva), size);
     return true;
   }
 };
@@ -112,10 +113,31 @@ void tests() {
     require(!result.valid && result.read_bytes == 0 && reader.queries == 0 && reader.reads == 0, "Invalid image metadata caused reads");
   }
 }
+void resolved_layout() {
+  auto layout = native_camera::observed_store_layout();
+  layout.activation_disable_mask += 0x10000;
+  auto metadata = image();
+  metadata.sections[0].rva += 0x10000;
+  Reader moved;
+  moved.pair_rva = layout.activation_disable_mask;
+  require(native_camera::inspect_activation_disable_mask(moved, metadata, layout).valid && moved.read_bytes == 32,
+          "Resolved activation-mask address did not retain the full pair reread");
+  moved.bytes[8] = 1;
+  require(!native_camera::inspect_activation_disable_mask(moved, metadata, layout).valid,
+          "Resolved activation mask accepted a forbidden second flag word");
+  for (const auto rva : {0u, UINT32_MAX, layout.activation_disable_mask + 1, kRva}) {
+    Reader invalid;
+    auto wrong = layout;
+    wrong.activation_disable_mask = rva;
+    require(!native_camera::inspect_activation_disable_mask(invalid, metadata, wrong).valid && invalid.reads == 0,
+            "Malformed/unmapped activation-mask layout caused reads");
+  }
+}
 }  // namespace
 int main() {
   try {
     tests();
+    resolved_layout();
     std::printf("PASS: %u fixed activation-mask checks; 32-byte maximum, no engine calls.\n", checks);
   } catch (const std::exception& error) {
     std::fprintf(stderr, "FAIL after %u checks: %s\n", checks, error.what());

@@ -1,6 +1,7 @@
 #include <d3d11on12.h>
 #include "../../src/bridge/d3d12_bridge.hpp"
 #include "../../src/bridge/native_hooks.hpp"
+#include "../../src/graphics/native_device_identity.hpp"
 #include "../../src/graphics/scene_frame_output.hpp"
 #include "../support/graphics_fixture.hpp"
 namespace {
@@ -882,7 +883,13 @@ void textured_gray_fallback(ID3D12Device* device,
   std::printf("PASS textured gray %s: 16 UNORM/sRGB/mip/alpha cases; fallback=%llu preferredcopy=0; preserved pixels=%llu\n",
               warp ? "WARP" : "hardware", fallback_count, checked);
 }
-void native_case(bool warp, bool a350, bool query_fallback, bool prefer_copy, bool textured_gray = false, bool ini_a380 = false) {
+void native_case(bool warp,
+                 bool a350,
+                 bool query_fallback,
+                 bool prefer_copy,
+                 bool textured_gray = false,
+                 bool ini_a380 = false,
+                 bool require_proxy = false) {
   const auto& profile = ini_a380 ? taxi_camera::profiles::IniA380 : a350 ? taxi_camera::profiles::A359 : taxi_camera::profiles::A380;
   if (ini_a380)
     std::puts("Validating iniBuilds A380 display geometry: own GPU fixtures only; does not validate live routing or framing.");
@@ -899,6 +906,15 @@ void native_case(bool warp, bool a350, bool query_fallback, bool prefer_copy, bo
     check(factory->EnumWarpAdapter(IID_PPV_ARGS(adapter.put())), "WARP");
   Reference<ID3D12Device> device;
   check(D3D12CreateDevice(adapter.get(), D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(device.put())), "Device");
+  Reference<ID3D12Device> native_device;
+  require(taxi_camera::resolve_native_device(device.get(), native_device.put()), "Resolve validation device");
+  if (require_proxy) {
+    Reference<IUnknown> reported_identity, native_identity;
+    check(device->QueryInterface(IID_PPV_ARGS(reported_identity.put())), "Reported device identity");
+    check(native_device->QueryInterface(IID_PPV_ARGS(native_identity.put())), "Native device identity");
+    require(reported_identity.get() != native_identity.get(), "Proxy validation requires an active device wrapper");
+    std::puts("Verified distinct proxy/native devices; application objects and calls continue through the proxy.");
+  }
   Reference<ID3D12InfoQueue> messages;
   if (debug_enabled)
     device->QueryInterface(IID_PPV_ARGS(messages.put()));
@@ -914,6 +930,9 @@ void native_case(bool warp, bool a350, bool query_fallback, bool prefer_copy, bo
   check(device->CreateCommandList(0, qd.Type, allocator.get(), nullptr, IID_PPV_ARGS(list.put())), "Pre-existing list");
   check(list->Close(), "Close pre-existing list");
   require(win::initialize_graphics(device.get()), win::graphics_status().error);
+  require(win::graphics_status().device == reinterpret_cast<std::uint64_t>(native_device.get()), "Bridge owns the resolved device");
+  require(win::initialize_graphics(native_device.get()) && win::initialize_graphics(device.get()),
+          "Repeated initialization shares one native registry through either interface");
   win::set_aircraft_profile(profile.id);
   check(list->Reset(allocator.get(), nullptr), "Observe first actual Reset of pre-existing list");
   const auto key = win::graphics_status().device;
@@ -2362,7 +2381,7 @@ void native_case(bool warp, bool a350, bool query_fallback, bool prefer_copy, bo
 int wmain(int argc, wchar_t** argv) {
   try {
     bool warp = false, a350 = false, query_fallback = false, prefer_copy = false, profile_switch = false, textured_gray = false,
-         ini_a380 = false;
+         ini_a380 = false, require_proxy = false;
     for (int i = 1; i < argc; ++i) {
       if (std::wcscmp(argv[i], L"--warp") == 0)
         warp = true;
@@ -2374,6 +2393,8 @@ int wmain(int argc, wchar_t** argv) {
         query_fallback = true;
       else if (std::wcscmp(argv[i], L"--textured-gray") == 0)
         textured_gray = a350 = true;
+      else if (std::wcscmp(argv[i], L"--require-proxy") == 0)
+        require_proxy = true;
       else if (std::wcscmp(argv[i], L"--profile-switch") == 0)
         profile_switch = true;
       else if (std::wcscmp(argv[i], L"--patch-demand") == 0)
@@ -2385,13 +2406,15 @@ int wmain(int argc, wchar_t** argv) {
     }
     if (ini_a380 && (a350 || profile_switch))
       return 2;
+    if (require_proxy && profile_switch)
+      return 2;
     patch_demand_case();
     if (argc == 2 && std::wcscmp(argv[1], L"--patch-demand") == 0)
       return 0;
     if (profile_switch)
       active_profile_switch_case(warp);
     else
-      native_case(warp, a350, query_fallback, prefer_copy, textured_gray, ini_a380);
+      native_case(warp, a350, query_fallback, prefer_copy, textured_gray, ini_a380, require_proxy);
     return 0;
   } catch (const std::exception& e) {
     std::fprintf(stderr, "FAIL native graphics: %s\n", e.what());

@@ -12,6 +12,7 @@ namespace {
 namespace nc = taxi_camera::native_camera;
 namespace ec = taxi_camera::engine_camera;
 unsigned checks = 0;
+constexpr nc::ViewDimensions MixedPrimary{{{1279, 680}, {2558, 1360}, {2558, 1360}}};
 void require(bool value, const char* message) {
   ++checks;
   if (!value)
@@ -35,6 +36,7 @@ struct Fixture {
     std::memset(allocation, 0xa5, 8192);
     view.complete = view.ready = true;
     view.status = ec::OwnedViewStatus::ready;
+    view.mode = 2;
     view.view_address = reinterpret_cast<std::uintptr_t>(memory);
     view.dimensions.fill({3413, 913});
     view.flags = {0x123456789abcdef1ull, 0xfedcba9876543210ull};
@@ -44,6 +46,11 @@ struct Fixture {
     require(nc::plan_view_resize(view.dimensions, feed, desired), "fixture dimensions");
   }
   ~Fixture() { VirtualFree(allocation, 0, MEM_RELEASE); }
+  void inherit(const nc::ViewDimensions& dimensions) {
+    view.dimensions = dimensions;
+    std::memcpy(memory + 16, &view.dimensions, sizeof(view.dimensions));
+    std::memcpy(before.data(), memory, before.size());
+  }
   nc::ViewResizeCallbacks callbacks() {
     return {this,
             [](void* opaque, std::uint64_t view) noexcept {
@@ -88,12 +95,42 @@ void planning() {
     input.fill({3413, value});
     require(!nc::plan_view_resize(input, 1, output) && output == nc::ViewDimensions{}, "invalid height accepted/leaked output");
   }
-  input.fill({3413, 913});
-  input[1][0] = 3414;
-  require(!nc::plan_view_resize(input, 0, output), "different dimension pair accepted");
+  for (const auto inherited : {MixedPrimary, nc::ViewDimensions{{{1695, 901}, {2542, 1351}, {2542, 1351}}},
+                               nc::ViewDimensions{{{32, 16384}, {16384, 32}, {1920, 1080}}}})
+    for (unsigned feed = 0; feed < 2; ++feed) {
+      require(nc::plan_view_resize(inherited, feed, output), "bounded independent inherited pairs refused");
+      for (const auto pair : output)
+        require(pair == nc::kCameraPaneDimensions[feed], "mixed inherited sizes altered the exact requested pane");
+    }
   input.fill({3413, 913});
   for (const auto feed : {2u, 3u, std::numeric_limits<unsigned>::max()})
     require(!nc::plan_view_resize(input, feed, output) && output == nc::ViewDimensions{}, "unknown feed accepted/leaked output");
+}
+void independent_dimension_guards() {
+  for (unsigned feed = 0; feed < 2; ++feed)
+    for (unsigned pair = 0; pair < 3; ++pair)
+      for (unsigned axis = 0; axis < 2; ++axis) {
+        for (const auto invalid : {std::numeric_limits<std::int32_t>::min(), -1, 0, 31, 16385, std::numeric_limits<std::int32_t>::max()}) {
+          Fixture fixture(0, feed);
+          auto inherited = MixedPrimary;
+          inherited[pair][axis] = invalid;
+          fixture.inherit(inherited);
+          nc::ViewDimensions planned{};
+          require(!nc::plan_view_resize(inherited, feed, planned) && planned == nc::ViewDimensions{},
+                  "Initial planning admitted an unbounded inherited field");
+          const auto result = nc::resize_owned_view(fixture.view, feed, fixture.desired, fixture.callbacks());
+          require(!result.complete && !result.write_attempted && result.status == nc::ViewResizeStatus::invalid_dimensions,
+                  "Initial resize admitted an unbounded inherited field");
+          fixture.unchanged_bytes();
+        }
+        Fixture fixture(0, feed);
+        fixture.inherit(MixedPrimary);
+        ++fixture.desired[pair][axis];
+        const auto result = nc::resize_owned_view(fixture.view, feed, fixture.desired, fixture.callbacks());
+        require(!result.complete && !result.write_attempted && result.status == nc::ViewResizeStatus::invalid_dimensions,
+                "Mixed inherited dimensions admitted a noncanonical desired field");
+        fixture.unchanged_bytes();
+      }
 }
 void success(unsigned feed) {
   Fixture fixture(0, feed);
@@ -195,11 +232,13 @@ void callback_failures() {
   }
 }
 
-void stale_fields_and_boundary() {
+void stale_fields_and_boundary(bool mixed) {
   for (unsigned offset = 16; offset < 64; ++offset) {
     if (offset >= 40 && offset < 48)
       continue;
     Fixture fixture;
+    if (mixed)
+      fixture.inherit(MixedPrimary);
     fixture.memory[offset] ^= 4;
     std::memcpy(fixture.before.data(), fixture.memory, fixture.before.size());
     const auto result = nc::resize_owned_view(fixture.view, fixture.feed, fixture.desired, fixture.callbacks());
@@ -307,7 +346,7 @@ void retained_dimension_restore() {
   }
 }
 
-void empty_manager_warmup() {
+void empty_manager_warmup(const nc::ViewDimensions& primary) {
   nc::ViewResizeWarmup warmup;
   const std::array<std::uint64_t, 2> ids{1003, 1004};
   require(!warmup.begin({0, 1004}, 1) && !warmup.pending(), "zero owned ID admitted");
@@ -316,22 +355,18 @@ void empty_manager_warmup() {
   Fixture nose;
   Fixture tail(0, 1);
   unsigned manager_entries = 0;
-  std::array<std::int32_t, 2> manager_cache{};
-  const std::array<std::int32_t, 2> primary{3413, 913};
+  nc::ViewDimensions manager_cache{};
   const auto original_update = [&] {
     if (!manager_entries)
       return;  // Captured early return at17648645/17648649.
     if (manager_cache == primary)
       return;
     manager_cache = primary;
-    for (auto* fixture : {&nose, &tail}) {
-      nc::ViewDimensions inherited;
-      inherited.fill(manager_cache);
-      std::memcpy(fixture->memory + 16, &inherited, sizeof(inherited));
-    }
+    for (auto* fixture : {&nose, &tail})
+      std::memcpy(fixture->memory + 16, &manager_cache, sizeof(manager_cache));
   };
   original_update();
-  require(manager_cache == std::array<std::int32_t, 2>{}, "empty manager populated its cache");
+  require(manager_cache == nc::ViewDimensions{}, "empty manager populated its cache");
   manager_entries = 2;
   require(warmup.begin(ids, 10), "new pair warmup refused");
   require(!warmup.may_resize(ids, 10) && !warmup.finish(ids, 10), "same-update resize or activation admitted");
@@ -340,6 +375,13 @@ void empty_manager_warmup() {
           "private resize called before original warmup");
   original_update();
   require(manager_cache == primary, "first nonempty original update did not initialize cache");
+  // The probe inspects both owned chains again on the next observer. Its
+  // snapshot must contain the manager's new render/display/output fields.
+  for (auto* fixture : {&nose, &tail}) {
+    std::memcpy(&fixture->view.dimensions, fixture->memory + 16, sizeof(fixture->view.dimensions));
+    require(fixture->view.dimensions == primary && (fixture->view.flags[0] & 1u),
+            "Warmup did not retain fresh primary dimensions and a closed gate");
+  }
   require(warmup.may_resize(ids, 11) && warmup.pending(), "next observer did not allow closed resize");
   require(nc::resize_owned_view(nose.view, nose.feed, nose.desired, nose.callbacks()).complete, "nose resize after warmup");
   require(nc::resize_owned_view(tail.view, tail.feed, tail.desired, tail.callbacks()).complete, "tail resize after warmup");
@@ -348,6 +390,10 @@ void empty_manager_warmup() {
   require(std::memcmp(nose.memory + 16, &nose.desired, 24) == 0 && std::memcmp(tail.memory + 16, &tail.desired, 24) == 0,
           "stable primary dimensions overwrote resized mode2 outputs");
   require(nose.refreshed == 1 && nose.allocated == 1 && tail.refreshed == 1 && tail.allocated == 1, "warmup caused duplicate allocation");
+  for (const auto* fixture : {&nose, &tail})
+    for (unsigned byte = 0; byte < fixture->before.size(); ++byte)
+      if (byte < 16 || byte >= 40)
+        require(fixture->memory[byte] == fixture->before[byte], "Warmup resize escaped the exact 24-byte dimension range");
   require(warmup.begin({1005, 1006}, 12), "replacement pair warmup refused");
   warmup.clear();  // Stop before the next original update must cancel resize.
   require(!warmup.pending() && !warmup.may_resize({1005, 1006}, 13), "stop retained a stale resize request");
@@ -359,12 +405,15 @@ void empty_manager_warmup() {
 int main() {
   try {
     planning();
+    independent_dimension_guards();
     success(0);
     success(1);
     refusals();
     callback_failures();
-    stale_fields_and_boundary();
-    empty_manager_warmup();
+    stale_fields_and_boundary(false);
+    stale_fields_and_boundary(true);
+    empty_manager_warmup({{{3413, 913}, {3413, 913}, {3413, 913}}});
+    empty_manager_warmup(MixedPrimary);
     retained_dimension_restore();
     std::printf("PASS: %u owned-view resize checks; only own private fixture memory and mock callbacks used.\n", checks);
     return 0;

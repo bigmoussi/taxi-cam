@@ -1,8 +1,9 @@
 #pragma once
 
 #include <cstring>
-#include "memory_reader.hpp"
 #include "aircraft_mounts.hpp"
+#include "camera_layout.hpp"
+#include "memory_reader.hpp"
 
 namespace taxi_camera::native_camera {
 
@@ -14,7 +15,7 @@ struct AircraftScenePose {
 };
 
 // The caller supplies a freshly verified active user/controller in the current
-// observer, under the full code profile including the +336 handle accessor.
+// observer, under the complete code contract including the +336 handle accessor.
 // Never retains a borrowed pointer, acquires a reference, or writes the scene.
 // 1.8.16.0 observations: controller+336 generation handle and +464 alias name
 // the same model Node; its +296 matrix contains left/up/forward/origin rows.
@@ -23,9 +24,13 @@ struct AircraftScenePose {
 // the caller's responsibility. Public pose is a separate plausibility guard.
 inline AircraftScenePose inspect_aircraft_scene_pose(engine_camera::MemoryReader& reader,
                                                      std::uint64_t verified_user,
-                                                     std::uint64_t image_base) noexcept {
+                                                     std::uint64_t image_base,
+                                                     const CameraImageLayout& layout = observed_store_layout()) noexcept {
   AircraftScenePose result;
-  if (!verified_user || (verified_user & 7) || !image_base || image_base > UINT64_MAX - 136368168)
+  if (!verified_user || (verified_user & 7) || !image_base || !camera_layout_detail::image_rva(layout.aircraft_controller_vtable, 8, 8) ||
+      !camera_layout_detail::image_rva(layout.scene_node_vtable, 8, 8) ||
+      !camera_layout_detail::image_rva(layout.scene_model_vtable, 8, 8) || image_base > UINT64_MAX - layout.aircraft_controller_vtable ||
+      image_base > UINT64_MAX - layout.scene_node_vtable || image_base > UINT64_MAX - layout.scene_model_vtable)
     return result;
   struct Field {
     std::uint64_t address = 0;
@@ -55,12 +60,12 @@ inline AircraftScenePose inspect_aircraft_scene_pose(engine_camera::MemoryReader
   std::uint16_t type = 0;
   std::array<Vector3, 4> rows{};
   result.error = "scene_body_identity";
-  if (!read(verified_user, 0, user_vptr) || user_vptr != image_base + 133534840 || !read(verified_user, 336, handle) ||
-      !read(handle[0], 28, generation) || generation != static_cast<std::uint32_t>(handle[1]) || !read(handle[0], 0, node) || !node ||
-      (node & 7) || !read(verified_user, 464, alias) || alias != node || !read(node, 0, node_vptr) || node_vptr != image_base + 134592040 ||
-      !read(node, 256, attached) || !attached || (attached & 7) || !read(attached, 0, attached_vptr) ||
-      attached_vptr != image_base + 136368168 || !read(attached, 160, type) || type != 5 || !read(node, 296, matrix) || !matrix ||
-      (matrix & 7))
+  if (!read(verified_user, 0, user_vptr) || user_vptr != image_base + layout.aircraft_controller_vtable ||
+      !read(verified_user, 336, handle) || !read(handle[0], 28, generation) || generation != static_cast<std::uint32_t>(handle[1]) ||
+      !read(handle[0], 0, node) || !node || (node & 7) || !read(verified_user, 464, alias) || alias != node || !read(node, 0, node_vptr) ||
+      node_vptr != image_base + layout.scene_node_vtable || !read(node, 256, attached) || !attached || (attached & 7) ||
+      !read(attached, 0, attached_vptr) || attached_vptr != image_base + layout.scene_model_vtable || !read(attached, 160, type) ||
+      type != 5 || !read(node, 296, matrix) || !matrix || (matrix & 7))
     return result;
   result.error = "scene_body_matrix";
   for (unsigned row = 0; row < rows.size(); ++row)

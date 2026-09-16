@@ -46,10 +46,11 @@ $graphics = @(
 )
 $engine = @(
  'src/camera/probe.cpp','src/camera/local_memory.cpp','src/camera/code_contract.cpp','src/camera/activation_mask.cpp',
+ 'src/camera/camera_contract.cpp','src/camera/camera_contract_model.cpp','src/camera/relocatable_contract.cpp','src/camera/rtti_vtables.cpp',
  'src/camera/view_resize.cpp','src/camera/view_aa.cpp','src/camera/source_view.cpp','src/camera/body_pose_provider.cpp','src/camera/mount_config.cpp',
- 'src/camera/verified_profile.cpp','src/camera/aircraft_inventory.cpp','src/camera/entry_pair.cpp',
+ 'src/camera/aircraft_inventory.cpp','src/camera/entry_pair.cpp',
  'src/camera/owned_entry_inventory.cpp','src/camera/owned_view.cpp','src/camera/view_pool.cpp',
- 'src/hooks/observer_hook.cpp','src/hooks/observer_thunk.S'
+ 'src/hooks/observer_hook.cpp','src/hooks/observer_thunk.S','tools/diagnostics/image_inventory.cpp'
 )
 $libs = @('-ld3d12','-ldxgi','-ldxguid','-ld3dcompiler')
 $objects = @()
@@ -77,6 +78,13 @@ if (Test-Path -LiteralPath (Join-Path $taskRoot 'src/app/companion.cpp')) {
     }
 }
 if ($Validate) {
+    $deviceIdentityTest = Join-Path $out 'native-device-identity-test.exe'
+    & $compiler @common (Join-Path $taskRoot 'tests/graphics/native_device_identity_test.cpp') @libs '-o' $deviceIdentityTest
+    if ($LASTEXITCODE -ne 0) { throw 'Native device identity compilation failed.' }
+    & $deviceIdentityTest
+    if ($LASTEXITCODE -ne 0) { throw 'Native device identity regression failed.' }
+    & $deviceIdentityTest --warp
+    if ($LASTEXITCODE -ne 0) { throw 'WARP native device identity regression failed.' }
     $iconTest = Join-Path $out 'application-icon-test.exe'
     & $compiler @common '-municode' (Join-Path $taskRoot 'tests/app/application_icon_test.cpp') '-lshell32' '-lgdi32' '-o' $iconTest
     if ($LASTEXITCODE -ne 0) { throw 'Application icon validation compilation failed.' }
@@ -234,6 +242,9 @@ if ($Validate) {
         @{Name='bug-report'; Sources=@('tests/app/bug_report_test.cpp')},
         @{Name='scene-demand'; Sources=@('tests/camera/scene_demand_test.cpp','src/camera/entry_pair.cpp')},
         @{Name='manager-inspection'; Sources=@('tests/camera/manager_inspection_test.cpp')},
+        @{Name='relocatable-contract'; Sources=@('src/camera/relocatable_contract.cpp','tests/camera/relocatable_contract_test.cpp')},
+        @{Name='rtti-vtables'; Sources=@('src/camera/rtti_vtables.cpp','tests/camera/rtti_vtables_test.cpp')},
+        @{Name='camera-contract'; Sources=@('src/camera/camera_contract.cpp','src/camera/camera_contract_model.cpp','src/camera/relocatable_contract.cpp','src/camera/rtti_vtables.cpp','src/camera/code_contract.cpp','src/camera/activation_mask.cpp','tools/diagnostics/image_inventory.cpp','tests/camera/camera_contract_test.cpp')},
         @{Name='taxi-button-command'; Sources=@('tests/camera/taxi_button_command_test.cpp')},
         @{Name='aircraft-layout'; Sources=@('src/camera/aircraft_inventory.cpp','tests/camera/aircraft_inventory_test.cpp')},
         @{Name='native-slots'; Sources=@('tests/graphics/native_slots_test.cpp')},
@@ -318,7 +329,7 @@ if ($Validate) {
         samplePositionTests=@($sampleResults)
         tests=@($gpuTests + @('pre-existing graphics objects','terminal command-list PFD drawing without application root replay','textured gray alpha and mip preservation with terminal PFD draws and repeated submissions','scoped barrier metadata lookup caching','descriptor heap filtering and retained device identity','unrelated submission bypass and discovery lock ordering','per-recording PFD copy evidence and draw fallback','preferred OM/Close copy pixel and query preservation','dynamic graphics-state replay and ABI','programmable sample-pattern normalization and restoration','isolated graphics-state regression coverage','lazy typed patch demand, discard and cross-profile replay','fractional ground-speed truncation and raw-speed cutoff','camera border and inset composition','antialiased GS glyphs and two-character spacing','ClearState pipeline preservation','native render-pass state preservation','private PFD patch copies','selected PFD copies in large barrier batches','PFD exits across command lists','typed PFD view evidence','application occlusion-query preservation','query-aware PFD drawing and OM restoration','calibration OM and Close delivery','retained camera dimension recovery','retained native aircraft transitions and request tokens','current-process memory query equivalence','close-only activation inspection','bounded memory query reuse','shared read-only inspection transaction with fresh endpoint validation','early camera preparation and activation timings','bounded grounded prewarm and retained foreground takeover','idle camera inspection scheduling','large barrier batches and changing camera frames','exact DLL smoke',
             'settings persistence and IPC','per-user first-launch Settings visibility, failure retry and preview isolation','per-aircraft reference-guide persistence','live reference-guide GPU updates','scene demand and retained camera ownership','companion contention and watchdog','configurable global camera shortcuts, native conflict recovery, hidden-window dispatch, preview isolation and manual-only controls','launcher file identity','native COM slots','TAXI routing','profile-switch target reacquisition','active-feed A380-A350-A380 transitions with retained sources','manual and automatic target selection','PFD detector','exposure','calibration','write budget',
-            'compositor formats and exposure','scene handoff and resource state','camera ownership','bug report URL encoding, bounds and diagnostic privacy','queue submit','PFD state observer lifecycle','render boundary','engine hook','camera telemetry and lifecycle','aircraft layout compatibility','exe.xml preservation and rename migration',
+            'compositor formats and exposure','scene handoff and resource state','camera ownership','bug report URL encoding, bounds and diagnostic privacy','relocatable native instruction discovery and static RTTI identity','complete camera contract on relocated synthetic PE images and refusal controls','queue submit','PFD state observer lifecycle','render boundary','engine hook','camera telemetry and lifecycle','aircraft layout compatibility','exe.xml preservation and rename migration',
             'native imports and header dependency closure','embedded multi-resolution application icon and Windows shell extraction','release selection, download integrity and updater handoff guards'));
         gpuValidation=[ordered]@{hardware=$(if ($WarpOnly) { 'not-run' } else { 'passed' });warp='passed'};
         simulatorVerified=$false

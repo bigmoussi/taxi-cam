@@ -21,9 +21,10 @@ struct GraphicsStatus {
   const char* target_detection = "warming_up";
 };
 bool initialize_graphics() noexcept;
-// Isolated validation supplies a real hardware/WARP device. This never calls
-// the simulator or telemetry. Own objects created by core code must be bypassed.
-bool initialize_graphics(ID3D12Device*) noexcept;
+// Resolve a reported device's optional COM proxy chain before native hooks or
+// owned GPU work. Isolated validation supplies a hardware/WARP device; this
+// never calls the simulator or telemetry.
+bool initialize_graphics(IUnknown*) noexcept;
 GraphicsStatus graphics_status() noexcept;
 std::vector<PfdTargetObservation> pfd_inventory();
 bool assign_targets(std::uint64_t left, std::uint64_t right) noexcept;

@@ -46,5 +46,16 @@ int main() {
     require(camera_stop_message(scene), "Retained IDs do not hide a fatal stop");
     scene.pair.state = engine_camera::State::disabled;
   }
+  scene.message = "Initial camera creation parked until render demand resumes.";
+  scene.profile_transition_failed = true;
+  require(std::strstr(camera_transition_message(scene), "validation failed") && !std::strstr(camera_transition_message(scene), "parked"),
+          "A failed aircraft transition reused an unrelated prior camera message");
+  scene.profile_transition_failed = false;
+  scene.pair.request_pending = true;
+  require(std::strstr(camera_transition_message(scene), "pending camera startup"),
+          "Empty startup transition claimed to be validating existing cameras");
+  scene.pair.owned_ids = {1001, 1002};
+  require(std::strstr(camera_transition_message(scene), "retained camera views"),
+          "Existing-camera transition lost its retained lifecycle status");
   std::printf("Camera status: PASS %u checks\n", checks);
 }

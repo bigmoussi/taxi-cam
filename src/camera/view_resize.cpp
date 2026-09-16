@@ -20,10 +20,6 @@ bool dimensions_bounded(const ViewDimensions& dimensions) noexcept {
   return true;
 }
 
-bool dimensions_valid(const ViewDimensions& dimensions) noexcept {
-  return dimensions[0] == dimensions[1] && dimensions[1] == dimensions[2] && dimensions_bounded(dimensions);
-}
-
 bool writable_private(std::uint64_t address, std::size_t bytes) noexcept {
   if (!address || address > std::numeric_limits<std::uintptr_t>::max() - bytes)
     return false;
@@ -61,7 +57,7 @@ bool plan_view_resize(const ViewDimensions& inherited,
                       ViewDimensions& desired,
                       const profiles::CameraPanes& panes) noexcept {
   desired = {};
-  if (!dimensions_valid(inherited) || feed >= panes.size() || panes[feed][0] < 32 || panes[feed][0] > 2048 || panes[feed][1] < 32 ||
+  if (!dimensions_bounded(inherited) || feed >= panes.size() || panes[feed][0] < 32 || panes[feed][0] > 2048 || panes[feed][1] < 32 ||
       panes[feed][1] > 2048)
     return false;
   desired.fill(panes[feed]);
@@ -85,13 +81,13 @@ static ViewResizeResult change_view_dimensions(const engine_camera::OwnedViewSna
       (initialize_output && !callbacks.ensure_output))
     return fail(ViewResizeStatus::invalid_snapshot);
   ViewDimensions planned{};
-  // An AA/upscaling switch can copy different primary render/display sizes
-  // into the three pairs. For retained mode2 output, bound every inherited
-  // field and validate the requested pane independently. The exact existing
-  // Bitmap dimensions below, closed gate, and repeated fields still govern
-  // restoration; this path never calls the output allocator.
-  const bool inherited_valid = initialize_output ? dimensions_valid(view.dimensions) : dimensions_bounded(view.dimensions);
-  if (!inherited_valid || !plan_view_resize(desired, feed, planned, panes) || desired != planned)
+  // The first original manager update, as well as a later AA/upscaling switch,
+  // can copy different primary render/display sizes into these pairs. Bound
+  // every inherited field independently; the requested three pairs must still
+  // equal the exact profile pane. Closed gates and full field rereads govern
+  // both paths; restoration additionally proves the existing Bitmap below and
+  // never calls the output allocator.
+  if (!dimensions_bounded(view.dimensions) || !plan_view_resize(desired, feed, planned, panes) || desired != planned)
     return fail(ViewResizeStatus::invalid_dimensions);
   if (!(view.flags[0] & 1u))
     return fail(ViewResizeStatus::gate_open);

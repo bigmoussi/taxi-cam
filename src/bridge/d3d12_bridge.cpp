@@ -1535,8 +1535,18 @@ bool same_interface(ID3D12Device* device, REFIID iid) {
 }
 }  // namespace
 
-bool initialize_graphics(ID3D12Device* device) noexcept {
+bool initialize_graphics(IUnknown* reported) noexcept {
   const OwnedWork guard;
+  ID3D12Device* device{};
+  if (!resolve_native_device(reported, &device)) {
+    error("native_device_resolution_failed");
+    return false;
+  }
+  const auto release = [](ID3D12Device* p) { p->Release(); };
+  const std::unique_ptr<ID3D12Device, decltype(release)> reference(device, release);
+  // Hook below cooperating proxies: translated descriptors, unwrapped queue
+  // submissions, and Close after downstream add-on callbacks. The existing
+  // native Close endpoint check remains mandatory for final writes.
   auto& r = registry();
   if (r.device)
     return r.device == device && r.ready;
