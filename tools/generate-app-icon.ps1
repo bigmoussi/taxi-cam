@@ -1,12 +1,44 @@
 [CmdletBinding()]
 param([string]$Output = (Join-Path $PSScriptRoot '../src/app/taxi-cam.ico'))
 $ErrorActionPreference = 'Stop'
-# Reproduce the companion's original teal circle, dark camera and pale lens.
-# Eight samples per axis keep the same mathematical design sharp at shell sizes.
+# An L-shaped taxiway and full-width hold-short marking inside a teal rounded square.
+# Eight samples per axis keep the deterministic glyph clear at shell sizes.
 Add-Type -TypeDefinition @'
 using System;
 using System.IO;
 public static class TaxiCamIcon {
+    static bool RoundedSquare(double x, double y, double halfExtent, double radius) {
+        double dx = Math.Max(Math.Abs(x - 16) - halfExtent + radius, 0);
+        double dy = Math.Max(Math.Abs(y - 16) - halfExtent + radius, 0);
+        return dx * dx + dy * dy < radius * radius;
+    }
+    static double SegmentDistanceSquared(double px, double py, double ax, double ay, double bx, double by) {
+        double dx = bx - ax, dy = by - ay;
+        double t = Math.Max(0, Math.Min(1, ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)));
+        double x = px - ax - t * dx, y = py - ay - t * dy;
+        return x * x + y * y;
+    }
+    static bool Curve(double x, double y, double ax, double ay, double cx, double cy, double ex, double ey) {
+        double startX = ax, startY = ay;
+        for (int i = 1; i <= 24; ++i) {
+            double t = i / 24.0, u = 1 - t;
+            double bx = u * u * startX + 2 * u * t * cx + t * t * ex;
+            double by = u * u * startY + 2 * u * t * cy + t * t * ey;
+            if (SegmentDistanceSquared(x, y, ax, ay, bx, by) <= 1.21) return true;
+            ax = bx; ay = by;
+        }
+        return false;
+    }
+    static bool Route(double x, double y) {
+        // Two continuous lines face the approaching taxiway, two dashed lines beyond.
+        // The asphalt mask clips each full-width bar before the teal border.
+        if (Math.Abs(y - 11) <= 0.6 || Math.Abs(y - 13) <= 0.6) return true;
+        if ((Math.Abs(y - 7) <= 0.6 || Math.Abs(y - 9) <= 0.6) &&
+            ((x + 0.75) % 4.75 <= 3.5)) return true;
+        return SegmentDistanceSquared(x, y, 7, 25, 16, 25) <= 1.21 ||
+               Curve(x, y, 16, 25, 20, 25, 20, 21) ||
+               SegmentDistanceSquared(x, y, 20, 21, 20, 15.5) <= 1.21;
+    }
     static byte[] Image(int size) {
         var pixels = new uint[size * size];
         for (int y = 0; y < size; ++y) for (int x = 0; x < size; ++x) {
@@ -14,10 +46,8 @@ public static class TaxiCamIcon {
             for (int sy = 0; sy < 8; ++sy) for (int sx = 0; sx < 8; ++sx) {
                 double px = (x + (sx + 0.5) / 8) * 32 / size;
                 double py = (y + (sy + 0.5) / 8) * 32 / size;
-                uint color = (px-16)*(px-16) + (py-16)*(py-16) < 240 ? 0xff42dbb8u : 0;
-                if (px >= 7 && px < 25 && py >= 11 && py < 23) color = 0xff11151cu;
-                if (px >= 10 && px < 16 && py >= 8 && py < 12) color = 0xff11151cu;
-                if ((px-16)*(px-16) + (py-17)*(py-17) < 16) color = 0xffe8eef6u;
+                uint color = RoundedSquare(px, py, 15.5, 6) ? 0xff42dbb8u : 0;
+                if (RoundedSquare(px, py, 14.7, 5.2)) color = Route(px, py) ? 0xffffd633u : 0xff11151cu;
                 if (color != 0) { ++count; r += (int)((color >> 16) & 255); g += (int)((color >> 8) & 255); b += (int)(color & 255); }
             }
             if (count != 0) pixels[y*size+x] = (uint)(((count*255+32)/64) << 24 | (r/count) << 16 | (g/count) << 8 | b/count);

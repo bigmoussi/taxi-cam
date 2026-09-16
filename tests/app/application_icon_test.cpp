@@ -66,15 +66,25 @@ void render(HICON icon, int size, const std::wstring& destination) {
     for (int x = 0; x < size; ++x)
       pixels[y * size + x] = ((x / 8 + y / 8) & 1) ? 0xffcccccc : 0xffeeeeee;
   require(DrawIconEx(dc, 0, 0, icon, size, size, 0, nullptr, DI_NORMAL) && GdiFlush(), "Shell icon renders onto checkerboard");
-  unsigned teal{}, camera{}, lens{};
+  unsigned teal{}, asphalt{}, route{}, approach{}, hold_short_left{}, hold_short_right{};
   for (int i = 0; i < size * size; ++i) {
     const auto color = pixels[i] & 0xffffff;
-    teal += color == 0x42dbb8;
-    camera += color == 0x11151c;
-    lens += color == 0xe8eef6;
+    const auto red = (color >> 16) & 255, green = (color >> 8) & 255, blue = color & 255;
+    teal += green > red + 40 && blue > red + 30 && green > blue;
+    asphalt += color == 0x11151c;
+    // The 16-pixel centreline is antialiased against asphalt; include blended yellow.
+    const bool yellow = red > 130 && green > 110 && blue < 90 && red > green && green > blue + 50;
+    route += yellow;
+    approach += yellow && i / size >= size * 5 / 8 && i % size < size / 2;
+    hold_short_left += yellow && i / size < size / 2 && i % size < size / 3;
+    hold_short_right += yellow && i / size < size / 2 && i % size >= size * 2 / 3;
   }
-  require(teal > static_cast<unsigned>(size * size / 4) && camera > static_cast<unsigned>(size * size / 12) && lens > 0,
-          "Extracted application branding retains teal circle, dark camera and pale lens");
+  const bool branding = teal > 0 && asphalt > static_cast<unsigned>(size * size / 3) && route > static_cast<unsigned>(size * size / 50) &&
+                        approach > 0 && hold_short_left > 0 && hold_short_right > 0;
+  if (!branding)
+    std::fprintf(stderr, "Icon %d px: border=%u asphalt=%u route=%u approach=%u hold-short-left=%u hold-short-right=%u\n", size, teal,
+                 asphalt, route, approach, hold_short_left, hold_short_right);
+  require(branding, "Extracted branding retains asphalt, teal border, taxiway approach and hold-short marking across both sides");
   require((pixels[0] & 0xffffff) == 0xeeeeee, "Icon corner remains transparent");
   BITMAPFILEHEADER header{};
   header.bfType = 0x4d42;
