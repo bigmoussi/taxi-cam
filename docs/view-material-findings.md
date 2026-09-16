@@ -1,6 +1,6 @@
-# Extra-view lighting investigation
+# Extra-view lighting contract
 
-On 14 September 2026 the user reported missing runway/taxiway lights in the native taxi-camera pictures, while aircraft lights remained visible. This distinction does not establish that all lighting or all emissive rendering is absent. Exposure is a separate display-conversion issue.
+Runway and taxiway lights can be faint or absent in the native taxi-camera images while aircraft lights remain visible. This distinction does not establish that all lighting or emissive rendering is absent. Exposure is a separate display-conversion issue.
 
 The current source path reads only `Material_Z+520`, material slot 0, named `VIEWPORT_MATERIAL_DIFFUSE VP%d`. `src/camera/owned_view.cpp` resolves `P+144`/`E+80` to that material, then the bitmap backend record and native wrapper. It does not read or combine slot 9 at material+664, named `VIEWPORT_MATERIAL_ADD_DIFFUSE VP%d`.
 
@@ -32,10 +32,8 @@ Primary bit49 is set and both extra-view bit49 values are clear; bit18 is clear 
 
 Setup `17642240` ORs a global pair plus bits5/21/36, clears bits8/10/11/16/30 at `17642887`, then optionally ORs the 16-byte constant at130434112 when E+72 is nonzero. Production mode2 uses descriptor+44=1, which supplies E+72. None of these bit labels has been established as an airport-light control. Activation bit0 is independently verified; its meaning must not be extended to other bits.
 
-The next discriminating test is a GPU capture of the primary ADD_DIFFUSE image at a known night view, with actual live resource registration and queue/fence ownership. If it contains the missing light contribution, an owned-view experiment still needs a verified render-consumer/flag contract and source lifetime before enabling or combining it. Copying the primary image into the taxi feeds would have the wrong camera projection. No flag was mutated, extra bitmap allocated, native call made, or new GPU capture installed during this diagnostic. There is no production lighting fix from this evidence yet.
+A GPU capture of the primary ADD_DIFFUSE image at a known night view, with live resource registration and queue/fence ownership, is required to determine whether it contains the missing light contribution. Any owned-view implementation also requires a verified render-consumer/flag contract and source lifetime before enabling or combining it. Copying the primary image into the taxi feeds would use the wrong camera projection. The available evidence does not provide a production lighting fix.
 
-## Diagnostic validation and launch correction
+## Diagnostic validation
 
-`view_material_build.ps1` builds the independent reader and runs91 synthetic checks, including null/stale handles, byte-aligned controls, duplicate views, changed identity/descriptor rejection, independently changing activation flags, exact reads and resource equality ordinals. A complete synthetic eight-view/two-slot trace uses4944 bytes. It also checks wrong-process refusal before any simulator read.
-
-The first test executable was accidentally linked to an unavailable `libc++.dll` and caused a Windows loader error. Both executables were rebuilt with `-static`. Their PE imports now contain only Windows/UCRT DLLs; an isolated hidden test then exited0. The script checks imports before launch and starts both validation processes hidden. No diagnostic process remained after verification; MSFS was not stopped or modified.
+`view_material_build.ps1` builds the independent reader and runs 91 synthetic checks, including null/stale handles, byte-aligned controls, duplicate views, changed identity/descriptor rejection, independently changing activation flags, exact reads and resource equality ordinals. A complete synthetic eight-view/two-slot trace uses 4,944 bytes. It also checks wrong-process refusal before any simulator read. The executables link the runtime statically, and the script verifies that their PE imports contain only Windows/UCRT DLLs before starting both validation processes hidden.

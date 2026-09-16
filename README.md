@@ -74,8 +74,7 @@ Assignments apply immediately and belong to the current flight; texture IDs can 
 ## Known issues and limitations
 
 - **Night lighting:** Runway and taxiway lights can look very faint or be difficult to see. Improving their visibility is on the roadmap.
-- **iniBuilds A380:** Camera views and reference markers have been calibrated in the simulator. If automatic PFD selection cannot identify both displays, select them manually in **PFD routing**.
-- **DLSS camera movement:** A350 testing confirmed stable views with TAA, but slight aircraft movement remains in the lower view while taxiing with DLSS. This result has not been established for every aircraft or system. If the cameras do not recover after changing graphics settings and Taxi Cam asks for a restart, restart MSFS.
+- **DLSS camera movement:** Slight aircraft movement can remain in the A350 lower view while taxiing with DLSS. TAA does not exhibit this movement. If the cameras do not recover after changing graphics settings and Taxi Cam asks for a restart, restart MSFS.
 - **Frame-rate impact:** Extra camera views cost performance. Taxi Cam is designed to keep this as low as possible, but you may notice a drop in FPS. Try a lower camera frame rate if needed.
 
 Please report unexpected behaviour using **Report a bug**.
@@ -83,8 +82,6 @@ Please report unexpected behaviour using **Report a bug**.
 ## Updates and removal
 
 Use **Check for updates** in the tray menu, or download the latest installer from [Releases](https://github.com/rthoms334/taxi-cam/releases/latest). Close MSFS and Taxi Cam before installing an update. Your saved settings are kept by default; setup offers an explicit reset if you want to start again.
-
-If you are running **0.8.17 or earlier**, download and run setup manually once. Those versions' updaters require the old installer filename containing a build number; **0.8.18 and later** recognise the shorter `taxi-cam-<version>-windows-x64-setup.exe` name.
 
 Existing shortcut choices are kept too. To adopt **Ctrl + Shift + L / R / B**, open **Overview → Flight-deck control → Keyboard shortcuts…**, select **Reset shortcuts**, then **Save changes** in that editor.
 
