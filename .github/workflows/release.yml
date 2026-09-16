@@ -63,6 +63,7 @@ jobs:
             ./smoke-test.ps1
             ./tests/installer/prerequisites_test.ps1
             ./tests/installer/install_test.ps1
+            ./tests/installer/settings_test.ps1
             ./tests/installer/package_test.ps1
           } finally {
             Stop-Transcript

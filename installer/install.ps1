@@ -4,13 +4,15 @@ param(
     [string]$ExeXml,
     [string]$Destination = (Join-Path $env:LOCALAPPDATA 'Taxi Cam\app'),
     [string]$PayloadDirectory,
-    [switch]$NoShortcut
+    [switch]$NoShortcut,
+    [switch]$ResetSettings
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 . (Join-Path $PSScriptRoot 'exe_xml.ps1')
 . (Join-Path $PSScriptRoot 'validation_receipt.ps1')
 . (Join-Path $PSScriptRoot 'prerequisites.ps1')
+. (Join-Path $PSScriptRoot 'settings.ps1')
 if (-not $PayloadDirectory) {
     $PayloadDirectory = if (Test-Path -LiteralPath (Join-Path $PSScriptRoot '../build/native/validation.json')) { Join-Path $PSScriptRoot '../build/native' } else { $PSScriptRoot }
 }
@@ -38,8 +40,10 @@ function Assert-Closed {
     foreach ($p in @(Get-Process -Name taxi-cam,380-taxi-cam -ErrorAction SilentlyContinue)) {
         if ($p.Path -and $p.Path -in @($exe,$oldExe)) { throw 'Exit the taxi camera app from its tray menu before updating it.' }
     }
+    if ($ResetSettings) { Assert-TaxiSettingsClosed }
 }
 Assert-Closed
+if ($ResetSettings) { [void]@(Get-TaxiSettingsTargets -Installation $dest -IncludeMount) }
 Assert-TaxiPrerequisites -SimulatorDirectory $sim
 # Repository builds keep legal text beside the source. Packaged installs must
 # provide both files in their payload; never silently omit either notice.
@@ -60,6 +64,12 @@ foreach ($name in @('LICENSE.txt','THIRD_PARTY_NOTICES.txt')) {
     $installSources[$name] = $source
     $installHashes[$name] = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
 }
+$defaultMount = $null
+if ($ResetSettings) {
+    $defaultMount = if ($payload -eq $repositoryPayload) { Join-Path $PSScriptRoot '../taxi-camera-mounts.cfg' }
+        else { Join-Path $payload 'taxi-camera-mounts.cfg' }
+    if (-not (Test-Path -LiteralPath $defaultMount -PathType Leaf)) { throw 'Bundled default camera mounts are required to reset settings.' }
+}
 $hash = if (Test-Path -LiteralPath $ExeXml) { (Get-FileHash -LiteralPath $ExeXml).Hash } else { '' }
 $document = Read-TaxiLaunchXml $ExeXml
 $globalDisabled = $document.DocumentElement.SelectSingleNode('Disabled')
@@ -77,6 +87,11 @@ foreach ($name in $installSources.Keys) {
     Copy-Item -LiteralPath $installSources[$name] -Destination (Join-Path $staging $name)
     if ((Get-FileHash -LiteralPath (Join-Path $staging $name)).Hash -ne $installHashes[$name]) { throw "Staging verification failed: $name" }
 }
+if ($ResetSettings) {
+    Copy-Item -LiteralPath $defaultMount -Destination (Join-Path $staging 'default-mount.cfg')
+    $defaultMount = Join-Path $staging 'default-mount.cfg'
+}
+$settingsSnapshot = @()
 $prior = @{}
 $installed = @()
 $legacy = Join-Path $sim 'taxi-camera-native.addon64'
@@ -102,6 +117,9 @@ if (Test-Path -LiteralPath $previousRecordPath) { Copy-Item -LiteralPath $previo
 $startMenu = if ($NoShortcut) { $null } else { Join-Path $env:APPDATA 'Microsoft/Windows/Start Menu/Programs/Taxi Cam.lnk' }
 try {
     Assert-Closed
+    if ($ResetSettings) {
+        $settingsSnapshot = @(New-TaxiSettingsSnapshot -Installation $dest -BackupDirectory $staging -IncludeMount)
+    }
     if (Test-Path -LiteralPath $oldExe -PathType Leaf) {
         $oldBackup = Join-Path $staging '380-taxi-cam.exe.backup'
         Copy-Item -LiteralPath $oldExe -Destination $oldBackup
@@ -122,8 +140,14 @@ try {
         Assert-TaxiVisibleInstallPath $target
     }
     $mount = Join-Path $dest 'taxi-camera-mounts.cfg'
-    if (-not (Test-Path -LiteralPath $mount)) {
-        $sourceMount = if (Test-Path -LiteralPath (Join-Path $sim 'taxi-camera-mounts.cfg')) { Join-Path $sim 'taxi-camera-mounts.cfg' }
+    if ($ResetSettings) {
+        Remove-TaxiSettingsSnapshot $settingsSnapshot
+        $mountEntry = @($settingsSnapshot | Where-Object { $_.path -eq $mount })[0]
+        Set-TaxiSettingsFile $mountEntry $defaultMount
+    } elseif (-not (Test-Path -LiteralPath $mount)) {
+        # A missing mount in a known installation may follow explicit settings
+        # removal. Do not resurrect old simulator calibration in that case.
+        $sourceMount = if (-not (Test-Path -LiteralPath $previousRecordPath) -and (Test-Path -LiteralPath (Join-Path $sim 'taxi-camera-mounts.cfg'))) { Join-Path $sim 'taxi-camera-mounts.cfg' }
             elseif (Test-Path -LiteralPath (Join-Path $payload 'taxi-camera-mounts.cfg')) { Join-Path $payload 'taxi-camera-mounts.cfg' }
             else { Join-Path $PSScriptRoot '../taxi-camera-mounts.cfg' }
         Copy-Item -LiteralPath $sourceMount -Destination $mount
@@ -153,12 +177,13 @@ try {
     if ($disabled -and (Test-Path -LiteralPath $disabled) -and -not (Test-Path -LiteralPath $legacy)) {
         Move-Item -LiteralPath $disabled -Destination $legacy
     }
+    if ($ResetSettings) { Restore-TaxiSettingsSnapshot $settingsSnapshot }
     if ($xmlWritten) {
         if (-not (Test-Path -LiteralPath $ExeXml) -or (Get-FileHash -LiteralPath $ExeXml).Hash -ne $xmlWrittenHash) { throw 'exe.xml changed after installation; the newer contents were preserved.' }
         if ($xmlBackup) { Copy-Item -LiteralPath $xmlBackup -Destination $ExeXml -Force }
         elseif (Test-Path -LiteralPath $ExeXml) { Remove-Item -LiteralPath $ExeXml }
     }
-    if (-not $hadMount -and (Test-Path -LiteralPath $mount)) { Remove-Item -LiteralPath $mount }
+    if (-not $ResetSettings -and -not $hadMount -and (Test-Path -LiteralPath $mount)) { Remove-Item -LiteralPath $mount }
     if (Test-Path -LiteralPath $recordBackup) { Copy-Item -LiteralPath $recordBackup -Destination $previousRecordPath -Force }
     elseif (Test-Path -LiteralPath $previousRecordPath) { Remove-Item -LiteralPath $previousRecordPath }
     $rollbackComplete = $true
@@ -185,3 +210,4 @@ Write-Output "Installed Taxi Cam: $exe"
 Write-Output "Automatic tray startup: $ExeXml"
 Write-Output "Legacy taxi add-on retained: $disabled"
 Write-Output 'Unrelated simulator files and startup entries were preserved.'
+if ($ResetSettings) { Write-Output 'Saved settings and known legacy profile imports were reset; bundled camera defaults restored. Logs and unknown files were retained.' }

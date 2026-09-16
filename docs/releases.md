@@ -25,12 +25,19 @@ The validation step runs:
 ./smoke-test.ps1
 ./tests/installer/prerequisites_test.ps1
 ./tests/installer/install_test.ps1
+./tests/installer/settings_test.ps1
 ./tests/installer/package_test.ps1
 ~~~
 
 `-WarpOnly` uses Windows' software Direct3D 12 renderer to exercise GPU capture, composition and PFD drawing. The receipt records WARP as `passed`, hardware GPU validation as `not-run` and `simulatorVerified: false`. Local `build.ps1 -Validate` runs both hardware and WARP tests.
 
-After packaging and compiling setup, `tests/installer/test-installer.ps1 -Installer <setup-path>` verifies the exact installer and its receipt in isolated fixtures. Package checks require the complete five-file payload and byte-for-byte copies of the project licence and third-party notices. Installer checks cover those files during installation, update, rollback and removal, including preservation of user calibration.
+After packaging and compiling setup, `tests/installer/test-installer.ps1 -Installer <setup-path>` verifies the exact installer and its receipt in isolated fixtures. Package checks require the complete five-file payload and byte-for-byte copies of the project licence and third-party notices. Installer checks cover those files during installation, update, rollback and removal, including default settings preservation, explicit reset/removal, and restoration of settings when setup fails. Windows shell extraction checks verify the app and setup icons at small and large sizes.
+
+## Saved settings
+
+Installation and uninstallation **keep settings by default**, including unattended runs. Setup's **Keep existing settings** checkbox starts selected on every run. Clearing it resets camera profiles, reference guides, display preferences, hotkeys and first-launch state, and uses the bundled camera defaults. Known profiles under the former `380 Taxi Cam` name are also cleared so they cannot be imported again. Uninstall offers **Keep settings** first, with **Remove saved settings** as the explicit alternative. Neither choice deletes logs or unrelated files.
+
+For unattended operations, setup accepts `/RESETSETTINGS=1` and the uninstaller accepts `/REMOVESETTINGS=1`. Omitting these parameters preserves settings. The corresponding source scripts expose `install.ps1 -ResetSettings` and `uninstall.ps1 -RemoveSettings`. Reset/removal requires all Taxi Cam companions and MSFS to be closed. Setup snapshots affected settings and restores them on failure; concurrent changes are retained and reported rather than overwritten by rollback.
 
 ## What to download
 

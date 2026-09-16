@@ -12,20 +12,59 @@ if ([IO.Path]::GetFileName($installerPath) -cne "taxi-cam-$($receipt.version)-wi
 $testRoot = Join-Path $repo ('build/installer-tests/' + [Guid]::NewGuid().ToString('N'))
 $sim = Join-Path $testRoot 'sim'; $xmlPath = Join-Path $testRoot 'config/exe.xml'
 New-Item -ItemType Directory -Force -Path $sim,(Split-Path -Parent $xmlPath) | Out-Null
+$savedLocalAppData = $env:LOCALAPPDATA
+$fixtureLocalAppData = Join-Path $testRoot 'localappdata'
+New-Item -ItemType Directory -Path $fixtureLocalAppData | Out-Null
+$env:LOCALAPPDATA = $fixtureLocalAppData
+try {
 & (Join-Path $repoRoot 'build/native/application-icon-test.exe') $installerPath (Join-Path $testRoot 'setup-icon')
 if ($LASTEXITCODE -ne 0) { throw 'Setup shell icon validation failed.' }
 New-TaxiFixtureImage (Join-Path $sim 'FlightSimulator2024.exe') $false
 New-TaxiFixtureImage (Join-Path $sim 'SimConnect_internal.dll')
 $xml = '<?xml version="1.0"?><SimBase.Document Type="Launch"><Disabled>False</Disabled><Launch.Addon><Name>Other Addon</Name><Path>C:\Other\other.exe</Path></Launch.Addon></SimBase.Document>'
-function Invoke-Setup([string]$Executable,[string]$App,[string]$Log,[switch]$Paths) {
+function Invoke-Setup([string]$Executable,[string]$App,[string]$Log,[switch]$Paths,[switch]$ResetSettings) {
     $arguments = @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',('/DIR="' + $App + '"'),('/LOG="' + $Log + '"'))
     if ($Paths) { $arguments += @('/SIMULATORDIR="' + $sim + '"','/EXEXML="' + $xmlPath + '"') }
+    if ($ResetSettings) { $arguments += '/RESETSETTINGS=1' }
     $process = Start-Process -FilePath $Executable -ArgumentList $arguments -WindowStyle Hidden -PassThru
     if (-not $process.WaitForExit(60000)) { throw "Installer test timed out; process $($process.Id), log $Log" }
     $process.Refresh()
     return $process.ExitCode
 }
 function Assert-That([bool]$Condition,[string]$Message) { if (-not $Condition) { throw $Message } }
+$knownSettings = @('Taxi Cam/settings.ini','Taxi Cam/hotkeys.ini','Taxi Cam/startup-state')
+foreach ($key in @('fbw-a380x','ini-a350-900','ini-a350-1000','ini-a380')) {
+    foreach ($folder in @('Taxi Cam','380 Taxi Cam')) { $knownSettings += "$folder/profiles/$key.ini" }
+}
+$unrelatedSettings = @('Taxi Cam/logs/history.log','Taxi Cam/profiles/custom-aircraft.ini','Taxi Cam/readme.txt','380 Taxi Cam/profiles/custom-aircraft.ini')
+function Seed-Settings([string]$Tag) {
+    $hashes = @{}
+    foreach ($relative in @($knownSettings + $unrelatedSettings)) {
+        $path = Join-Path $fixtureLocalAppData $relative
+        New-Item -ItemType Directory -Path (Split-Path -Parent $path) -Force | Out-Null
+        [IO.File]::WriteAllText($path, "$Tag settings fixture: $relative")
+        $hashes[$relative] = (Get-FileHash -LiteralPath $path).Hash
+    }
+    return $hashes
+}
+function Assert-Settings($Hashes,[switch]$Removed) {
+    foreach ($relative in @($knownSettings + $unrelatedSettings)) {
+        $path = Join-Path $fixtureLocalAppData $relative
+        if ($Removed -and $relative -in $knownSettings) {
+            Assert-That (-not (Test-Path -LiteralPath $path)) "Opt-in settings removal retained $relative."
+        } else {
+            Assert-That ((Test-Path -LiteralPath $path -PathType Leaf) -and (Get-FileHash -LiteralPath $path).Hash -eq $Hashes[$relative]) "Saved or unrelated settings changed: $relative."
+        }
+    }
+}
+function Invoke-Uninstall([string]$App,[string]$Log,[switch]$RemoveSettings) {
+    $arguments = @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',('/LOG="' + $Log + '"'))
+    if ($RemoveSettings) { $arguments += '/REMOVESETTINGS=1' }
+    $process = Start-Process -FilePath (Join-Path $App 'unins000.exe') -ArgumentList $arguments -WindowStyle Hidden -PassThru
+    if (-not $process.WaitForExit(60000)) { throw "Uninstaller test timed out; process $($process.Id), log $Log" }
+    $process.Refresh()
+    return $process.ExitCode
+}
 # Exercise the exact production executable through a guaranteed pre-write failure.
 # Even if MSFS is running, Setup must return failure and leave all fixture bytes unchanged.
 $xml.Replace('<Disabled>False</Disabled>','<Disabled>True</Disabled>') | Set-Content -LiteralPath $xmlPath
@@ -42,14 +81,18 @@ $payload = Join-Path $testRoot 'payload'
 Copy-Item -LiteralPath $receipt.compilerPayload -Destination $payload -Recurse
 $runtime = Join-Path $testRoot 'runtime.ps1'
 Copy-Item -LiteralPath (Join-Path $repoRoot 'installer/runtime.ps1') -Destination $runtime
-foreach ($path in @($runtime,(Join-Path $payload 'install.ps1'),(Join-Path $payload 'uninstall.ps1'))) {
+$settingsHelper = Join-Path $testRoot 'settings.ps1'
+Copy-Item -LiteralPath (Join-Path $repoRoot 'installer/settings.ps1') -Destination $settingsHelper
+Copy-Item -LiteralPath $settingsHelper -Destination (Join-Path $payload 'settings.ps1') -Force
+foreach ($path in @($runtime,$settingsHelper,(Join-Path $payload 'settings.ps1'),(Join-Path $payload 'install.ps1'),(Join-Path $payload 'uninstall.ps1'))) {
     $source = (Get-Content -Raw -LiteralPath $path).Replace('Get-Process','Get-FixtureProcess')
-    $source = $source.Replace('Set-StrictMode -Version Latest', "Set-StrictMode -Version Latest`r`nfunction Get-FixtureProcess { return @() }")
+    $isolation = "`r`nfunction Get-FixtureProcess { return @() }`r`n`$env:LOCALAPPDATA = '" + $fixtureLocalAppData.Replace("'", "''") + "'"
+    $source = $source.Replace('Set-StrictMode -Version Latest', ('Set-StrictMode -Version Latest' + $isolation))
     Set-Content -LiteralPath $path -Value $source -Encoding utf8
 }
-& (Join-Path $repoRoot 'installer/embed-uninstaller.ps1') -Output (Join-Path $testRoot 'uninstall-scripts.iss') -RuntimeScript $runtime -UninstallScript (Join-Path $payload 'uninstall.ps1') -ExeXmlScript (Join-Path $payload 'exe_xml.ps1')
+& (Join-Path $repoRoot 'installer/embed-uninstaller.ps1') -Output (Join-Path $testRoot 'uninstall-scripts.iss') -RuntimeScript $runtime -UninstallScript (Join-Path $payload 'uninstall.ps1') -ExeXmlScript (Join-Path $payload 'exe_xml.ps1') -SettingsScript $settingsHelper
 $compiler = & (Join-Path $repo 'installer/bootstrap.ps1')
-& $compiler "/DPayloadDir=$payload" "/DInternalDir=$testRoot" "/DAppIcon=$(Join-Path $repoRoot 'src/app/taxi-cam.ico')" "/DRuntimeScript=$runtime" "/DAppVersion=$($receipt.version)" "/DBuildNumber=$($receipt.buildNumber)" '/DInstallerTest=1' '/DOutputBase=isolated-setup' "/O$testRoot" (Join-Path $repoRoot 'installer/taxi-cam.iss') *> (Join-Path $testRoot 'compiler.log')
+& $compiler "/DPayloadDir=$payload" "/DInternalDir=$testRoot" "/DAppIcon=$(Join-Path $repoRoot 'src/app/taxi-cam.ico')" "/DRuntimeScript=$runtime" "/DSettingsScript=$settingsHelper" "/DAppVersion=$($receipt.version)" "/DBuildNumber=$($receipt.buildNumber)" '/DInstallerTest=1' '/DOutputBase=isolated-setup' "/O$testRoot" (Join-Path $repoRoot 'installer/taxi-cam.iss') *> (Join-Path $testRoot 'compiler.log')
 if ($LASTEXITCODE -ne 0) { throw "Fixture compilation failed: $testRoot" }
 $fixture = Join-Path $testRoot 'isolated-setup.exe'; $app = Join-Path $testRoot 'app'
 $xml | Set-Content -LiteralPath $xmlPath
@@ -65,8 +108,14 @@ Assert-That ((Get-Content -Raw -LiteralPath $dependencyLog).Contains('SimConnect
 Assert-That ((Get-FileHash -LiteralPath $xmlPath).Hash -eq $before) 'Dependency refusal changed startup configuration.'
 Assert-That (-not (Test-Path -LiteralPath (Join-Path $missingApp 'taxi-cam.exe'))) 'Dependency refusal wrote application files.'
 New-TaxiFixtureImage $client
+$savedSettings = Seed-Settings 'initial'
+New-Item -ItemType Directory -Path $app -Force | Out-Null
+[IO.File]::WriteAllText((Join-Path $app 'taxi-camera-mounts.cfg'), '# existing calibrated camera mounts')
+$existingMountHash = (Get-FileHash -LiteralPath (Join-Path $app 'taxi-camera-mounts.cfg')).Hash
 $exitCode = Invoke-Setup $fixture $app (Join-Path $testRoot 'install.log') -Paths
 Assert-That ($exitCode -eq 0) "Isolated first install failed ($exitCode): $testRoot"
+Assert-Settings $savedSettings
+Assert-That ((Get-FileHash -LiteralPath (Join-Path $app 'taxi-camera-mounts.cfg')).Hash -eq $existingMountHash) 'Default install replaced existing calibration.'
 foreach ($name in @('taxi-cam.exe','taxi-camera-bridge.dll')) { Assert-That ((Get-FileHash -LiteralPath (Join-Path $app $name)).Hash -eq $receipt.files.PSObject.Properties[$name].Value) "Installed hash mismatch: $name" }
 foreach ($name in @('LICENSE.txt','THIRD_PARTY_NOTICES.txt')) {
     Assert-That ((Get-FileHash -LiteralPath (Join-Path $app $name)).Hash -eq (Get-FileHash -LiteralPath (Join-Path $payload $name)).Hash) "Installer omitted or changed $name."
@@ -87,6 +136,7 @@ $launch.Save($xmlPath)
 $exitCode = Invoke-Setup $fixture $app (Join-Path $testRoot 'upgrade.log')
 Assert-That ($exitCode -eq 0) "Isolated upgrade with remembered paths failed ($exitCode): $testRoot"
 Assert-That ((Get-FileHash -LiteralPath $mount).Hash -eq $mountHash) 'Upgrade overwrote user calibration.'
+Assert-Settings $savedSettings
 [xml]$launch = Get-Content -Raw -LiteralPath $xmlPath
 Assert-That ($launch.SelectNodes('//Launch.Addon').Count -eq 2) 'Upgrade duplicated the startup entry.'
 Assert-That ($launch.SelectNodes('//Launch.Addon[Name="Taxi Cam"]').Count -eq 1) 'Upgrade did not rename startup registration.'
@@ -96,7 +146,7 @@ $rollbackScript = Join-Path $testRoot 'rollback.iss'
 $iss = Get-Content -Raw -LiteralPath (Join-Path $repoRoot 'installer/taxi-cam.iss')
 $iss = $iss.Replace('if CurStep = ssDone then Completed := True;', "if CurStep = ssInstall then Abort;`r`n  if CurStep = ssDone then Completed := True;")
 Set-Content -LiteralPath $rollbackScript -Value $iss -Encoding utf8
-& $compiler "/DPayloadDir=$payload" "/DInternalDir=$testRoot" "/DAppIcon=$(Join-Path $repoRoot 'src/app/taxi-cam.ico')" "/DRuntimeScript=$runtime" "/DAppVersion=$($receipt.version)" "/DBuildNumber=$($receipt.buildNumber)" '/DInstallerTest=1' '/DOutputBase=rollback-setup' "/O$testRoot" $rollbackScript *> (Join-Path $testRoot 'rollback-compiler.log')
+& $compiler "/DPayloadDir=$payload" "/DInternalDir=$testRoot" "/DAppIcon=$(Join-Path $repoRoot 'src/app/taxi-cam.ico')" "/DRuntimeScript=$runtime" "/DSettingsScript=$settingsHelper" "/DAppVersion=$($receipt.version)" "/DBuildNumber=$($receipt.buildNumber)" '/DInstallerTest=1' '/DOutputBase=rollback-setup' "/O$testRoot" $rollbackScript *> (Join-Path $testRoot 'rollback-compiler.log')
 if ($LASTEXITCODE -ne 0) { throw "Rollback fixture compilation failed: $testRoot" }
 Move-Item -LiteralPath (Join-Path $app 'taxi-cam.exe') -Destination $oldExe
 $oldExeHash = (Get-FileHash -LiteralPath $oldExe).Hash
@@ -106,12 +156,14 @@ $launch.Save($xmlPath)
 $xmlHash = (Get-FileHash -LiteralPath $xmlPath).Hash
 $recordHash = (Get-FileHash -LiteralPath (Join-Path $app 'installation.json')).Hash
 foreach ($name in @('LICENSE.txt','THIRD_PARTY_NOTICES.txt')) { [IO.File]::WriteAllText((Join-Path $app $name), "prior $name fixture") }
-$exitCode = Invoke-Setup (Join-Path $testRoot 'rollback-setup.exe') $app (Join-Path $testRoot 'rollback.log')
+$exitCode = Invoke-Setup (Join-Path $testRoot 'rollback-setup.exe') $app (Join-Path $testRoot 'rollback.log') -ResetSettings
 Assert-That ($exitCode -ne 0) 'Injected Setup abort did not fail.'
 Assert-That ((Get-FileHash -LiteralPath $xmlPath).Hash -eq $xmlHash) 'Setup abort did not restore exe.xml.'
 Assert-That ((Get-FileHash -LiteralPath (Join-Path $app 'installation.json')).Hash -eq $recordHash) 'Setup abort did not restore installation.json.'
 Assert-That ((Get-FileHash -LiteralPath $oldExe).Hash -eq $oldExeHash) 'Setup abort did not restore the previous executable name and bytes.'
 Assert-That (-not (Test-Path -LiteralPath (Join-Path $app 'taxi-cam.exe'))) 'Setup abort retained the renamed executable.'
+Assert-Settings $savedSettings
+Assert-That ((Get-FileHash -LiteralPath $mount).Hash -eq $mountHash) 'Setup abort after reset did not restore calibrated mounts.'
 foreach ($name in @('LICENSE.txt','THIRD_PARTY_NOTICES.txt')) {
     Assert-That ([IO.File]::ReadAllText((Join-Path $app $name)) -eq "prior $name fixture") "Setup abort did not restore $name."
 }
@@ -120,16 +172,43 @@ Assert-That ($exitCode -eq 0 -and -not (Test-Path -LiteralPath $oldExe)) 'Retry 
 foreach ($name in @('LICENSE.txt','THIRD_PARTY_NOTICES.txt')) {
     Assert-That ((Get-FileHash -LiteralPath (Join-Path $app $name)).Hash -eq (Get-FileHash -LiteralPath (Join-Path $payload $name)).Hash) "Retry did not restore the bundled $name."
 }
-$uninstaller = Join-Path $app 'unins000.exe'
-$process = Start-Process -FilePath $uninstaller -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART',('/LOG="' + (Join-Path $testRoot 'uninstall.log') + '"')) -WindowStyle Hidden -Wait -PassThru
-Assert-That ($process.ExitCode -eq 0) 'Isolated uninstall failed.'
+$exitCode = Invoke-Uninstall $app (Join-Path $testRoot 'uninstall.log')
+Assert-That ($exitCode -eq 0) 'Isolated uninstall failed.'
 Assert-That ((Get-FileHash -LiteralPath $mount).Hash -eq $mountHash) 'Uninstall removed calibration.'
+Assert-Settings $savedSettings
 [xml]$launch = Get-Content -Raw -LiteralPath $xmlPath
 Assert-That ($launch.SelectNodes('//Launch.Addon').Count -eq 1) 'Uninstall did not preserve exactly the unrelated startup entry.'
 Assert-That (-not (Test-Path -LiteralPath (Join-Path $app 'taxi-cam.exe'))) 'Uninstall retained the installed executable.'
 foreach ($name in @('LICENSE.txt','THIRD_PARTY_NOTICES.txt')) {
     Assert-That (-not (Test-Path -LiteralPath (Join-Path $app $name))) "Uninstall retained $name."
 }
+
+# Explicit reset uses the package defaults and removes only known current/legacy settings.
+$exitCode = Invoke-Setup $fixture $app (Join-Path $testRoot 'reset-install.log') -Paths -ResetSettings
+Assert-That ($exitCode -eq 0) 'Opt-in reset installation failed.'
+Assert-Settings $savedSettings -Removed
+Assert-That ((Get-FileHash -LiteralPath $mount).Hash -eq (Get-FileHash -LiteralPath (Join-Path $payload 'taxi-camera-mounts.cfg')).Hash) 'Reset did not install the packaged default mounts.'
+# A pilot can save new settings after reset; opt-in uninstall removes these too.
+$savedSettings = Seed-Settings 'after reset'
+[IO.File]::WriteAllText($mount, '# newly calibrated camera mounts')
+$retainedRecordHash = (Get-FileHash -LiteralPath (Join-Path $app 'installation.json')).Hash
+$exitCode = Invoke-Uninstall $app (Join-Path $testRoot 'remove-settings-uninstall.log') -RemoveSettings
+Assert-That ($exitCode -eq 0) 'Opt-in settings removal uninstall failed.'
+Assert-Settings $savedSettings -Removed
+Assert-That (-not (Test-Path -LiteralPath $mount)) 'Opt-in uninstall retained the local mount calibration.'
+Assert-That ((Get-FileHash -LiteralPath (Join-Path $app 'installation.json')).Hash -eq $retainedRecordHash) 'Opt-in uninstall removed or changed the installation receipt.'
+[xml]$launch = Get-Content -Raw -LiteralPath $xmlPath
+Assert-That ($launch.SelectNodes('//Launch.Addon').Count -eq 1) 'Opt-in uninstall changed unrelated startup entries.'
+# A later default-keep reinstall must not resurrect legacy simulator calibration
+# after the user explicitly removed the installation's saved settings.
+[IO.File]::WriteAllText((Join-Path $sim 'taxi-camera-mounts.cfg'), '# stale simulator calibration')
+$exitCode = Invoke-Setup $fixture $app (Join-Path $testRoot 'reinstall-after-remove.log')
+Assert-That ($exitCode -eq 0) 'Default-keep reinstall after settings removal failed.'
+Assert-Settings $savedSettings -Removed
+Assert-That ((Get-FileHash -LiteralPath $mount).Hash -eq (Get-FileHash -LiteralPath (Join-Path $payload 'taxi-camera-mounts.cfg')).Hash) 'Reinstall resurrected old simulator calibration after explicit settings removal.'
+$exitCode = Invoke-Uninstall $app (Join-Path $testRoot 'reinstall-after-remove-uninstall.log')
+Assert-That ($exitCode -eq 0) 'Cleanup uninstall after default-keep reinstall failed.'
+Remove-Item -LiteralPath (Join-Path $sim 'taxi-camera-mounts.cfg')
 
 function Invoke-FixtureRuntime([string]$Mode,[string]$App,[string]$State) {
     $arguments = @('-NoLogo','-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',('"' + $runtime + '"'),'-Mode',$Mode,
@@ -198,5 +277,8 @@ if ($shortLength -gt 0 -and $shortLength -lt $shortBuffer.Capacity -and $shortPa
 }
 Write-Output "Short-path install and rollback: $shortPathResult"
 
-[ordered]@{passed=$true;installerSha256=$receipt.installerSha256;shortPathValidation=$shortPathResult;tests=@('exact production rejection','missing SimConnect refused before application and startup writes','isolated first install','remembered upgrade paths and former name migration','calibration preservation','post-transaction Setup rollback restores former executable and startup','retry after rename rollback','isolated uninstall','inner concurrent XML edit preserved','post-transaction concurrent XML edit preserved with recovery snapshot');simulatorVerified=$false} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $testRoot 'result.json') -Encoding utf8
+[ordered]@{passed=$true;installerSha256=$receipt.installerSha256;shortPathValidation=$shortPathResult;tests=@('exact production rejection','missing SimConnect refused before application and startup writes','isolated first install preserves known current and legacy settings','remembered upgrade paths and former name migration','calibration preservation','post-transaction Setup reset rollback restores settings, mount, former executable and startup','retry after rename rollback','default uninstall keeps settings','opt-in reset installs packaged defaults and preserves unknown files/logs','opt-in uninstall removes known settings and mount but preserves unknown files/logs','retained installation receipt prevents legacy calibration resurrection on default-keep reinstall','inner concurrent XML edit preserved','post-transaction concurrent XML edit preserved with recovery snapshot');simulatorVerified=$false} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $testRoot 'result.json') -Encoding utf8
 Write-Output "Installer checks passed: $testRoot"
+} finally {
+    $env:LOCALAPPDATA = $savedLocalAppData
+}

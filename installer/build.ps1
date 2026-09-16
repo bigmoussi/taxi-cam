@@ -35,7 +35,7 @@ foreach ($file in Get-ChildItem -LiteralPath $payload -File -Recurse) {
 foreach ($name in @('taxi-cam.exe','taxi-camera-bridge.dll')) {
     if ((Get-FileHash -LiteralPath (Join-Path $payload $name)).Hash -ne $receipt.files.PSObject.Properties[$name].Value) { throw "Package binary differs from validated build: $name" }
 }
-foreach ($name in @('installer/install.ps1','installer/uninstall.ps1','installer/exe_xml.ps1','installer/validation_receipt.ps1','installer/prerequisites.ps1')) {
+foreach ($name in @('installer/install.ps1','installer/uninstall.ps1','installer/exe_xml.ps1','installer/validation_receipt.ps1','installer/prerequisites.ps1','installer/settings.ps1')) {
     Copy-Item -LiteralPath (Join-Path $repoRoot $name) -Destination (Join-Path $payload ([IO.Path]::GetFileName($name)))
 }
 Copy-Item -LiteralPath (Join-Path $repoRoot 'build/native/validation.json') -Destination $payload
@@ -47,7 +47,7 @@ $installerBase = "taxi-cam-$version-windows-x64-setup"
 $asset = Join-Path $output ($installerBase + '.exe')
 if (Test-Path -LiteralPath $asset) { throw 'Installer already exists; retain release assets and use a fresh worktree or application version.' }
 $log = Join-Path $work 'compiler.log'
-& $compiler "/DPayloadDir=$payload" "/DInternalDir=$work" "/DAppIcon=$(Join-Path $repoRoot 'src/app/taxi-cam.ico')" "/DAppVersion=$version" "/DBuildNumber=$buildNumber" "/DOutputBase=$installerBase" "/O$output" (Join-Path $repoRoot 'installer/taxi-cam.iss') *> $log
+& $compiler "/DPayloadDir=$payload" "/DInternalDir=$work" "/DAppIcon=$(Join-Path $repoRoot 'src/app/taxi-cam.ico')" "/DSettingsScript=$(Join-Path $repoRoot 'installer/settings.ps1')" "/DAppVersion=$version" "/DBuildNumber=$buildNumber" "/DOutputBase=$installerBase" "/O$output" (Join-Path $repoRoot 'installer/taxi-cam.iss') *> $log
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $asset)) { throw "Installer compilation failed. See $log" }
 [ordered]@{version=$version;buildNumber=$buildNumber;sourceCommit=$info.sourceCommit;sourceDirty=$info.sourceDirty;installerSha256=(Get-FileHash -LiteralPath $asset).Hash;packageSha256=(Get-FileHash -LiteralPath $zip).Hash;files=$receipt.files;compilerPayload=$payload;compilerInternal=$work} | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath ($asset + '.json') -Encoding utf8
 Write-Output $asset

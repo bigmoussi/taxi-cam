@@ -10,6 +10,9 @@
 #ifndef AppIcon
   #error AppIcon is required
 #endif
+#ifndef SettingsScript
+  #error SettingsScript is required
+#endif
 #ifndef OutputBase
   #define OutputBase "taxi-cam-test-setup"
 #endif
@@ -54,6 +57,7 @@ UsePreviousAppDir=no
 ; Native binaries only ever enter the live directory through the guarded transaction.
 Source: "{#PayloadDir}\*"; DestDir: "{tmp}\payload"; Flags: dontcopy recursesubdirs createallsubdirs ignoreversion
 Source: "{#RuntimeScript}"; DestDir: "{tmp}"; DestName: "runtime.ps1"; Flags: dontcopy
+Source: "{#SettingsScript}"; DestDir: "{tmp}"; DestName: "settings.ps1"; Flags: dontcopy
 
 #ifndef InstallerTest
 [InstallDelete]
@@ -68,14 +72,17 @@ Type: files; Name: "{app}\taxi-cam.exe"
 Type: files; Name: "{app}\taxi-camera-bridge.dll"
 Type: files; Name: "{app}\LICENSE.txt"
 Type: files; Name: "{app}\THIRD_PARTY_NOTICES.txt"
-; Calibration, installation record, user settings, logs and historical backups are retained.
+; Settings are retained unless the user explicitly chooses removal in the uninstaller.
+; Installation records, logs and historical backups are retained.
 
 [Code]
 #include InternalDir + "\uninstall-scripts.iss"
 var
   SimulatorPage: TInputDirWizardPage;
   XmlPage: TInputFileWizardPage;
+  SettingsPage: TInputOptionWizardPage;
   Prepared, Completed: Boolean;
+  RemoveSavedSettings: Boolean;
   PreviousDir: String;
 
 function Q(Value: String): String;
@@ -97,10 +104,14 @@ var
 begin
   Args := '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ' + Q(Script) +
     ' -Mode ' + Mode + ' -Destination ' + Q(Destination) + ' -StateDirectory ' + Q(State);
-  if Mode = 'Install' then
+  if Mode = 'Install' then begin
     Args := Args + ' -PayloadDirectory ' + Q(ExpandConstant('{tmp}\payload')) +
       ' -SimulatorDirectory ' + Q(SimulatorPage.Values[0]) + ' -ExeXml ' + Q(XmlPage.Values[0]) +
       ' -UpdateFromPid ' + Q(ExpandConstant('{param:UPDATEFROMPID|0}'));
+    if not SettingsPage.Values[0] then Args := Args + ' -ResetSettings';
+  end;
+  if ((Mode = 'Uninstall') or (Mode = 'CheckClosed')) and RemoveSavedSettings then
+    Args := Args + ' -RemoveSettings';
   Result := Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), Args, '', SW_HIDE, ewWaitUntilTerminated, ExitCode);
   if Result then Result := ExitCode = 0;
 end;
@@ -128,7 +139,14 @@ begin
   XmlPage := CreateInputFilePage(SimulatorPage.ID, 'Automatic startup', 'Select the simulator exe.xml',
     'Setup preserves other startup entries and adds Taxi Cam. A new exe.xml can be created at the selected path.');
   XmlPage.Add('Simulator launch configuration:', 'XML files|*.xml|All files|*.*', '.xml');
+  SettingsPage := CreateInputOptionPage(XmlPage.ID, 'Saved settings',
+    'Keep your settings or start with the defaults',
+    'Keep your camera profiles, calibration, reference guides and keyboard shortcuts. Clear this box to reset saved settings to the defaults.',
+    False, False);
+  SettingsPage.Add('&Keep existing settings (recommended)');
+  SettingsPage.Values[0] := ExpandConstant('{param:RESETSETTINGS|0}') <> '1';
   ExtractTemporaryFile('runtime.ps1');
+  ExtractTemporaryFile('settings.ps1');
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
@@ -181,10 +199,21 @@ begin
 end;
 
 function InitializeUninstall: Boolean;
+var
+  Choice: Integer;
 begin
+  RemoveSavedSettings := ExpandConstant('{param:REMOVESETTINGS|0}') = '1';
   WriteUninstallScripts(ExpandConstant('{tmp}\taxi-uninstall'));
   Result := RunHelper('CheckClosed', ExpandConstant('{tmp}\taxi-uninstall\runtime.ps1'), ExpandConstant('{app}'), ExpandConstant('{tmp}\taxi-uninstall'));
   if not Result then MsgBox(ErrorText(ExpandConstant('{tmp}\taxi-uninstall')), mbError, MB_OK);
+  if Result and not UninstallSilent then begin
+    Choice := TaskDialogMsgBox('Keep your Taxi Cam settings?',
+      'Keep your camera profiles, calibration, reference guides and keyboard shortcuts for a future installation. Logs will be kept either way.',
+      mbConfirmation, MB_YESNOCANCEL, ['&Keep settings (recommended)'#13#10'Uninstall the app and keep saved settings.',
+       '&Remove saved settings'#13#10'Uninstall the app and remove saved settings.', '&Cancel'], 0);
+    Result := (Choice = IDYES) or (Choice = IDNO);
+    RemoveSavedSettings := Choice = IDNO;
+  end;
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
