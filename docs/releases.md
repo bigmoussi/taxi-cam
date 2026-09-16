@@ -1,10 +1,21 @@
-# Automated Windows releases
+# Windows builds and manual releases
 
-The [Windows release workflow](../.github/workflows/release.yml) runs on pushes to `main` that change application source, tests, diagnostic tools, installer or CI code, the root build scripts, dependency or version configuration, camera defaults, the project licence, bundled runtime notices, or the release workflow itself. A successful run builds a Windows x64 package and publishes it with release notes at [GitHub Releases](https://github.com/rthoms334/taxi-cam/releases).
+The [Windows build workflow](../.github/workflows/release.yml) runs on pushes to `main` that change application source, tests, diagnostic tools, installer or CI code, the root build scripts, dependency or version configuration, camera defaults, the project licence, bundled runtime notices, or the release workflow itself. A successful run retains a downloadable Windows x64 release candidate for checking. It does not publish a release.
 
-README, documentation, issue-template and other repository-only changes do not trigger an automatic release. Markdown files and formatting/ignore files are excluded even inside the code directories. A push containing both documentation and a qualifying code change still runs. Keep the workflow's `paths` list current when adding a new build input outside the listed directories.
+README, documentation, issue-template and other repository-only changes do not trigger an automatic build. Markdown files and formatting/ignore files are excluded even inside the code directories. A push containing both documentation and a qualifying code change still runs. Keep the workflow's `paths` list current when adding a new build input outside the listed directories.
 
-The workflow can also be started manually from GitHub Actions on `main`.
+The build workflow can also be started manually from GitHub Actions. Only successful builds from `main` can be published.
+
+## Download, check, then publish
+
+1. Open the completed **Windows build** run in GitHub Actions.
+2. Download `windows-release-<build-number>-attempt-<attempt>` from its Artifacts section. Extract it and use the setup EXE in `packages/` for your checks. The runtime ZIP is beside it; `native/` contains the validated binaries and receipt used to verify publication.
+3. Copy the **build run ID** and **build attempt** from the run summary. The run ID is the number in the Actions run URL, not the build number in the filename.
+4. Once satisfied, open **Publish Windows release**, select **Run workflow** on `main`, and enter those two values.
+
+The [publication workflow](../.github/workflows/publish.yml) downloads that exact candidate and checks its original commit, build number and binary hashes before publishing to [GitHub Releases](https://github.com/rthoms334/taxi-cam/releases). It does not compile or repackage the application. A later merge does not change the selected candidate. No environment approval configuration is required; the manual dispatch is the publication step.
+
+Candidates expire after 30 days. If a candidate is missing or expired, build and check a new one. Each rerun has a separate attempt number: publish the attempt you downloaded and checked.
 
 ## Build pipeline
 
@@ -14,7 +25,7 @@ The workflow can also be started manually from GitHub Actions on `main`.
 4. Test installation, rollback and package contents using isolated fixtures.
 5. Create the minimal runtime ZIP and compile the Windows installer with pinned Inno Setup.
 6. Test the installer using isolated fixtures and retain diagnostic artifacts.
-7. Create a draft release, upload its assets, then publish it.
+7. Retain a release candidate and show the inputs for the separate manual publication workflow.
 
 The runner is `windows-2025`. Official actions are pinned to commit SHAs. The native compiler archive and Inno Setup compiler download are pinned in `dependencies.json` and verified before use.
 
@@ -76,12 +87,12 @@ Notes contain installation guidance, GPLv3 licence information, links to the exa
 
 ## Failures and reruns
 
-Build, validation or packaging failure prevents release publication. Workflow artifacts retain logs and available package output for 30 days.
+Build, validation or packaging failure prevents creation of a publishable candidate. Workflow artifacts retain logs and available package output for 30 days. The publication workflow also rejects unsuccessful attempts, other workflows and builds from branches other than `main`.
 
-Publication keeps the release in draft until all four assets are uploaded. A rerun can finish an incomplete draft. If the release is already published, the script preserves its assets and returns its link. Reruns keep the same workflow run number and tag.
+Publication keeps the release in draft until all four assets are uploaded. Rerun publication with the same build run ID and attempt to finish an incomplete draft. If the release is already published, the script preserves its assets and returns its link. Release tags and filenames use the original build workflow's run number, never the publication workflow's run number. Rebuilding an already published build number cannot replace its release assets.
 
 Independent pushes each receive a build; they are not cancelled by a newer push. A newer push can arrive during publication, so the Latest check is not a transactional lock.
 
-The release job uses `contents: write` and GitHub's built-in token. No personal access token or additional repository secret is required.
+The build workflow uses read-only repository permissions. Only the manually dispatched release job uses `contents: write`; it also uses `actions: read` to retrieve the selected build. Both use GitHub's built-in token. No personal access token or additional repository secret is required.
 
 CI validates the build and isolated rendering pipeline. Hardware GPU behaviour and live MSFS operation require their own checks.
