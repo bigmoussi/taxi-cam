@@ -72,6 +72,12 @@ int main() {
   assert(progress.observe(12001, true, 4025, 852346, true));
   assert(!progress.observe(13000, true, 4025, 852347, true));
   assert(!progress.observe(12999, true, 4025, 852348, true));  // Clock regression resets timer.
+  assert(!progress.observe(20000, true, 4026, 852349, true));
+  assert(progress.observe(22001, true, 4026, 852350, true));
+  assert(progress.stalled());
+  progress.reset();
+  assert(!progress.stalled());
+  assert(!progress.observe(23000, true, 4026, 852351, true));  // AA restore re-arms the 2s watch.
 
   // The watchdog never fabricates RT state. Only a new registered allocation
   // can restore creation-state evidence after an unknown command list.

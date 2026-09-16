@@ -901,7 +901,8 @@ void observer(void* manager) noexcept {
                      (before.owned_ids[0] || before.owned_ids[1] || runtime.profile_transition.awaiting_pair());
       requested_start = runtime.requested_start;
       start_revision = runtime.requested_start_revision;
-      recovery_pending = runtime.recovery.pending() || runtime.published.view_waiting || runtime.published.pose_waiting;
+      recovery_pending = runtime.recovery.pending() || runtime.published.view_waiting || runtime.published.pose_waiting ||
+                         runtime.resize_recovery.pending() || runtime.resize_recovery.failed();
       pair_ready = runtime.published.ready[0] && runtime.published.ready[1];
       if (runtime.mount_revision != runtime.requested_mount_revision) {
         mount_changed = true;
@@ -1177,9 +1178,10 @@ void observer(void* manager) noexcept {
           // Never remove/recreate live camera entries for a primary-size change.
           // Mode2's original update only overwrites P16..39: restore those fields
           // if its already allocated Bitmap still has the exact desired size.
+          // Do not stop_scene() here: live Off/TAA/DLSS switches left output=0
+          // after that call, and the restore line never reached the log.
           if (!runtime.resize_recovery.pending() && !runtime.resize_recovery.failed()) {
             runtime.resize_recovery.begin(pair.owner, pair.owned_ids);
-            scene_handoff().stop_scene();
             record_stop(runtime, SceneStopReason::resolution_changed,
                         "Primary dimensions changed; camera IDs retained and output allocation prohibited.", now);
           }
@@ -1196,32 +1198,46 @@ void observer(void* manager) noexcept {
             }
           }
           runtime.message = "Graphics settings changed; camera IDs retained while both render gates close.";
+          bool restored_now = false;
           if (action == ViewResizeRecovery::Action::resize) {
-            const bool outputs_unchanged = views[0].mode == 2 && views[1].mode == 2 && views[0].resource_present &&
-                                           views[1].resource_present && views[0].output_dimensions == runtime.allocation_panes[0] &&
+            const bool retainable = views[0].mode == 2 && views[1].mode == 2 && views[0].resource_present && views[1].resource_present;
+            const bool outputs_unchanged = retainable && views[0].output_dimensions == runtime.allocation_panes[0] &&
                                            views[1].output_dimensions == runtime.allocation_panes[1];
-            const bool restored = outputs_unchanged && timed(runtime, ProbeStage::lifecycle, [&] {
-                                    return resize_closed_entry(runtime, pair.owned_ids[0], 0, false) &&
-                                           resize_closed_entry(runtime, pair.owned_ids[1], 1, false);
-                                  });
-            if (restored && runtime.resize_recovery.finish(pair.owner, pair.owned_ids)) {
-              // Reopening requires a new full pair inspection and fresh captures
-              // on the next observer, never this pre-restoration snapshot.
-              scene_handoff().begin_scene();
-              runtime.schedule.reset();
-              const std::lock_guard lock(runtime.mutex);
-              runtime.recovery.resumed_retained_resolution();
-              runtime.stop_detail.clear();
-              runtime.message = "Camera dimensions restored without replacing entries or output textures; waiting for fresh frames.";
+            if (!outputs_unchanged && retainable) {
+              // Bitmaps may still be settling after an AA/upscaler switch. Keep
+              // the closed pair and retry on a later manager update.
+              runtime.resize_recovery.release_resize_authorization();
             } else {
-              runtime.resize_recovery.mark_failed();
+              const bool restored = outputs_unchanged && timed(runtime, ProbeStage::lifecycle, [&] {
+                                      return resize_closed_entry(runtime, pair.owned_ids[0], 0, false) &&
+                                             resize_closed_entry(runtime, pair.owned_ids[1], 1, false);
+                                    });
+              if (restored && runtime.resize_recovery.finish(pair.owner, pair.owned_ids)) {
+                runtime.schedule.reset();
+                {
+                  const std::lock_guard lock(runtime.mutex);
+                  runtime.recovery.resumed_retained_resolution();
+                  runtime.stop_detail.clear();
+                }
+                runtime.message = "Camera dimensions restored without replacing entries or output textures; waiting for fresh frames.";
+                inspect_pair(runtime, pair.owned_ids, report, views);
+                restored_now = report.ready[0] && report.ready[1];
+              } else {
+                runtime.resize_recovery.mark_failed();
+              }
             }
           }
-          if (runtime.resize_recovery.failed())
+          if (runtime.resize_recovery.failed()) {
+            scene_handoff().stop_scene();
             runtime.message = "Camera paused after graphics change: existing output could not be safely retained. Restart MSFS to resume.";
-          report.ready = report.resource_present = {};
-          report.outputs_matched = false;
-          report.view_waiting = true;
+          }
+          if (restored_now)
+            report.view_waiting = false;
+          else {
+            report.ready = report.resource_present = {};
+            report.outputs_matched = false;
+            report.view_waiting = true;
+          }
         } else if (closed_warmup) {
           // No publication, resize or activation yet. The tail-called original
           // initializes its cache while both verified new gates remain closed.

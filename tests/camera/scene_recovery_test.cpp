@@ -462,8 +462,10 @@ int main() {
           "Temporary pose gap retains IDs without repeated creation or erase");
   recovery.failed(SceneStopReason::resolution_changed, 90);
   require(!recovery.pending() && !recovery.retry(5000, pair.snapshot(), true), "Resolution change cannot recreate retained views");
+  const auto resolution_sequence = recovery.sequence();
   recovery.resumed_retained_resolution();
-  require(recovery.reason() == SceneStopReason::none && recovery.requested(), "Retained resolution recovery preserves demand");
+  require(recovery.reason() == SceneStopReason::none && recovery.requested() && recovery.sequence() == resolution_sequence + 1,
+          "Retained resolution recovery preserves demand and logs the restore");
   recovery.failed(SceneStopReason::owned_entry_absent, 100);
   pair.request_disable();
   require(pair.process_update(manager, engine.callbacks()), "First cleanup update");
