@@ -746,8 +746,13 @@ void draw_page(HDC dc) {
     panel(dc, 244, 137, 766, 140);
     text(dc, sample.graphics_ready ? L"Native bridge connected" : L"Waiting for the simulator", 266, 153, 500, 30, heading,
          sample.graphics_ready ? Accent : Text);
-    const auto line = sample.heartbeat ? widen(sample.message) : live;
-    text(dc, line.c_str(), 266, 188, 715, 36, normal, Muted, DT_LEFT | DT_WORDBREAK);
+    const bool late_empty_pfds =
+        sample.graphics_ready && sample.candidate_count == 0 && sample.left_id == 0 && sample.right_id == 0;
+    const auto line = late_empty_pfds ? std::wstring(L"No display textures observed (late Connect). "
+                                                     L"Connect at the main menu, or Restart Flight while Taxi Cam stays connected.")
+                      : sample.heartbeat ? widen(sample.message)
+                                         : live;
+    text(dc, line.c_str(), 266, 188, 715, 36, normal, late_empty_pfds ? Accent : Muted, DT_LEFT | DT_WORDBREAK);
     panel(dc, 244, 295, 766, 93);
     text(dc, L"Aircraft profile", 260, 298, 350, 22, small, Muted);
     panel(dc, 244, 395, 766, 96);
@@ -1356,7 +1361,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
           show();
         if (selected == 604) {
           connect_commands.request(win::ConnectCommand::connect);
-          notice = L"Connect requested.";
+          notice = L"Connect requested. Prefer the MSFS main menu so display textures can be observed.";
           InvalidateRect(hwnd, nullptr, FALSE);
         }
         if (selected == 605) {
@@ -1490,8 +1495,8 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         if (!win::save_auto_connect(win::settings_directory(), next))
           notice = L"Could not save the Auto-connect preference.";
         else
-          notice = next ? L"Auto-connect on. Taxi Cam will attach when MSFS is detected."
-                        : L"Auto-connect off. Use Connect after MSFS is up.";
+          notice = next ? L"Auto-connect on. Prefer attaching at the MSFS main menu before loading a flight."
+                        : L"Auto-connect off. Use Connect at the MSFS main menu, then load the flight.";
         if (next)
           connect_commands.request(win::ConnectCommand::connect);
         build_controls();
@@ -1499,7 +1504,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       }
       if (id == 241) {
         connect_commands.request(win::ConnectCommand::connect);
-        notice = L"Connect requested.";
+        notice = L"Connect requested. Prefer the MSFS main menu so display textures can be observed.";
         InvalidateRect(hwnd, nullptr, FALSE);
         return 0;
       }
@@ -1595,8 +1600,16 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         return 0;
       }
       if (id == 402) {
-        if (apply(false))
+        if (apply(false)) {
+          win::Status sample;
+          {
+            const std::lock_guard lock(app_mutex);
+            sample = status;
+          }
+          if (sample.graphics_ready && sample.candidate_count == 0)
+            notice = L"No textures observed. Connect at the main menu, or Restart Flight while Taxi Cam stays connected.";
           build_controls();
+        }
         return 0;
       }
       if (id == 403) {
