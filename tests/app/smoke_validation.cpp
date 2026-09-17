@@ -18,7 +18,7 @@ int wmain(int argc, wchar_t** argv) {
     using namespace taxi_camera::standalone;
     Settings settings;
     require(valid_settings(settings), "Default settings");
-    require(settings.camera_rate == 15, "Default camera rate changed");
+    require(settings.camera_rate == kDefaultCameraRate, "Default camera rate changed");
     for (unsigned rate = 5; rate <= 60; ++rate) {
       auto accepted = settings;
       accepted.camera_rate = rate;
@@ -124,6 +124,15 @@ int wmain(int argc, wchar_t** argv) {
                   loaded.nose_dot == saved.nose_dot && loaded.exposure == saved.exposure,
               "Low-rate persistence must retain calibration and display settings");
     }
+    saved.camera_rate = 15;
+    require(save_settings(saved), "Save established 15 fps preference");
+    require(load_settings(loaded, install) && loaded.camera_rate == 15, "Saved 15 fps is not rewritten to the new shipped default");
+    const auto profile_path = settings_path(saved);
+    require(WritePrivateProfileStringW(L"display", L"camera_rate", nullptr, profile_path.c_str()) != FALSE,
+            "Remove camera_rate key from isolated profile");
+    WritePrivateProfileStringW(nullptr, nullptr, nullptr, profile_path.c_str());
+    require(load_settings(loaded, install) && loaded.camera_rate == kDefaultCameraRate && loaded.mounts == saved.mounts,
+            "Missing camera_rate key uses the shipped default without dropping calibration");
     // Exercise the actual rename migration with process-local environment paths.
     const auto migration = settings_override + L"\\migration";
     require(CreateDirectoryW(migration.c_str(), nullptr) != FALSE, "Create isolated migration directory");

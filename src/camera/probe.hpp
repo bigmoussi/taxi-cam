@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../shared/camera_rate.hpp"
 #include "aircraft_mounts.hpp"
 #include "entry_pair.hpp"
 #include "scene_recovery.hpp"
@@ -66,7 +67,7 @@ struct ProbeSnapshot {
   ProbePerformance performance;
   // Cumulative nonzero IDs returned by creation, including later rollbacks.
   std::uint64_t created_total = 0;
-  std::uint32_t requested_rate = 15;
+  std::uint32_t requested_rate = kDefaultCameraRate;
   std::uint32_t requested_feeds = 2;
   // Last native activation requests, not a measured rendered-frame rate.
   std::array<bool, 2> gates{};

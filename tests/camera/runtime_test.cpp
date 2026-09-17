@@ -155,7 +155,8 @@ void wrong_host_public_flow() {
   const auto initial = nc::scene_snapshot();
   require_inert(initial);
   require(!initial.pair.request_pending, "A fresh runtime unexpectedly contains a queued pair request");
-  require(initial.requested_rate == 15 && initial.requested_feeds == 2, "A fresh runtime has unexpected pulse configuration");
+  require(initial.requested_rate == taxi_camera::kDefaultCameraRate && initial.requested_feeds == 2,
+          "A fresh runtime has unexpected pulse configuration");
   mount_mailbox();
 
   // This API is a pure atomic settings mailbox even on the wrong host. Editing

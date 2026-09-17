@@ -777,7 +777,7 @@ void draw_page(HDC dc) {
     const wchar_t* names[]{L"Daytime exposure", L"Automatic night exposure", L"Maximum night boost", L"Camera frame rate"};
     const wchar_t* descriptions[]{
         L"Exposure compensation in EV. Your calibrated baseline is −8.8.", L"Gradually brighten the camera display as ambient light drops.",
-        L"Additional exposure at night, from 0 to +8 EV. Default: +8 EV.", L"Activation limit per camera: 5–60 fps. Default: 15."};
+        L"Additional exposure at night, from 0 to +8 EV. Default: +8 EV.", L"Activation limit per camera: 5–60 fps. Default: 5."};
     for (int i = 0; i < 4; ++i) {
       panel(dc, 244, ys[i], 766, 105);
       text(dc, names[i], 264, ys[i] + 12, 515, 29, heading);

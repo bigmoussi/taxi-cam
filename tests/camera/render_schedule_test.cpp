@@ -43,7 +43,7 @@ void cadence(unsigned rate, unsigned feeds, std::uint64_t step) {
 
 void changes_and_stalls() {
   RenderSchedule schedule;
-  require(schedule.rate() == 15 && schedule.feeds() == 2, "Defaults changed");
+  require(schedule.rate() == taxi_camera::kDefaultCameraRate && schedule.feeds() == 2, "Defaults changed");
   schedule.configure(0, 0);
   require(schedule.rate() == 5 && schedule.feeds() == 1, "Lower bounds were not applied");
   schedule.configure(999, 999);

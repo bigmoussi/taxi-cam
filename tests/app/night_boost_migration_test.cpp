@@ -90,6 +90,23 @@ std::wstring unmarked_profile(const Settings& value) {
   return path;
 }
 
+void missing_rate_uses_shipped_default_without_rewriting_saved_fifteen() {
+  select_fixture(L"camera-rate-default");
+  auto saved = customized(profiles::A380);
+  saved.camera_rate = 15;
+  require(save_settings(saved), "Save an existing 15 fps profile");
+  Settings loaded;
+  require(load_settings(loaded, L"missing-installation", saved.profile) && loaded.camera_rate == 15 && loaded.mounts == saved.mounts,
+          "An already-saved 15 fps preference is left unchanged");
+  const auto path = settings_path(saved);
+  patch(path, L"display", L"camera_rate", nullptr);
+  require(ini(path, L"display", L"camera_rate") == L"<missing>", "camera_rate key removed from isolated profile");
+  require(load_settings(loaded, L"missing-installation", saved.profile) && loaded.camera_rate == kDefaultCameraRate &&
+              loaded.mounts == saved.mounts,
+          "A profile with no camera_rate key uses the shipped default of 5");
+  require(!contains_utf16(contents(path), L"camera_rate="), "Loading a missing rate must not write a rate key");
+}
+
 void all_profiles_migrate_once() {
   select_fixture(L"all-profiles");
   for (const auto* profile : profiles::Catalog) {
@@ -300,7 +317,9 @@ int main() {
     fixture_root = std::wstring(repository) + L"\\build\\night-boost-test-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
                    std::to_wstring(GetTickCount64());
     require(std::filesystem::create_directories(fixture_root), "Create ignored test root");
-    require(Settings{}.night_boost == 8.f && valid_settings(Settings{}), "Default night boost is valid and set to eight");
+    require(Settings{}.night_boost == 8.f && Settings{}.camera_rate == kDefaultCameraRate && valid_settings(Settings{}),
+            "Default night boost is eight and the shipped camera rate is five");
+    missing_rate_uses_shipped_default_without_rewriting_saved_fifteen();
     all_profiles_migrate_once();
     completed_revisions_preserve_custom_values();
     incomplete_revisions_migrate();

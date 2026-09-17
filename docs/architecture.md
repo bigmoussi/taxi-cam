@@ -124,7 +124,7 @@ Changing graphics settings can overwrite an established camera's size fields. Th
 
 Recovery accepts independently bounded primary render and display-size pairs when the existing output proves the exact original pane size. A regression test uses a 1695×901 primary render size, 2542×1351 display-size pairs and unchanged 774×251 and 774×496 A350 camera bitmaps. It verifies restoration without allocation or changes outside the size fields. Live simulator recovery remains unverified.
 
-The rate setting limits activation opportunities to **5–60 per camera per second**, with a default of **15**. Activations alternate between views, with a closed interval after each pulse. Actual image delivery also depends on simulator update cadence, GPU completion and the availability of both images. At lower simulator update rates, two settings can reach the same scheduling limit; the 5 and 10 settings provide lower budgets while retaining mandatory closing intervals and avoiding catch-up bursts.
+The rate setting limits activation opportunities to **5–60 per camera per second**, with a default of **5**. Activations alternate between views, with a closed interval after each pulse. Actual image delivery also depends on simulator update cadence, GPU completion and the availability of both images. At lower simulator update rates, two settings can reach the same scheduling limit; 5 and 10 remain available as lower budgets while retaining mandatory closing intervals and avoiding catch-up bursts. Saved profiles that already store a rate keep that value.
 
 Source: [camera integration](../src/camera/probe.cpp), [pose conversion](../src/camera/body_pose_math.hpp), [mounts](../src/camera/aircraft_mounts.hpp), [schedule](../src/camera/render_schedule.hpp).
 
