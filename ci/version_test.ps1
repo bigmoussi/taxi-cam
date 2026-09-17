@@ -84,4 +84,20 @@ Commit-Fixture 'Windows version limit'
 'Overflow' | Set-Content -LiteralPath (Join-Path $fixture 'change.txt')
 Commit-Fixture 'One more patch'
 Reject-Version
-Write-Output "PASS semantic versions: $checks checks for patch progression, stable reruns, merge history, minor/major baselines and Windows limits."
+function Assert-ReleaseBuildNumber([int]$Expected, [hashtable]$Context, [string]$Name) {
+    $actual = Get-TaxiReleaseBuildNumber @Context
+    if ($actual -ne $Expected) { throw "Expected release build $Expected for $Name, got $actual." }
+    $script:checks++
+}
+Assert-ReleaseBuildNumber 0 @{GitHubActions=''; EventName=''; Ref=''; RunNumber=''} 'omitted GitHub context is a local build'
+Assert-ReleaseBuildNumber 0 @{GitHubActions='true'; EventName='pull_request'; Ref='refs/pull/12/merge'; RunNumber='99'} 'pull_request keeps build 0'
+Assert-ReleaseBuildNumber 0 @{GitHubActions='true'; EventName='pull_request_target'; Ref='refs/heads/main'; RunNumber='99'} 'pull_request_target cannot inherit main run numbers'
+Assert-ReleaseBuildNumber 0 @{GitHubActions='true'; EventName='push'; Ref='refs/heads/feature/pr-ci'; RunNumber='99'} 'non-main refs keep build 0'
+Assert-ReleaseBuildNumber 0 @{GitHubActions='true'; EventName='push'; Ref='refs/heads/main'; RunNumber=''} 'main without a run number stays 0'
+Assert-ReleaseBuildNumber 42 @{GitHubActions='true'; EventName='push'; Ref='refs/heads/main'; RunNumber='42'} 'main push stamps the workflow run number'
+Assert-ReleaseBuildNumber 7 @{GitHubActions='true'; EventName='workflow_dispatch'; Ref='refs/heads/main'; RunNumber='7'} 'main workflow_dispatch stamps the workflow run number'
+$rejected = $false
+try { Get-TaxiReleaseBuildNumber -GitHubActions 'true' -EventName 'push' -Ref 'refs/heads/main' -RunNumber '01' | Out-Null } catch { $rejected = $true }
+if (-not $rejected) { throw 'Leading-zero run numbers were accepted.' }
+$script:checks++
+Write-Output "PASS semantic versions: $checks checks for patch progression, stable reruns, merge history, minor/major baselines, Windows limits and publish-only build numbers."

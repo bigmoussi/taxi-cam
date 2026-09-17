@@ -5,11 +5,7 @@ Set-StrictMode -Version Latest
 if ($WarpOnly -and -not $Validate) { throw '-WarpOnly requires -Validate.' }
 $taskRoot = $PSScriptRoot
 . (Join-Path $taskRoot 'ci/version.ps1')
-$buildNumber = 0
-if ($env:GITHUB_RUN_NUMBER) {
-    if ($env:GITHUB_RUN_NUMBER -notmatch '^[1-9][0-9]{0,9}$' -or
-        -not [int]::TryParse($env:GITHUB_RUN_NUMBER, [ref]$buildNumber)) { throw 'Invalid GitHub build number.' }
-}
+$buildNumber = Get-TaxiReleaseBuildNumber
 $releaseVersion = Get-TaxiVersion -Repository $taskRoot -BuildNumber $buildNumber
 $version = $releaseVersion.Version
 Write-Output "Building Taxi Cam $version (build $buildNumber; $($releaseVersion.CommitsSinceBase) commits since version baseline)."

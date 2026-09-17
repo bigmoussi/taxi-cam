@@ -1,0 +1,93 @@
+name: Windows PR test build
+
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: windows-pr-test-build-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  pr-test-build:
+    name: PR test build
+    runs-on: windows-2025
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out the pull-request merge commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Confirm this workflow cannot publish
+        run: ./ci/pr-test-build_test.ps1
+
+      - name: Test semantic version progression
+        run: ./ci/version_test.ps1
+
+      - name: Cache verified compiler archive
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: build/deps/llvm-mingw.zip
+          key: windows-2025-llvm-${{ hashFiles('dependencies.json') }}
+
+      - name: Bootstrap pinned compiler
+        run: ./bootstrap.ps1
+
+      - name: Build, validate and smoke-test with software D3D12
+        run: |
+          Start-Transcript -Path build/ci-validation.log
+          try {
+            ./build.ps1 -Validate -WarpOnly
+            ./smoke-test.ps1
+          } finally {
+            Stop-Transcript
+          }
+
+      - name: Write PR-build checksums from the validated binaries
+        run: |
+          $native = 'build/native'
+          foreach ($name in @('taxi-cam.exe', 'taxi-camera-bridge.dll')) {
+            if (-not (Test-Path -LiteralPath (Join-Path $native $name) -PathType Leaf)) {
+              throw "PR test build missing $name."
+            }
+          }
+          $receipt = Get-Content -Raw -LiteralPath (Join-Path $native 'validation.json') | ConvertFrom-Json
+          if (-not $receipt.passed) { throw 'PR test build validation receipt did not pass.' }
+          $lines = foreach ($name in @('taxi-cam.exe', 'taxi-camera-bridge.dll')) {
+            $path = Join-Path $native $name
+            $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+            $expected = $receipt.files.PSObject.Properties[$name].Value
+            if ($hash -ne $expected) { throw "PR test build hash mismatch: $name" }
+            "$($hash.ToLowerInvariant())  $name"
+          }
+          $lines | Set-Content -LiteralPath (Join-Path $native 'SHA256SUMS.txt') -Encoding ascii
+
+      - name: Keep PR test-build binaries
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-pr-test-build-${{ github.event.pull_request.number }}-run-${{ github.run_number }}-attempt-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            build/native/taxi-cam.exe
+            build/native/taxi-camera-bridge.dll
+            build/native/SHA256SUMS.txt
+            build/native/validation.json
+            build/native/version.json
+            build/ci-validation.log
+
+      - name: Record that this is not a release
+        run: |
+          $artifact = "windows-pr-test-build-$($env:GITHUB_EVENT_PULL_REQUEST_NUMBER)-run-$($env:GITHUB_RUN_NUMBER)-attempt-$($env:GITHUB_RUN_ATTEMPT)"
+          "This run produced a PR test build only. Download $artifact. It is not a GitHub Release and was not published." >> $env:GITHUB_STEP_SUMMARY
+          "Publication stays gated on the main-branch Windows build and release workflow." >> $env:GITHUB_STEP_SUMMARY
+        env:
+          GITHUB_EVENT_PULL_REQUEST_NUMBER: ${{ github.event.pull_request.number }}

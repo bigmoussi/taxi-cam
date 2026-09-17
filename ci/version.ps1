@@ -1,5 +1,24 @@
 Set-StrictMode -Version Latest
 
+function Get-TaxiReleaseBuildNumber(
+    [string]$GitHubActions = $env:GITHUB_ACTIONS,
+    [string]$EventName = $env:GITHUB_EVENT_NAME,
+    [string]$Ref = $env:GITHUB_REF,
+    [string]$RunNumber = $env:GITHUB_RUN_NUMBER
+) {
+    # Only main-branch workflow runs that can produce a publishable candidate
+    # receive a release build number. Pull requests, other refs and local
+    # builds stay at zero so they cannot look newer than a published tag.
+    if ($GitHubActions -cne 'true') { return 0 }
+    if ($EventName -like 'pull_request*') { return 0 }
+    if ($Ref -cne 'refs/heads/main') { return 0 }
+    if ([string]::IsNullOrWhiteSpace($RunNumber)) { return 0 }
+    $buildNumber = 0
+    if ($RunNumber -notmatch '^[1-9][0-9]{0,9}$' -or
+        -not [int]::TryParse($RunNumber, [ref]$buildNumber)) { throw 'Invalid GitHub build number.' }
+    return $buildNumber
+}
+
 function Get-TaxiVersion([string]$Repository, [int]$BuildNumber = 0) {
     if ($BuildNumber -lt 0) { throw 'Build number must not be negative.' }
     $config = Get-Content -Raw -LiteralPath (Join-Path $Repository 'version.json') | ConvertFrom-Json

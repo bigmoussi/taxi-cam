@@ -19,8 +19,14 @@ int main() {
   check(parse_update_version(L"v0.9.0-build.1", latest) && newer_update(latest, current), "version takes priority over build");
   check(!newer_update(current, current), "no reinstall same release");
   check(!newer_update(current, latest), "no downgrade");
+  check(parse_update_version(L"v0.8.0-build.6", latest) && !newer_update(latest, current), "lower published build ignored");
+  check(parse_update_version(L"v0.7.9-build.999", latest) && !newer_update(latest, current),
+        "older version ignored despite larger build");
+  check(parse_update_version(L"v0.8.0-build.0", latest) && newer_update(current, latest),
+        "published build is newer than local or PR build 0");
   for (const auto* tag : {L"v0.8.0-build.01", L"v0.8.0-build.-1", L"v0.8.0-build.4294967296", L"v0.8.0-build.9;calc",
-                          L"0.8.0-build.9", L"v0.8.0-build.9-preview", L"v0.8.0-build.", L"v0.8.0-build.9\n"})
+                          L"0.8.0-build.9", L"v0.8.0-build.9-preview", L"v0.8.0-build.", L"v0.8.0-build.9\n",
+                          L"v0.8.0-pr.12", L"v0.8.0-test.1", L"v0.8.0", L"pr-12"})
     check(!parse_update_version(tag, latest), "malformed tag rejected");
   check(update_installer_arguments(L"C:\\Users\\A B\\Taxi Cam", 123) ==
             L"/DIR=\"C:\\Users\\A B\\Taxi Cam\" /UPDATEFROMPID=123", "installer args preserve path spaces");

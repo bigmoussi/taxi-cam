@@ -6,6 +6,12 @@ README, documentation, issue-template and other repository-only changes do not t
 
 The build workflow can also be started manually from GitHub Actions. Only successful builds from `main` can be published.
 
+## Pull-request test builds
+
+Every pull request to `main` runs the [Windows PR test build](../.github/workflows/pr-test-build.yml) workflow. It bootstraps the compiler pinned in `dependencies.json`, runs `build.ps1 -Validate -WarpOnly` and `smoke-test.ps1` against the exact `taxi-cam.exe` and `taxi-camera-bridge.dll` from that run, and uploads those binaries with `validation.json` and `SHA256SUMS.txt` as `windows-pr-test-build-<pr>-run-<number>-attempt-<attempt>`. That artifact is a test/PR build only: the job does not package an installer, does not run `ci/publish-release.ps1`, and cannot publish a GitHub release. PR binaries keep build number zero, the same as local builds, so a sideloaded test EXE cannot look newer than the last published `v*-build.N` just because Actions run numbers are shared across workflows.
+
+This check does not wait for release-environment approval. Mark **PR test build** as a required status check in GitHub branch protection if merges should wait for it. Publication remains the approval-gated job on the main-branch Windows build and release workflow.
+
 ## Download, check, then publish
 
 1. Open the **Windows build and release** run in GitHub Actions. Wait for **Build and validate** to finish; **Publish release** will show **Waiting** for approval.
@@ -74,11 +80,11 @@ For a minor or major release, deliberately change the baseline in `version.json`
 
 The generated header and Windows manifest live under `build/native/generated/`; the resolved version and baseline commit are recorded in `build/native/version.json`. The app UI, executable version resources, installer and release title all use this resolved semantic version.
 
-Tags retain `v<application-version>-build.<workflow-run-number>`, such as `v0.8.1-build.13`, so existing updaters continue to recognize releases. The build suffix identifies an artifact; it does not replace the advancing semantic version. The workflow run number is recorded in the validation receipt, while local builds use build number zero. Packaging refuses a `build.N` label that differs from the compiled build number.
+Tags retain `v<application-version>-build.<workflow-run-number>`, such as `v0.8.1-build.13`, so existing updaters continue to recognize releases. The build suffix identifies an artifact; it does not replace the advancing semantic version. Only `main`-branch GitHub Actions runs stamp that workflow run number into the compiled binary and validation receipt. Local builds and pull-request test builds use build number zero. Packaging refuses a `build.N` label that differs from the compiled build number. Publication uses the already-stamped receipt; it does not rebuild or rewrite historical release receipts.
 
 Installer assets use `taxi-cam-<version>-windows-x64-setup.exe`, such as `taxi-cam-0.9.0-windows-x64-setup.exe`. The build number remains in the release tag, runtime ZIP name and validation receipts for traceability. Existing published downloads keep their original names.
 
-The updater compares version components and build numbers numerically, ignores drafts and prereleases, and selects the exact installer filename for the release from the fixed project repository. It prefers `taxi-cam-<version>-windows-x64-setup.exe` and also recognizes `taxi-cam-<version>-build.<number>-windows-x64-setup.exe`. Downloads are bounded and verified before execution. Automatic checks run off the UI thread, with a manual tray action available; installing requires user confirmation and a closed simulator.
+The updater asks GitHub's unauthenticated `/repos/rthoms334/taxi-cam/releases/latest` endpoint, then compares that published tag with the installed `TAXI_CAM_VERSION` and `TAXI_CAM_BUILD_NUMBER`. It ignores drafts, prereleases, Actions artifacts and unpublished `main` candidates. Version components and build numbers are compared numerically. It selects the exact installer filename for the release from the fixed project repository, prefers `taxi-cam-<version>-windows-x64-setup.exe`, and also recognizes `taxi-cam-<version>-build.<number>-windows-x64-setup.exe`. Downloads are bounded and verified before execution. Automatic checks run off the UI thread, with a manual tray action available; installing requires user confirmation and a closed simulator.
 
 The updater uses GitHub's unauthenticated public release API. The release repository and its installer assets must be publicly readable; private repositories return HTTP 404 to this client. No GitHub credential is embedded in the application. Make the repository public and publish a release containing setup before automatic updates can be used by end users. Local installation and the isolated updater tests work independently of repository visibility.
 
