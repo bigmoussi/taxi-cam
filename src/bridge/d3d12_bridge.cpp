@@ -410,6 +410,31 @@ std::array<std::uint64_t, 2> dominant_activity_pair(const profiles::AircraftProf
   const auto low = std::min(inventory[0].id, inventory[1].id);
   return profile.higher_id_left ? std::array<std::uint64_t, 2>{high, low} : std::array<std::uint64_t, 2>{low, high};
 }
+// Control-thread only. Same last / third-last mapping as the allocation-group
+// detector. Late Connect can fill the eight format-27 rows while some DUs stay
+// flat; do not wait for all eight draw counters before ready/calibration have
+// targets. A two-texture list is still incomplete.
+std::array<std::uint64_t, 2> allocation_group_pair(const profiles::AircraftProfile& profile,
+                                                  const std::vector<PfdTargetObservation>& inventory) noexcept {
+  if (profile.pfd_detection != profiles::PfdDetectionPolicy::ini_a380_allocation_group)
+    return {};
+  std::array<std::uint64_t, 8> ids{};
+  std::size_t n = 0;
+  for (const auto& item : inventory) {
+    if (!item.id || item.format != 27)
+      continue;
+    if (n == ids.size())
+      return {};
+    ids[n++] = item.id;
+  }
+  if (n != ids.size())
+    return {};
+  std::sort(ids.begin(), ids.end());
+  for (std::size_t i = 1; i < ids.size(); ++i)
+    if (ids[i] == ids[i - 1])
+      return {};
+  return {ids[7], ids[5]};
+}
 bool display_item(const Registry& r, const Resource& item) noexcept {
   return item.alive && profiles::matches_display(*r.profile, static_cast<UINT>(item.desc.Width), item.desc.Height, item.desc.MipLevels,
                                                 static_cast<UINT>(item.desc.Format));
@@ -2212,6 +2237,13 @@ void discover_pfds(std::uint64_t now) noexcept {
       else if (!ranked_group && !r.routes.targets[0] && !r.routes.targets[1]) {
         if (const auto pair = dominant_activity_pair(*r.profile, inventory); pair[0])
           r.routes.adopt_detected(pair);
+      } else if (ranked_group && (!r.routes.targets[0] || !r.routes.targets[1])) {
+        // Incomplete assignment after a filled eight: replace a stale singleton
+        // that assigned_ would otherwise keep (it is often not last/third-last).
+        if (const auto pair = allocation_group_pair(*r.profile, inventory); pair[0]) {
+          if (!r.routes.adopt_detected(pair) && (!r.routes.targets[0] || !r.routes.targets[1]))
+            r.routes.adopt_detected(pair, true);
+        }
       }
     }
     refresh_selected(r);

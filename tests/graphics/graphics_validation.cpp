@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <d3d11on12.h>
 #include "../../src/bridge/d3d12_bridge.hpp"
 #include "../../src/bridge/native_hooks.hpp"
@@ -933,7 +934,7 @@ void native_case(bool warp,
   std::array<Reference<ID3D12Resource>, 4> textures;
   D3D12_DESCRIPTOR_HEAP_DESC hd{};
   hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-  hd.NumDescriptors = 8;
+  hd.NumDescriptors = 16;
   Reference<ID3D12DescriptorHeap> heap;
   check(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(heap.put())), "RTV heap");
   const auto stride = device->GetDescriptorHandleIncrementSize(hd.Type);
@@ -970,7 +971,42 @@ void native_case(bool warp,
   } else {
     require(learned_pair[0] == 0 && learned_pair[1] == 0,
             "Allocation-group profiles do not adopt a partial two-texture list");
+    std::array<Reference<ID3D12Resource>, 8> group;
+    std::array<D3D12_CPU_DESCRIPTOR_HANDLE, 8> group_rtvs;
+    std::array<std::uint64_t, 8> group_ids{};
+    for (UINT i = 0; i < 8; ++i) {
+      auto d = texture_description(display_width, 1024, DXGI_FORMAT_R8G8B8A8_TYPELESS);
+      d.MipLevels = 1;
+      create_texture(device.get(), d, group[i].put());
+      D3D12_RENDER_TARGET_VIEW_DESC view{};
+      view.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+      view.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+      group_rtvs[i] = {base.ptr + SIZE_T{8 + i} * stride};
+      device->CreateRenderTargetView(group[i].get(), &view, group_rtvs[i]);
+      transition(list.get(), group[i].get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+      transition(list.get(), group[i].get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+      list->OMSetRenderTargets(1, &group_rtvs[i], FALSE, nullptr);
+    }
+    const auto filled = win::pfd_inventory();
+    std::size_t typed = 0;
+    for (const auto& row : filled)
+      if (row.format == 27 && row.id)
+        group_ids[typed++] = row.id;
+    require(typed == 8, "Learn-on-use admits the complete ini A380 allocation group");
+    std::sort(group_ids.begin(), group_ids.end());
+    win::discover_pfds(GetTickCount64());
+    const auto complete_pair = win::target_ids();
+    require(complete_pair[0] == group_ids[7] && complete_pair[1] == group_ids[5],
+            "Complete idle allocation group adopts last/third-last so ready and calibration have targets");
+    require(win::assign_targets(group_ids[0], 0), "Stale singleton that is not a PFD side");
+    win::discover_pfds(GetTickCount64());
+    const auto recovered = win::target_ids();
+    require(recovered[0] == group_ids[7] && recovered[1] == group_ids[5],
+            "assigned_ singleton that is not last/third-last is replaced by the allocation pair");
+    require(win::assign_targets(0, 0), "Release allocation-group sides so the two-texture oracle can continue");
   }
+  if (ini_a380)
+    win::discover_pfds(GetTickCount64());
   const auto key = win::graphics_status().device;
   const auto successful_copies = [] {
     const auto s = win::graphics_status();
