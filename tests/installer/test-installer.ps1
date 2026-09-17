@@ -67,6 +67,11 @@ function Assert-Settings($Hashes,[switch]$Removed,[switch]$RateForced) {
     foreach ($relative in @($knownSettings + $unrelatedSettings)) {
         $path = Join-Path $fixtureLocalAppData $relative
         if ($Removed -and $relative -in $knownSettings) {
+            if ($relative -eq 'Taxi Cam/settings.ini' -and (Test-Path -LiteralPath $path -PathType Leaf) -and
+                (Get-TaxiIniKey $path 'display' 'camera_rate_revision') -eq '1' -and
+                $null -eq (Get-TaxiIniKey $path 'display' 'camera_rate')) {
+                continue
+            }
             Assert-That (-not (Test-Path -LiteralPath $path)) "Opt-in settings removal retained $relative."
         } elseif ($RateForced -and $relative -in $rateSettings) {
             Assert-That ((Test-Path -LiteralPath $path -PathType Leaf) -and (Get-TaxiIniKey $path 'display' 'camera_rate') -eq '5') "Keep-install did not force camera_rate=5: $relative."

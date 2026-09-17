@@ -219,6 +219,20 @@ function Set-TaxiIniKey([string]$Path, [string]$Section, [string]$Key, [string]$
     Write-TaxiIniFile $Path $loaded.encoding ([string]::Join($newline, $lines))
 }
 
+# One-shot install migrate, matching night_boost_revision: write camera_rate=5
+# once, then leave later user overrides alone. The stamp lives on settings.ini
+# so a companion profile save cannot clear it.
+$script:TaxiCameraRateMigrationRevision = '1'
+
+function Get-TaxiCameraRateSettingsPath {
+    return (@(Get-TaxiCameraRateTargets) | Select-Object -First 1).path
+}
+
+function Test-TaxiCameraRateMigrationApplied([string]$Path) {
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+    return (Get-TaxiIniKey $Path 'display' 'camera_rate_revision') -eq $script:TaxiCameraRateMigrationRevision
+}
+
 function New-TaxiCameraRateSnapshot([string]$BackupDirectory) {
     $snapshot = @(); $index = 0
     foreach ($target in @(Get-TaxiCameraRateTargets)) {
@@ -238,24 +252,64 @@ function New-TaxiCameraRateSnapshot([string]$BackupDirectory) {
     return $snapshot
 }
 
+function Set-TaxiSnapshotIniKeys($Entry, [hashtable[]]$Assignments) {
+    $expected = if ($Entry.owned) { $Entry.installedHash } else { $Entry.priorHash }
+    if ((Get-TaxiSettingsHash $Entry) -ne $expected) { throw "Settings changed before camera rate update: $($Entry.path)" }
+    $temporary = Join-Path (Split-Path -Parent $Entry.path) ('taxi-camera-rate-' + [Guid]::NewGuid().ToString('N') + '.tmp')
+    try {
+        Copy-Item -LiteralPath $Entry.path -Destination $temporary
+        foreach ($assignment in $Assignments) {
+            Set-TaxiIniKey $temporary $assignment.Section $assignment.Key $assignment.Value
+        }
+        $sourceHash = (Get-FileHash -LiteralPath $temporary -Algorithm SHA256).Hash
+        if ((Get-TaxiSettingsHash $Entry) -ne $expected) { throw "Settings changed while preparing camera rate update: $($Entry.path)" }
+        if ($expected) { [IO.File]::Replace($temporary, $Entry.path, [NullString]::Value) }
+        else { [IO.File]::Move($temporary, $Entry.path) }
+        $Entry.owned = $true
+        $Entry.installedHash = $sourceHash
+    } finally {
+        if (Test-Path -LiteralPath $temporary -PathType Leaf) { Remove-Item -LiteralPath $temporary }
+    }
+}
+
+function New-TaxiCameraRateMigrationStamp($Entry) {
+    Assert-TaxiSettingsPath $Entry.path $Entry.root
+    $expected = if ($Entry.owned) { $Entry.installedHash } else { $Entry.priorHash }
+    if ((Get-TaxiSettingsHash $Entry) -ne $expected) { throw "Settings changed before camera-rate migration stamp: $($Entry.path)" }
+    if ($expected) { throw "Refusing to create a camera-rate stamp over an existing settings file: $($Entry.path)" }
+    $parent = Split-Path -Parent $Entry.path
+    if (-not (Test-Path -LiteralPath $parent -PathType Container)) {
+        New-Item -ItemType Directory -Force -Path $parent | Out-Null
+    }
+    $temporary = Join-Path $parent ('taxi-camera-rate-' + [Guid]::NewGuid().ToString('N') + '.tmp')
+    try {
+        Write-TaxiIniFile $temporary 'ansi' ("[display]`r`ncamera_rate_revision=$script:TaxiCameraRateMigrationRevision`r`n")
+        $sourceHash = (Get-FileHash -LiteralPath $temporary -Algorithm SHA256).Hash
+        if ((Get-TaxiSettingsHash $Entry) -ne $expected) { throw "Settings changed while preparing camera-rate migration stamp: $($Entry.path)" }
+        [IO.File]::Move($temporary, $Entry.path)
+        $Entry.owned = $true
+        $Entry.installedHash = $sourceHash
+    } finally {
+        if (Test-Path -LiteralPath $temporary -PathType Leaf) { Remove-Item -LiteralPath $temporary }
+    }
+}
+
 function Set-TaxiForcedCameraRate([object[]]$Snapshot, [int]$Rate = 5) {
     if ($Rate -lt 5 -or $Rate -gt 60) { throw "Camera rate $Rate is outside 5-60." }
+    $settingsPath = Get-TaxiCameraRateSettingsPath
+    $settingsEntry = @($Snapshot | Where-Object { $_.path -eq $settingsPath })[0]
+    if ($null -eq $settingsEntry) { throw 'Camera-rate snapshot omitted settings.ini.' }
+    if (Test-TaxiCameraRateMigrationApplied $settingsEntry.path) { return $false }
+
     foreach ($entry in $Snapshot) {
         if (-not $entry.existed) { continue }
-        $expected = if ($entry.owned) { $entry.installedHash } else { $entry.priorHash }
-        if ((Get-TaxiSettingsHash $entry) -ne $expected) { throw "Settings changed before camera rate update: $($entry.path)" }
-        $temporary = Join-Path (Split-Path -Parent $entry.path) ('taxi-camera-rate-' + [Guid]::NewGuid().ToString('N') + '.tmp')
-        try {
-            Copy-Item -LiteralPath $entry.path -Destination $temporary
-            Set-TaxiIniKey $temporary 'display' 'camera_rate' ([string]$Rate)
-            $sourceHash = (Get-FileHash -LiteralPath $temporary -Algorithm SHA256).Hash
-            if ((Get-TaxiSettingsHash $entry) -ne $expected) { throw "Settings changed while preparing camera rate update: $($entry.path)" }
-            if ($expected) { [IO.File]::Replace($temporary, $entry.path, [NullString]::Value) }
-            else { [IO.File]::Move($temporary, $entry.path) }
-            $entry.owned = $true
-            $entry.installedHash = $sourceHash
-        } finally {
-            if (Test-Path -LiteralPath $temporary -PathType Leaf) { Remove-Item -LiteralPath $temporary }
+        $assignments = [System.Collections.Generic.List[hashtable]]::new()
+        $assignments.Add(@{Section='display'; Key='camera_rate'; Value=[string]$Rate})
+        if ($entry.path -eq $settingsPath) {
+            $assignments.Add(@{Section='display'; Key='camera_rate_revision'; Value=$script:TaxiCameraRateMigrationRevision})
         }
+        Set-TaxiSnapshotIniKeys $entry @($assignments)
     }
+    if (-not $settingsEntry.existed) { New-TaxiCameraRateMigrationStamp $settingsEntry }
+    return $true
 }
