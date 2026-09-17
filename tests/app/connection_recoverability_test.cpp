@@ -38,7 +38,15 @@ int main() {
     require(should_attempt_connect(false, false, ConnectCommand::connect), "Connect command authorizes a manual attempt");
     require(should_attempt_connect(false, true, ConnectCommand::reset), "Reset authorizes another attempt");
     require(should_attempt_connect(true, true, ConnectCommand::connect), "Connect can retry after a stuck attempt");
+    require(should_attempt_connect(false, false, ConnectCommand::none, true),
+            "Latched manual authorization continues after Connect is consumed");
+    require(!should_attempt_connect(false, true, ConnectCommand::none, true),
+            "Latched manual mode still respects an in-flight attempt");
     require(fresh_load_allowed(false) && !fresh_load_allowed(true), "Fresh LoadLibrary only before a session load starts");
+    require(!heartbeat_confirms_bridge(1000, 1000) && !heartbeat_confirms_bridge(999, 1000),
+            "Stale or equal heartbeat cannot re-arm recovery");
+    require(heartbeat_confirms_bridge(1001, 1000), "Newer heartbeat confirms bridge health after recovery");
+    require(!heartbeat_confirms_bridge(0, 0), "Missing heartbeat does not confirm the bridge");
 
     ConnectCommandQueue queue;
     require(!queue.pending(), "Queue starts empty");

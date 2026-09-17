@@ -53,7 +53,7 @@ std::atomic<bool> running{true};
 std::atomic<DWORD> simulator_pid{};
 HANDLE worker{}, show_event{}, singleton{};
 bool dirty = false, refreshing = false, background_start = false, preview_ui = false;
-bool auto_connect = true;
+std::atomic<bool> auto_connect{true};
 win::ConnectCommandQueue connect_commands;
 win::CameraHotkeys hotkey_draft = win::DefaultCameraHotkeys, hotkey_saved = win::DefaultCameraHotkeys;
 win::CameraHotkeyRegistration hotkey_registration;
@@ -624,7 +624,7 @@ void build_controls() {
         SendMessageW(combo, CB_SETCURSEL, i, 0);
     toggle(L"Auto aircraft", 230, s.auto_profile, 707, 318, 140);
     toggle(L"Service", 220, s.enabled, 860, 318, 135);
-    toggle(L"Auto-connect", 240, auto_connect, 707, 236, 155);
+    toggle(L"Auto-connect", 240, auto_connect.load(std::memory_order_acquire), 707, 236, 155);
     button(L"Connect", 241, 260, 236, 130, 34);
     button(L"Reconnect / Reset", 242, 405, 236, 200, 34);
     const auto* profile = profiles::find(s.profile);
@@ -896,6 +896,8 @@ DWORD WINAPI connection_worker(void*) {
   bool attempted = false;
   bool load_started_this_session = false;
   bool bridge_ok = false;
+  bool manual_armed = false;
+  std::uint64_t ignore_heartbeat_through = 0;
   win::LaunchRetry startup_retry;
   HANDLE process{};
   while (running.load()) {
@@ -903,10 +905,14 @@ DWORD WINAPI connection_worker(void*) {
       Sleep(100);
       continue;
     }
+    const bool auto_on = auto_connect.load(std::memory_order_acquire);
     const auto command = connect_commands.take();
+    if (command == win::ConnectCommand::connect || command == win::ConnectCommand::reset)
+      manual_armed = true;
     if (command == win::ConnectCommand::reset) {
       attempted = false;
       bridge_ok = false;
+      ignore_heartbeat_through = 0;
       startup_retry.reset();
       mailbox.close();
       {
@@ -927,6 +933,8 @@ DWORD WINAPI connection_worker(void*) {
       attempted = false;
       load_started_this_session = false;
       bridge_ok = false;
+      manual_armed = false;
+      ignore_heartbeat_through = 0;
       startup_retry.reset();
       simulator_pid = 0;
       {
@@ -945,9 +953,11 @@ DWORD WINAPI connection_worker(void*) {
       attempted = false;
       load_started_this_session = false;
       bridge_ok = false;
+      manual_armed = command == win::ConnectCommand::connect || command == win::ConnectCommand::reset;
+      ignore_heartbeat_through = 0;
       startup_retry = {};
       process = OpenProcess(SYNCHRONIZE, FALSE, pid);
-      if (!auto_connect && command != win::ConnectCommand::connect && command != win::ConnectCommand::reset) {
+      if (!auto_on && !manual_armed) {
         {
           const std::lock_guard lock(app_mutex);
           connection = L"MSFS detected. Auto-connect is off — choose Connect when ready.";
@@ -955,19 +965,23 @@ DWORD WINAPI connection_worker(void*) {
         PostMessageW(window, StatusMessage, 0, 0);
       }
     }
-    const bool want_connect = win::should_attempt_connect(auto_connect, attempted, command);
+    const bool want_connect = win::should_attempt_connect(auto_on, attempted, command, manual_armed);
     if (attached && want_connect && startup_retry.ready(GetTickCount64())) {
       attempted = true;
       if (!mailbox.data() && !mailbox.open(attached, true)) {
         const bool retrying = startup_retry.schedule({false, GetLastError(), L"mailbox", true}, GetTickCount64()) ||
                               startup_retry.schedule_recovery(GetTickCount64());
         attempted = !retrying;
-        const std::lock_guard lock(app_mutex);
-        connection = L"Could not open the camera control channel.";
-        if (retrying)
-          connection += L" Retrying.";
-        else
-          connection += L" Use Reconnect / Reset to try again.";
+        if (!retrying)
+          manual_armed = false;
+        {
+          const std::lock_guard lock(app_mutex);
+          connection = L"Could not open the camera control channel.";
+          if (retrying)
+            connection += L" Retrying.";
+          else
+            connection += L" Use Reconnect / Reset to try again.";
+        }
         PostMessageW(window, StatusMessage, 0, 0);
       } else {
         const auto settings = draft();
@@ -988,7 +1002,15 @@ DWORD WINAPI connection_worker(void*) {
         if (!retrying && !loaded.ok && loaded.retry_before_load)
           retrying = startup_retry.schedule_recovery(GetTickCount64());
         attempted = !retrying;
-        bridge_ok = loaded.ok;
+        if (loaded.ok) {
+          manual_armed = false;
+          // Confirm health from a beat newer than any stale-recovery watermark.
+          bridge_ok = ignore_heartbeat_through == 0;
+        } else {
+          bridge_ok = false;
+          if (!retrying)
+            manual_armed = false;
+        }
         {
           const std::lock_guard lock(app_mutex);
           connection = loaded.message;
@@ -1005,8 +1027,6 @@ DWORD WINAPI connection_worker(void*) {
         }
         PostMessageW(window, StatusMessage, 0, 0);
       }
-    } else if (attached && !auto_connect && !attempted && !bridge_ok && command == win::ConnectCommand::none) {
-      // Idle until Connect; keep the waiting message current.
     }
     // If the bridge previously started but heartbeats went stale while MSFS is
     // still running, request a safe rescan/start without a second LoadLibrary.
@@ -1018,6 +1038,7 @@ DWORD WINAPI connection_worker(void*) {
       }
       const auto now = GetTickCount64();
       if (sample.heartbeat && now > sample.heartbeat + 15000) {
+        ignore_heartbeat_through = sample.heartbeat;
         bridge_ok = false;
         attempted = false;
         startup_retry.reset();
@@ -1040,9 +1061,13 @@ DWORD WINAPI connection_worker(void*) {
       {
         const std::lock_guard lock(app_mutex);
         status = sample;
-        received_bridge_status = received_bridge_status || sample.heartbeat != 0;
-        if (sample.heartbeat)
+        if (!win::heartbeat_confirms_bridge(sample.heartbeat, ignore_heartbeat_through))
+          status.heartbeat = 0;
+        else {
           bridge_ok = true;
+          ignore_heartbeat_through = 0;
+        }
+        received_bridge_status = received_bridge_status || sample.heartbeat != 0;
       }
       PostMessageW(window, StatusMessage, 0, 0);
     }
@@ -1135,7 +1160,7 @@ bool is_on(int id, const win::Settings& s) {
     case 220:
       return s.enabled;
     case 240:
-      return auto_connect;
+      return auto_connect.load(std::memory_order_acquire);
     case 221:
       return s.follow_taxi;
     case 222:
@@ -1460,13 +1485,14 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         return 0;
       }
       if (id == 240) {
-        auto_connect = !auto_connect;
-        if (!win::save_auto_connect(win::settings_directory(), auto_connect))
+        const bool next = !auto_connect.load(std::memory_order_acquire);
+        auto_connect.store(next, std::memory_order_release);
+        if (!win::save_auto_connect(win::settings_directory(), next))
           notice = L"Could not save the Auto-connect preference.";
         else
-          notice = auto_connect ? L"Auto-connect on. Taxi Cam will attach when MSFS is detected."
-                                : L"Auto-connect off. Use Connect after MSFS is up.";
-        if (auto_connect)
+          notice = next ? L"Auto-connect on. Taxi Cam will attach when MSFS is detected."
+                        : L"Auto-connect off. Use Connect after MSFS is up.";
+        if (next)
           connect_commands.request(win::ConnectCommand::connect);
         build_controls();
         return 0;
@@ -1666,7 +1692,7 @@ int WINAPI wWinMain(HINSTANCE app, HINSTANCE, LPWSTR, int) {
     win::settings_override = installation + L"\\preview-settings";
   if (!win::load_settings(current, installation))
     notice = L"Saved settings were invalid; profile defaults loaded.";
-  auto_connect = win::load_auto_connect(win::settings_directory());
+  auto_connect.store(win::load_auto_connect(win::settings_directory()), std::memory_order_release);
   if (!win::load_camera_hotkeys(hotkey_saved, win::settings_directory()))
     notice = L"Saved shortcuts were invalid and disabled. Configure them in Overview > Flight-deck control.";
   hotkey_draft = hotkey_saved;

@@ -46,12 +46,22 @@ class ConnectCommandQueue {
 };
 
 // Decide whether the worker should attempt bridge load/start this tick.
-inline bool should_attempt_connect(bool auto_connect, bool already_attempted, ConnectCommand command) noexcept {
+// manual_session_armed latches an explicit Connect/Reset across scheduled
+// preflight retries until success, exhaustion, or a new simulator session.
+inline bool should_attempt_connect(bool auto_connect,
+                                   bool already_attempted,
+                                   ConnectCommand command,
+                                   bool manual_session_armed = false) noexcept {
   if (command == ConnectCommand::reset || command == ConnectCommand::connect)
     return true;
   if (already_attempted)
     return false;
-  return auto_connect;
+  return auto_connect || manual_session_armed;
+}
+
+// After stale-heartbeat recovery, ignore the same mapped beat until a newer one arrives.
+inline bool heartbeat_confirms_bridge(std::uint64_t sample_heartbeat, std::uint64_t ignore_through) noexcept {
+  return sample_heartbeat && sample_heartbeat > ignore_through;
 }
 
 inline bool fresh_load_allowed(bool load_started_this_session) noexcept { return !load_started_this_session; }
