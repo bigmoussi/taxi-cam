@@ -30,7 +30,7 @@ For **Windows 10/11 (64-bit)** and **MSFS 2024**, with one of the aircraft above
 2. Close MSFS and exit Taxi Cam if it is already running.
 3. Run setup, confirm your simulator folder, and choose **Configure automatic startup with MSFS** or **Launch manually**. Setup remembers this choice on updates. Manual launch skips startup configuration and leaves any existing startup entry unchanged.
 
-**Keep existing settings** is selected by default. Leave it checked to preserve camera profiles, calibration, reference guides and keyboard shortcuts. Clear it only if you want to start with the bundled defaults. Setup restores your previous settings if installation fails.
+**Keep existing settings** is selected by default. Leave it checked to preserve camera profiles, calibration, reference guides and keyboard shortcuts. This version still writes camera frame rate **5** into existing settings; other saved values stay in place. Clear the checkbox only if you want to start with the bundled defaults. Setup restores your previous settings if installation fails.
 
 If Setup cannot configure automatic startup and can verify the startup file is unchanged, installation completes with a notice explaining how to launch Taxi Cam from the Start menu. Details are saved in `setup-diagnostics.log` in the installation folder. You can rerun Setup to retry automatic startup. See [Automatic startup](docs/runtime-reference.md#automatic-startup) for Steam and Microsoft Store startup file locations and selection behavior.
 
@@ -66,7 +66,7 @@ Choose **Apply live** to preview the positions, then **Save changes** to keep th
 
 ### Brightness and smoothness
 
-On **Display**, adjust brightness, automatic night exposure and ground-speed text colour. **Camera frame rate** accepts **5–60**, with a default of **5**. Higher values update the cameras more often and increase simulator work. The achieved rate also depends on simulator performance. Choose **Save changes** when finished. Existing profiles that already saved a rate keep that value.
+On **Display**, adjust brightness, automatic night exposure and ground-speed text colour. **Camera frame rate** accepts **5–60**, with a default of **5**. This version's installer writes **5** into existing settings so a saved 15 becomes 5; later changes you make are kept. Higher values update the cameras more often and increase simulator work. The achieved rate also depends on simulator performance. Choose **Save changes** when finished.
 
 All aircraft start with **−11.5 EV** daytime exposure, **Auto exposure** enabled, **8 EV** maximum night boost and the same green ground-speed colour. This update sets existing profiles' maximum night boost to **8** once, when each profile is first loaded. Other saved preferences are preserved, including the Auto exposure choice. Later changes to the night boost remain saved normally. GS displays whole knots by dropping the fractional part: 12.9 knots displays as 12.
 
