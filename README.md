@@ -4,7 +4,7 @@ Nose-wheel and tail cameras for Microsoft Flight Simulator 2024. Use the aircraf
 
 ## Compatibility
 
-- **ReShade compatibility is experimental.** Taxi Cam now handles ReShade's graphics-hook ordering. If camera output is missing, include the bridge log in your bug report. See [startup order, compatibility and validation details](docs/reshade-compatibility.md).
+- **ReShade compatibility is experimental.** Taxi Cam handles ReShade's graphics-hook ordering and must not deadlock DXGI when ReShade add-ons or frame generation submit on the same queue. If camera output is missing, include the bridge log in your bug report. See [startup order, compatibility and validation details](docs/reshade-compatibility.md).
 - **Steam and Microsoft Store:** Taxi Cam checks the loaded simulator's camera interfaces automatically. Simulator updates that change those interfaces can still prevent loading. See [simulator build compatibility](docs/dynamic-camera-compatibility.md).
 
 ## Important notice

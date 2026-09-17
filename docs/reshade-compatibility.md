@@ -21,6 +21,14 @@ This follows [ReShade 6.8's `Close` implementation](https://github.com/crosire/r
 
 The bridge pins its device and hook modules for the process lifetime. Arbitrary injector order, injecting/reloading ReShade after graphics initialization and live hook replacement have not been validated. Restart MSFS after changing the graphics-injector setup; restarting only the companion does not unload or reinstall the bridge already inside MSFS.
 
+## Frame generation and ReShade add-ons
+
+Issue [#27](https://github.com/rthoms334/taxi-cam/issues/27) is a presentation deadlock with ReShade **MFG Unlock** (DLSS-G multi-frame override) and similar frame-generation helpers. Those add-ons submit extra command lists on the same native queue from a helper thread while Present is still inside the application's `ExecuteCommandLists`. Taxi Cam must not hold that queue's submit lock across another thread's submit: a waiter there blocks DXGI and freezes the simulator.
+
+Observed Wait/Signal pairing still serializes on that queue. A helper that cannot take the lock immediately forwards the original batch, then reports `contended_submission`. Capture invalidates source-state evidence for that submit and keeps the device available. Same-thread re-entry during the original submit is treated the same way: the timeline Signal still runs so an already-queued Wait cannot hang the GPU, but the device is not permanently failed. Unrelated application batches release the lock before the original submit.
+
+This keeps the presentation chain moving. It does not prove that camera pixels reach the PFD while frame generation, ReShade add-ons or DLSS-G are active. If capture stays paused at "waiting for verified GPU state", collect the bridge log. Disabling ReShade/MFG remains the confirmed local workaround; this change is a hang fix, not live MFG acceptance.
+
 ## Startup timing
 
 The bridge observes resource creation and later render-target-view creation. It does not reconstruct every texture and view that existed before attachment. Starting after the aircraft has loaded can therefore produce camera output without selected PFD targets, for example with `ini_group_incomplete`. Restarting the companion does not reconstruct those missing resources.

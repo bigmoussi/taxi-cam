@@ -36,8 +36,24 @@ thread_local bool nested_submission = false;
 
 struct ExclusiveLock {
   SRWLOCK& lock;
-  explicit ExclusiveLock(SRWLOCK& value) noexcept : lock(value) { AcquireSRWLockExclusive(&lock); }
-  ~ExclusiveLock() { ReleaseSRWLockExclusive(&lock); }
+  bool owned = false;
+  explicit ExclusiveLock(SRWLOCK& value, bool try_only = false) noexcept : lock(value) {
+    if (try_only)
+      owned = TryAcquireSRWLockExclusive(&lock) != FALSE;
+    else {
+      AcquireSRWLockExclusive(&lock);
+      owned = true;
+    }
+  }
+  ~ExclusiveLock() { release(); }
+  void release() noexcept {
+    if (!owned)
+      return;
+    ReleaseSRWLockExclusive(&lock);
+    owned = false;
+  }
+  ExclusiveLock(const ExclusiveLock&) = delete;
+  ExclusiveLock& operator=(const ExclusiveLock&) = delete;
 };
 
 QueueState* find_queue(ID3D12CommandQueue* queue) noexcept {
@@ -156,7 +172,15 @@ void STDMETHODCALLTYPE submit(ID3D12CommandQueue* queue, UINT count, ID3D12Comma
     forward(queue, count, lists);
     return;
   }
-  const ExclusiveLock lock(entry->submit_lock);
+  ExclusiveLock lock(entry->submit_lock, true);
+  if (!lock.owned) {
+    // Frame-generation and Present helpers share this queue. Waiting here
+    // deadlocks DXGI when the owner is already inside original Execute.
+    forward(queue, count, lists);
+    if (entry->enabled.load(std::memory_order_acquire))
+      refuse(*entry, queue, Refusal::contended_submission);
+    return;
+  }
   if (!entry->enabled.load(std::memory_order_acquire)) {
     forward(queue, count, lists);
     return;
@@ -175,6 +199,11 @@ void STDMETHODCALLTYPE submit(ID3D12CommandQueue* queue, UINT count, ID3D12Comma
   if (!oversized && !invalid)
     receipt = entry->callbacks.before(entry->callbacks.context, queue, count, lists);
   // Never replay, split, omit, replace or add lists to the application's batch.
+  if (!receipt && !oversized && !invalid) {
+    lock.release();
+    forward(queue, count, lists);
+    return;
+  }
   forward(queue, count, lists);
   if (nested_submission)
     refuse(*entry, queue, Refusal::reentrant_submission);

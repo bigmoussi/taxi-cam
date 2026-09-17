@@ -55,7 +55,7 @@ void invoke(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lis
 }
 
 struct Context {
-  std::atomic<unsigned> before{0}, after{0}, refused{0}, bad{0}, phase{0};
+  std::atomic<unsigned> before{0}, after{0}, refused{0}, contended{0}, bad{0}, phase{0};
   std::atomic<std::uint64_t> sequence{0};
   std::atomic<bool> recurse_before{false}, recurse_after{false};
   bool receipt_enabled = true;
@@ -66,6 +66,9 @@ class MockQueue : public ID3D12CommandQueue {
   std::atomic<ULONG> references{1};
   std::atomic<unsigned> calls{0}, bad{0};
   Context* context = nullptr;
+  std::atomic<bool>* hold_until = nullptr;
+  std::atomic<bool>* entered_hold = nullptr;
+  UINT hold_count = 0;
   HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, void**) override { return E_NOINTERFACE; }
   ULONG STDMETHODCALLTYPE AddRef() override { return ++references; }
   ULONG STDMETHODCALLTYPE Release() override { return --references; }
@@ -98,7 +101,14 @@ class MockQueue : public ID3D12CommandQueue {
       unsigned phase = 1;
       context->phase.compare_exchange_strong(phase, 2);
     }
-    SwitchToThread();
+    if (hold_until && count == hold_count) {
+      if (entered_hold)
+        entered_hold->store(true, std::memory_order_release);
+      while (!hold_until->load(std::memory_order_acquire))
+        SwitchToThread();
+    } else {
+      SwitchToThread();
+    }
   }
   void STDMETHODCALLTYPE SetMarker(UINT, const void*, UINT) override {}
   void STDMETHODCALLTYPE BeginEvent(UINT, const void*, UINT) override {}
@@ -145,10 +155,13 @@ void after(void* opaque, ID3D12CommandQueue* queue, std::uint64_t receipt) noexc
   }
 }
 
-void refused(void* opaque, ID3D12CommandQueue*, qs::Refusal) noexcept {
+void refused(void* opaque, ID3D12CommandQueue*, qs::Refusal reason) noexcept {
   auto& context = *static_cast<Context*>(opaque);
   ++context.refused;
-  context.phase = 0;
+  if (reason == qs::Refusal::contended_submission)
+    ++context.contended;
+  else
+    context.phase = 0;
 }
 
 qs::Callbacks callbacks(Context* context) {
@@ -215,6 +228,26 @@ void mock() {
   require(queue->calls == 8 && context->before == 3 && context->after == 2 && context->refused == 4,
           "An ambiguous nested pre-submit batch published completion");
 
+  std::atomic<bool> helper_finished{false};
+  std::atomic<bool> entered_hold{false};
+  queue->hold_until = &helper_finished;
+  queue->entered_hold = &entered_hold;
+  queue->hold_count = 2;
+  std::thread helper([&] {
+    while (!entered_hold.load(std::memory_order_acquire))
+      SwitchToThread();
+    ID3D12CommandList* local[] = {reinterpret_cast<ID3D12CommandList*>(0x30000)};
+    invoke(queue, 1, local);
+    helper_finished.store(true, std::memory_order_release);
+  });
+  invoke(queue, 2, lists);
+  helper.join();
+  queue->hold_until = nullptr;
+  queue->entered_hold = nullptr;
+  require(queue->calls == 10 && queue->bad == 0 && context->before == 4 && context->after == 3 && context->contended == 1 &&
+              context->refused == 5 && context->bad == 0 && context->phase == 0,
+          "A contended helper submit blocked on the owner thread or dropped a forwarded batch");
+
   std::array<std::thread, 4> workers;
   for (auto& worker : workers)
     worker = std::thread([&] {
@@ -224,13 +257,19 @@ void mock() {
     });
   for (auto& worker : workers)
     worker.join();
-  require(queue->calls == 808 && queue->bad == 0 && context->after == 802 && context->bad == 0 && context->phase == 0,
-          "Concurrent queue submissions did not preserve exact forwarding and receipt ordering");
+  require(queue->calls == 810 && queue->bad == 0 && context->bad == 0 && context->phase == 0,
+          "Concurrent queue submissions dropped or corrupted a forwarded batch");
+  require(context->after >= 3 && context->before == context->after + 1 && context->refused == 4 + context->contended &&
+              context->after + context->contended == 804,
+          "Concurrent observation lost receipt pairing or double-counted a contended submit");
   const auto stats = qs::statistics(queue);
-  require(stats.submissions == 806 && stats.receipts == 802 && stats.refusals == 4, "Submission statistics are inconsistent");
+  require(stats.submissions + context->contended == 808 && stats.receipts == context->after && stats.refusals == context->refused,
+          "Submission statistics are inconsistent");
+  const auto observed_after = context->after.load();
   require(qs::disable_queue(queue).status == qs::Status::disabled, "Disabling the queue failed");
   invoke(queue, 2, lists);
-  require(queue->calls == 809 && context->after == 802 && queue->references == 2, "Disable observed work or released the retained queue");
+  require(queue->calls == 811 && context->after == observed_after && queue->references == 2,
+          "Disable observed work or released the retained queue");
   require(qs::register_queue(queue, callbacks(context)).status == qs::Status::already_registered,
           "Identical registration could not resume");
   for (unsigned i = 1; i < qs::kMaximumQueues; ++i)
@@ -249,7 +288,8 @@ void mock() {
           "Owned-slot removal did not restore the original and page protection");
   require(qs::register_queue(queue, callbacks(context)).status == qs::Status::installation_consumed, "Removed installation was reused");
   invoke(queue, 2, lists);
-  require(queue->calls == 810 && queue->bad == 0 && context->after == 802, "Removed hook still observed or omitted an original call");
+  require(queue->calls == 812 && queue->bad == 0 && context->after == observed_after,
+          "Removed hook still observed or omitted an original call");
 }
 
 void protection_failure(const std::string& mode) {
