@@ -82,7 +82,7 @@ The updater compares version components and build numbers numerically, ignores d
 
 The updater uses GitHub's unauthenticated public release API. The release repository and its installer assets must be publicly readable; private repositories return HTTP 404 to this client. No GitHub credential is embedded in the application. Make the repository public and publish a release containing setup before automatic updates can be used by end users. Local installation and the isolated updater tests work independently of repository visibility.
 
-Notes contain installation guidance, GPLv3 licence information, links to the exact corresponding source and build logs, validation scope, and commits since the most recent published ancestor build. GitHub's generated notes add pull-request and contributor information. The first release includes the available commit history.
+Notes contain installation guidance, GPLv3 licence information, links to the exact corresponding source and build logs, validation scope, and a rollup of merged pull requests and first-parent headlines since the most recent published ancestor build. Unpublished builds after that release are included. Duplicate pull-request numbers and conventional `ci:` / publish-workflow-only changes are omitted. The first release includes the available first-parent history.
 
 [The publication script](../ci/publish-release.ps1) targets the exact built commit. It marks a release Latest only when that commit is still the current `main` at publication time.
 

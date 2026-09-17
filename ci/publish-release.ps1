@@ -12,6 +12,7 @@ Set-StrictMode -Version Latest
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:GITHUB_REF -ne 'refs/heads/main') { throw 'Release publication runs only in the main-branch workflow.' }
 if ($BuildRunId -ne $env:GITHUB_RUN_ID) { throw 'Release publication must use artifacts from this workflow run.' }
 $root = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot 'release-notes.ps1')
 . (Join-Path $root 'installer/validation_receipt.ps1')
 $receiptPath = Join-Path $root 'build/native/validation.json'
 $receipt = Assert-TaxiNativeReceipt (Split-Path -Parent $receiptPath)
@@ -58,8 +59,9 @@ if ($existing) {
         return
     }
 }
-# Only use published ancestor releases as the notes baseline. Direct pushes are
-# listed explicitly because GitHub's generated notes primarily describe PRs.
+# Only published, non-draft ancestor tags are the notes baseline. Every later
+# first-parent merge and conventional headline is rolled up, including merges
+# that landed in unpublished builds after that release.
 $previous = $null
 foreach ($candidate in @($releases | Where-Object { -not $_.draft -and $_.tag_name -match '^v[0-9].*-build\.[0-9]+$' -and $_.tag_name -ne $tag } | Sort-Object published_at -Descending)) {
     # Checkout has no persisted credentials. Fetch only this tag through gh's
@@ -70,31 +72,18 @@ foreach ($candidate in @($releases | Where-Object { -not $_.draft -and $_.tag_na
     if ($LASTEXITCODE -eq 0) { $previous = $candidate.tag_name; break }
     if ($LASTEXITCODE -ne 1) { throw 'Could not check release ancestry.' }
 }
-$range = if ($previous) { "$previous..$Commit" } else { $Commit }
-$commits = @(& git log '--format=%H%x09%s' --reverse $range)
-if ($LASTEXITCODE -ne 0) { throw 'Could not collect release commits.' }
-$runUrl = "$env:GITHUB_SERVER_URL/$Repository/actions/runs/$BuildRunId"
-$notes = @(
-    "Windows x64 native package from commit [$($Commit.Substring(0,7))](https://github.com/$Repository/commit/$Commit).",
-    '',
-    'Download the Windows x64 setup EXE and run it with MSFS and Taxi Cam closed. Existing paths and settings are preserved by default. Clear Keep existing settings only to reset to defaults; uninstall also keeps settings unless removal is explicitly selected. SHA256SUMS.txt covers the installer and optional runtime ZIP.',
-    '',
-    'Upgrading from 0.8.17 or earlier: download and run setup manually once. Those versions only recognise the old installer filename containing a build number; 0.8.18 and later support the shorter name.',
-    '',
-    "Licence: GNU GPL version 3 only. [Corresponding source, including build and installation scripts](https://github.com/$Repository/archive/$Commit.zip) for these binaries; [browse this exact revision](https://github.com/$Repository/tree/$Commit). The installer and runtime ZIP include LICENSE.txt and third-party notices.",
-    '',
-    'Validation: strict native build, software D3D12 (WARP), smoke, IPC, camera lifecycle, graphics-state, installer and package checks. Hardware GPU and live MSFS checks are not performed on the hosted runner.',
-    '',
-    "[Build and validation logs]($runUrl)",
-    '',
-    '## Commits',
-    ''
-)
-foreach ($line in $commits) {
-    $parts = $line -split "`t",2
-    $subject = [System.Net.WebUtility]::HtmlEncode($parts[1])
-    $notes += "- $subject ([$($parts[0].Substring(0,7))](https://github.com/$Repository/commit/$($parts[0])))"
+$entries = @(Get-TaxiReleaseChangeEntries -Repository $root -FromRef $previous -ToCommit $Commit)
+$numbers = @($entries | Where-Object { $_.Number -gt 0 } | ForEach-Object { [int]$_.Number })
+try {
+    $pullRequests = Get-TaxiGitHubPullRequestInfo -Repository $Repository -Numbers $numbers
+    if ($pullRequests.Count -gt 0) {
+        $entries = @(Get-TaxiReleaseChangeEntries -Repository $root -FromRef $previous -ToCommit $Commit -PullRequestInfo $pullRequests)
+    }
+} catch {
+    # Git merge subjects and bodies remain the notes source if GitHub is unreachable.
 }
+$runUrl = "$env:GITHUB_SERVER_URL/$Repository/actions/runs/$BuildRunId"
+$notes = New-TaxiReleaseNotes -Repository $Repository -Commit $Commit -PreviousTag $previous -BuildRunUrl $runUrl -Entries $entries
 $notesPath = Join-Path $root 'build/release-notes.md'
 $notes | Set-Content -LiteralPath $notesPath -Encoding utf8
 $checksum = Join-Path $root 'build/SHA256SUMS.txt'
@@ -103,8 +92,7 @@ $checksum = Join-Path $root 'build/SHA256SUMS.txt'
 } | Set-Content -LiteralPath $checksum -Encoding ascii
 if (-not $existing) {
     $arguments = @('release','create',$tag,'--repo',$Repository,'--target',$Commit,'--title',$title,'--draft',
-        '--notes-file',$notesPath,'--generate-notes')
-    if ($previous) { $arguments += @('--notes-start-tag',$previous) }
+        '--notes-file',$notesPath)
     [void](Invoke-Gh -Arguments $arguments)
 }
 # Keep the release a draft until all assets are uploaded. Reruns repair drafts
