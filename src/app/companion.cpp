@@ -616,7 +616,7 @@ void build_controls() {
   button(L"Save changes", 500, 835, 686, 175, 42);
   button(L"Hide to tray", 501, 650, 686, 165, 42);
   if (page == 0) {
-    HWND combo = child(L"COMBOBOX", L"", 210, 260, 312, 420, 220, CBS_DROPDOWNLIST | WS_VSCROLL);
+    HWND combo = child(L"COMBOBOX", L"", 210, 260, 326, 420, 220, CBS_DROPDOWNLIST | WS_VSCROLL);
     for (const auto* profile : profiles::Catalog)
       SendMessageW(combo, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(profile->name));
     for (size_t i = 0; i < profiles::Catalog.size(); ++i)
@@ -749,7 +749,7 @@ void draw_page(HDC dc) {
     const auto line = sample.heartbeat ? widen(sample.message) : live;
     text(dc, line.c_str(), 266, 188, 715, 36, normal, Muted, DT_LEFT | DT_WORDBREAK);
     panel(dc, 244, 295, 766, 93);
-    text(dc, L"Aircraft profile", 260, 298, 350, 26, small, Muted);
+    text(dc, L"Aircraft profile", 260, 298, 350, 22, small, Muted);
     panel(dc, 244, 395, 766, 96);
     text(dc, L"Flight-deck control", 264, 406, 300, 30, heading);
     const auto* profile = profiles::find(draft().profile);
