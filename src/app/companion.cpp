@@ -744,12 +744,15 @@ void draw_page(HDC dc) {
   }
   if (page == 0) {
     panel(dc, 244, 137, 766, 140);
-    text(dc, sample.graphics_ready ? L"Native bridge connected" : L"Waiting for the simulator", 266, 153, 500, 30, heading,
-         sample.graphics_ready ? Accent : Text);
+    text(dc,
+         !sample.graphics_ready ? L"Waiting for the simulator"
+         : sample.candidate_count ? L"Native bridge connected"
+                                  : L"Native bridge connected — waiting for cockpit displays",
+         266, 153, 500, 30, heading, sample.graphics_ready && sample.candidate_count ? Accent : Text);
     const bool late_empty_pfds =
         sample.graphics_ready && sample.candidate_count == 0 && sample.left_id == 0 && sample.right_id == 0;
-    const auto line = late_empty_pfds ? std::wstring(L"No display textures observed (late Connect). "
-                                                     L"Connect at the main menu, or Restart Flight while Taxi Cam stays connected.")
+    const auto line = late_empty_pfds ? std::wstring(L"Waiting for cockpit displays to be drawn. "
+                                                     L"Restart Flight only if the list stays empty.")
                       : sample.heartbeat ? widen(sample.message)
                                          : live;
     text(dc, line.c_str(), 266, 188, 715, 36, normal, late_empty_pfds ? Accent : Muted, DT_LEFT | DT_WORDBREAK);
@@ -822,7 +825,8 @@ void draw_page(HDC dc) {
     std::swprintf(data, 1024,
                   L"Bridge                 %s\nCamera pair         %s\nLeft / right PFD    %llu / %llu\nCaptured frames  "
                   L"%llu\nCompositions       %llu\nPFD writes            %llu\nHook failures        %llu",
-                  sample.graphics_ready ? L"Connected" : L"Waiting", sample.scene_ready ? L"Ready" : L"Waiting",
+                  sample.graphics_ready ? (sample.candidate_count ? L"Connected" : L"Waiting for displays") : L"Waiting",
+                  sample.scene_ready ? L"Ready" : L"Waiting",
                   static_cast<unsigned long long>(sample.left_id), static_cast<unsigned long long>(sample.right_id),
                   static_cast<unsigned long long>(sample.captures), static_cast<unsigned long long>(sample.composed),
                   static_cast<unsigned long long>(sample.stamps), static_cast<unsigned long long>(sample.hook_failures));
@@ -1606,8 +1610,10 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
             const std::lock_guard lock(app_mutex);
             sample = status;
           }
-          if (sample.graphics_ready && sample.candidate_count == 0)
-            notice = L"No textures observed. Connect at the main menu, or Restart Flight while Taxi Cam stays connected.";
+          if (sample.graphics_ready && sample.candidate_count == 0) {
+            notice = L"Waiting for cockpit displays to be drawn. Restart Flight only if the list stays empty.";
+            InvalidateRect(hwnd, nullptr, FALSE);
+          }
           build_controls();
         }
         return 0;
