@@ -92,6 +92,9 @@ class SceneCaptureManager {
   // publication. Only begin/stop controls tail capture; neither invents a state.
   void begin_source_tracking() noexcept;
   void stop_source_tracking() noexcept;
+  // Restore last observed RT models after an AA/upscaler wipe that left the
+  // same camera allocations registered. Does not invent RT from a draw.
+  void rearm_source_states() noexcept;
   void set_source_rate(std::uint32_t frames_per_second) noexcept;
   // Suppress NEW GPU capture work only. Source state/alias/draw observation,
   // immutable replay effects and existing packet/consumer ordering must continue
@@ -279,6 +282,7 @@ class SceneCaptureManager {
                                   ID3D12Resource*) noexcept;
   void quarantine(Packet&) noexcept;
   void fail_device(Device&) noexcept;
+  unsigned rearm_source_states_locked() noexcept;
   void collect() noexcept;
   SourceCandidate* source_candidate(ID3D12Resource*) noexcept;
   bool may_be_source(ID3D12Resource*) const noexcept;

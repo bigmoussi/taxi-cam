@@ -49,12 +49,13 @@ bool Recording::append(Effect effect) noexcept {
 bool Tracker::register_source(Key key, Model initial) noexcept {
   if (!valid(key) || (initial != Model::unknown && initial != Model::legacy_rt && initial != Model::enhanced_rt && initial != Model::other))
     return false;
+  const Model retained = render_target_model(initial) ? initial : Model::unknown;
   Slot* free = nullptr;
   for (auto& slot : sources_) {
     if (slot.key == key)
       return true;
     if (slot.key.handle == key.handle) {
-      slot = {key, {initial, false}};
+      slot = {key, {initial, false}, retained};
       return true;
     }
     if (!slot.key.handle && !free)
@@ -62,7 +63,7 @@ bool Tracker::register_source(Key key, Model initial) noexcept {
   }
   if (!free)
     return false;
-  *free = {key, {initial, false}};
+  *free = {key, {initial, false}, retained};
   return true;
 }
 
@@ -102,15 +103,18 @@ bool Tracker::apply(const Recording& recording) noexcept {
       switch (effect.kind) {
         case Effect::Kind::legacy_rt:
           slot.state = {Model::legacy_rt, false};
+          slot.retained_rt = Model::legacy_rt;
           break;
         case Effect::Kind::enhanced_rt:
           slot.state = {Model::enhanced_rt, false};
+          slot.retained_rt = Model::enhanced_rt;
           break;
         case Effect::Kind::other:
           slot.state = {Model::other, false};
+          slot.retained_rt = Model::unknown;
           break;
         case Effect::Kind::draw:
-          slot.state.drawn = slot.state.model == Model::legacy_rt || slot.state.model == Model::enhanced_rt;
+          slot.state.drawn = render_target_model(slot.state.model);
           break;
       }
       break;
@@ -130,6 +134,17 @@ State Tracker::state(Key key) const noexcept {
 void Tracker::invalidate_all() noexcept {
   for (auto& slot : sources_)
     slot.state = {};
+}
+
+unsigned Tracker::rearm_retained_rt() noexcept {
+  unsigned count = 0;
+  for (auto& slot : sources_) {
+    if (!slot.key.handle || !render_target_model(slot.retained_rt) || slot.state.model == slot.retained_rt)
+      continue;
+    slot.state = {slot.retained_rt, false};
+    ++count;
+  }
+  return count;
 }
 
 }  // namespace taxi_camera::source_state
