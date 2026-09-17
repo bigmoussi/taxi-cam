@@ -61,6 +61,15 @@ Assert-Version '0.9.0'
 'Documentation change' | Set-Content -LiteralPath (Join-Path $fixture 'docs.txt')
 Commit-Fixture 'Update docs'
 Assert-Version '0.9.1'
+# Semantic version is stamped from version.json first-parent height at build
+# time, not from the last publish tag. A later tag on main or a higher tag
+# off main must not change the compiled version.
+$null = Invoke-TestGit @('tag','v0.9.1-build.38')
+Assert-Version '0.9.1'
+$null = Invoke-TestGit @('switch','--quiet','-c','off-main-tag')
+$null = Invoke-TestGit @('tag','v9.9.9-build.99')
+$null = Invoke-TestGit @('switch','--quiet','main')
+Assert-Version '0.9.1'
 Write-Version '1.0.0'
 Assert-Version '1.0.0'
 Commit-Fixture 'Start major release'

@@ -59,19 +59,14 @@ if ($existing) {
         return
     }
 }
-# Only published, non-draft ancestor tags are the notes baseline. Every later
-# first-parent merge and conventional headline is rolled up, including merges
-# that landed in unpublished builds after that release.
-$previous = $null
-foreach ($candidate in @($releases | Where-Object { -not $_.draft -and $_.tag_name -match '^v[0-9].*-build\.[0-9]+$' -and $_.tag_name -ne $tag } | Sort-Object published_at -Descending)) {
-    # Checkout has no persisted credentials. Fetch only this tag through gh's
-    # credential helper, scoped to this command; no token is written to config.
-    & git -c 'credential.helper=!gh auth git-credential' fetch origin "refs/tags/$($candidate.tag_name):refs/tags/$($candidate.tag_name)"
-    if ($LASTEXITCODE -ne 0) { throw 'Could not fetch release baseline tag.' }
-    & git merge-base --is-ancestor $candidate.tag_name $Commit
-    if ($LASTEXITCODE -eq 0) { $previous = $candidate.tag_name; break }
-    if ($LASTEXITCODE -ne 1) { throw 'Could not check release ancestry.' }
-}
+# Last published point is the latest v*-build.N tag on origin/main (or main).
+# Checkout has no persisted credentials. Fetch that tip and its tags through
+# gh's credential helper, scoped to this command; no token is written to config.
+& git -c 'credential.helper=!gh auth git-credential' fetch origin --tags --force
+if ($LASTEXITCODE -ne 0) { throw 'Could not fetch published tags.' }
+& git -c 'credential.helper=!gh auth git-credential' fetch origin main:refs/remotes/origin/main --force
+if ($LASTEXITCODE -ne 0) { throw 'Could not fetch origin/main.' }
+$previous = Get-TaxiLastPublishedMainTag -Repository $root -ExcludeTag $tag
 $entries = @(Get-TaxiReleaseChangeEntries -Repository $root -FromRef $previous -ToCommit $Commit)
 $numbers = @($entries | Where-Object { $_.Number -gt 0 } | ForEach-Object { [int]$_.Number })
 try {
@@ -98,8 +93,16 @@ if (-not $existing) {
 # Keep the release a draft until all assets are uploaded. Reruns repair drafts
 # but never replace a published release's assets.
 [void](Invoke-Gh -Arguments @('release','upload',$tag,$packagePath,$installerPath,$checksum,$receiptPath,'--repo',$Repository,'--clobber'))
-$main = Invoke-Gh -Arguments @('api',"repos/$Repository/commits/main",'--jq','.sha')
-$latest = if ($main -eq $Commit) { '--latest=true' } else { '--latest=false' }
+$recorded = & git rev-parse -q --verify "$tag^{commit}"
+if ($LASTEXITCODE -eq 0) {
+    if ($recorded -ne $Commit) { throw 'Existing publish tag targets a different commit.' }
+} else {
+    & git tag $tag $Commit
+    if ($LASTEXITCODE -ne 0) { throw 'Could not record the publish tag locally.' }
+}
+# Auto-update reads GitHub's latest published release. Mark this one Latest
+# only when it is the last v*-build.N tag reachable on origin/main (or main).
+$latest = if ((Get-TaxiLastPublishedMainTag -Repository $root) -ceq $tag) { '--latest=true' } else { '--latest=false' }
 [void](Invoke-Gh -Arguments @('release','edit',$tag,'--repo',$Repository,'--draft=false',$latest))
 $url = Invoke-Gh -Arguments @('release','view',$tag,'--repo',$Repository,'--json','url','--jq','.url')
 Write-Output "Published $url"
