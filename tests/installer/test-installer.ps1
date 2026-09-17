@@ -5,6 +5,7 @@ $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 Set-StrictMode -Version Latest
 $repo = $repoRoot
 . (Join-Path $repoRoot 'tests/support/installer_fixture.ps1')
+. (Join-Path $repoRoot 'installer/settings.ps1')
 $installerPath = (Resolve-Path -LiteralPath $Installer).Path
 $receipt = Get-Content -Raw -LiteralPath ($installerPath + '.json') | ConvertFrom-Json
 if ((Get-FileHash -LiteralPath $installerPath).Hash -ne $receipt.installerSha256) { throw 'Installer hash does not match its build receipt.' }
@@ -47,6 +48,10 @@ $knownSettings = @('Taxi Cam/settings.ini','Taxi Cam/hotkeys.ini','Taxi Cam/star
 foreach ($key in @('fbw-a380x','ini-a350-900','ini-a350-1000','ini-a380')) {
     foreach ($folder in @('Taxi Cam','380 Taxi Cam')) { $knownSettings += "$folder/profiles/$key.ini" }
 }
+$rateSettings = @('Taxi Cam/settings.ini')
+foreach ($key in @('fbw-a380x','ini-a350-900','ini-a350-1000','ini-a380')) {
+    foreach ($folder in @('Taxi Cam','380 Taxi Cam')) { $rateSettings += "$folder/profiles/$key.ini" }
+}
 $unrelatedSettings = @('Taxi Cam/logs/history.log','Taxi Cam/profiles/custom-aircraft.ini','Taxi Cam/readme.txt','380 Taxi Cam/profiles/custom-aircraft.ini')
 function Seed-Settings([string]$Tag) {
     $hashes = @{}
@@ -58,11 +63,19 @@ function Seed-Settings([string]$Tag) {
     }
     return $hashes
 }
-function Assert-Settings($Hashes,[switch]$Removed) {
+function Assert-Settings($Hashes,[switch]$Removed,[switch]$RateForced) {
     foreach ($relative in @($knownSettings + $unrelatedSettings)) {
         $path = Join-Path $fixtureLocalAppData $relative
         if ($Removed -and $relative -in $knownSettings) {
+            if ($relative -eq 'Taxi Cam/settings.ini' -and (Test-Path -LiteralPath $path -PathType Leaf) -and
+                (Get-TaxiIniKey $path 'display' 'camera_rate_revision') -eq '1' -and
+                $null -eq (Get-TaxiIniKey $path 'display' 'camera_rate')) {
+                continue
+            }
             Assert-That (-not (Test-Path -LiteralPath $path)) "Opt-in settings removal retained $relative."
+        } elseif ($RateForced -and $relative -in $rateSettings) {
+            Assert-That ((Test-Path -LiteralPath $path -PathType Leaf) -and (Get-TaxiIniKey $path 'display' 'camera_rate') -eq '5') "Keep-install did not force camera_rate=5: $relative."
+            Assert-That ([IO.File]::ReadAllText($path).Contains("settings fixture: $relative")) "Keep-install rate force dropped prior settings text: $relative."
         } else {
             Assert-That ((Test-Path -LiteralPath $path -PathType Leaf) -and (Get-FileHash -LiteralPath $path).Hash -eq $Hashes[$relative]) "Saved or unrelated settings changed: $relative."
         }
@@ -126,7 +139,7 @@ New-Item -ItemType Directory -Path $app -Force | Out-Null
 $existingMountHash = (Get-FileHash -LiteralPath (Join-Path $app 'taxi-camera-mounts.cfg')).Hash
 $exitCode = Invoke-Setup $fixture $app (Join-Path $testRoot 'install.log') -Paths
 Assert-That ($exitCode -eq 0) "Isolated first install failed ($exitCode): $testRoot"
-Assert-Settings $savedSettings
+Assert-Settings $savedSettings -RateForced
 Assert-That ((Get-FileHash -LiteralPath (Join-Path $app 'taxi-camera-mounts.cfg')).Hash -eq $existingMountHash) 'Default install replaced existing calibration.'
 foreach ($name in @('taxi-cam.exe','taxi-camera-bridge.dll')) { Assert-That ((Get-FileHash -LiteralPath (Join-Path $app $name)).Hash -eq $receipt.files.PSObject.Properties[$name].Value) "Installed hash mismatch: $name" }
 foreach ($name in @('LICENSE.txt','THIRD_PARTY_NOTICES.txt')) {
@@ -148,7 +161,7 @@ $launch.Save($xmlPath)
 $exitCode = Invoke-Setup $fixture $app (Join-Path $testRoot 'upgrade.log')
 Assert-That ($exitCode -eq 0) "Isolated upgrade with remembered paths failed ($exitCode): $testRoot"
 Assert-That ((Get-FileHash -LiteralPath $mount).Hash -eq $mountHash) 'Upgrade overwrote user calibration.'
-Assert-Settings $savedSettings
+Assert-Settings $savedSettings -RateForced
 [xml]$launch = Get-Content -Raw -LiteralPath $xmlPath
 Assert-That ($launch.SelectNodes('//Launch.Addon').Count -eq 2) 'Upgrade duplicated the startup entry.'
 Assert-That ($launch.SelectNodes('//Launch.Addon[Name="Taxi Cam"]').Count -eq 1) 'Upgrade did not rename startup registration.'
@@ -174,7 +187,7 @@ Assert-That ((Get-FileHash -LiteralPath $xmlPath).Hash -eq $xmlHash) 'Setup abor
 Assert-That ((Get-FileHash -LiteralPath (Join-Path $app 'installation.json')).Hash -eq $recordHash) 'Setup abort did not restore installation.json.'
 Assert-That ((Get-FileHash -LiteralPath $oldExe).Hash -eq $oldExeHash) 'Setup abort did not restore the previous executable name and bytes.'
 Assert-That (-not (Test-Path -LiteralPath (Join-Path $app 'taxi-cam.exe'))) 'Setup abort retained the renamed executable.'
-Assert-Settings $savedSettings
+Assert-Settings $savedSettings -RateForced
 Assert-That ((Get-FileHash -LiteralPath $mount).Hash -eq $mountHash) 'Setup abort after reset did not restore calibrated mounts.'
 foreach ($name in @('LICENSE.txt','THIRD_PARTY_NOTICES.txt')) {
     Assert-That ([IO.File]::ReadAllText((Join-Path $app $name)) -eq "prior $name fixture") "Setup abort did not restore $name."
@@ -187,7 +200,7 @@ foreach ($name in @('LICENSE.txt','THIRD_PARTY_NOTICES.txt')) {
 $exitCode = Invoke-Uninstall $app (Join-Path $testRoot 'uninstall.log')
 Assert-That ($exitCode -eq 0) 'Isolated uninstall failed.'
 Assert-That ((Get-FileHash -LiteralPath $mount).Hash -eq $mountHash) 'Uninstall removed calibration.'
-Assert-Settings $savedSettings
+Assert-Settings $savedSettings -RateForced
 [xml]$launch = Get-Content -Raw -LiteralPath $xmlPath
 Assert-That ($launch.SelectNodes('//Launch.Addon').Count -eq 1) 'Uninstall did not preserve exactly the unrelated startup entry.'
 Assert-That (-not (Test-Path -LiteralPath (Join-Path $app 'taxi-cam.exe'))) 'Uninstall retained the installed executable.'

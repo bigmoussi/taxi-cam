@@ -119,6 +119,11 @@ try {
             $targets += $target.path
             $settingsRoots[$target.path] = $target.root
         }
+    } else {
+        foreach ($target in @(Get-TaxiCameraRateTargets)) {
+            $targets += $target.path
+            $settingsRoots[$target.path] = $target.root
+        }
     }
     $legacy = Join-Path $SimulatorDirectory 'taxi-camera-native.addon64'
     $targets += $legacy

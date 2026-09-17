@@ -53,7 +53,8 @@ Night-boost preference revision 1 sets `night_boost` to 8 once for each existing
 | `enabled` | 1 | Enable the camera service |
 | `follow_taxi` | 1; iniBuilds A380: 0 | Read aircraft TAXI controls; 0 uses manual control |
 | `auto_detect` | 1 | Detect the PFD pair using the profile's policy |
-| `camera_rate` | 5 | Integer 5–60 (minimum 5); install sets 5 |
+| `camera_rate` | 5 | Integer 5–60 (minimum 5), activation limit per camera. The first keep-install of this version writes 5 into existing `settings.ini` and known aircraft profile INIs; later upgrades keep a user-changed rate. Missing keys use 5. |
+| `camera_rate_revision` | 1 after the one-shot install migrate | Installer migration marker on `settings.ini`; not a user control. Later installs skip the rate write when this is 1. |
 | `single_camera` | 0 | Render only the nose for a performance test |
 | `automatic_exposure` | 1 | Adjust exposure from ambient light |
 | `exposure` | −11.5 for all aircraft | Daytime EV, −16 to +4 |

@@ -75,6 +75,8 @@ if ($ResetSettings) {
     $defaultMount = Join-Path $staging 'default-mount.cfg'
 }
 $settingsSnapshot = @()
+$rateSnapshot = @()
+$rateMigrated = $false
 $prior = @{}
 $installed = @()
 $writtenHashes = @{}
@@ -166,6 +168,12 @@ try {
     Assert-Closed
     if ($ResetSettings) {
         $settingsSnapshot = @(New-TaxiSettingsSnapshot -Installation $dest -BackupDirectory $staging -IncludeMount)
+    } else {
+        $rateSnapshot = @(New-TaxiCameraRateSnapshot -BackupDirectory $staging)
+        $rateMigrated = [bool](Set-TaxiForcedCameraRate $rateSnapshot)
+        foreach ($entry in $rateSnapshot) {
+            if ($entry.owned) { $writtenHashes[$entry.path] = $entry.installedHash }
+        }
     }
     if (Test-Path -LiteralPath $oldExe -PathType Leaf) {
         $oldBackup = Join-Path $staging '380-taxi-cam.exe.backup'
@@ -259,6 +267,7 @@ try {
         Move-Item -LiteralPath $disabled -Destination $legacy
     }
     if ($ResetSettings) { Restore-TaxiSettingsSnapshot $settingsSnapshot }
+    else { Restore-TaxiSettingsSnapshot $rateSnapshot }
     if ($xmlWritten) {
         if (-not (Test-Path -LiteralPath $ExeXml) -or (Get-FileHash -LiteralPath $ExeXml).Hash -ne $xmlWrittenHash) { throw 'exe.xml changed after installation; the newer contents were preserved.' }
         if ($xmlBackup) { Copy-Item -LiteralPath $xmlBackup -Destination $ExeXml -Force }
@@ -294,3 +303,5 @@ else { Write-Warning $startupWarning }
 Write-Output "Legacy taxi add-on retained: $disabled"
 Write-Output 'Unrelated simulator files and startup entries were preserved.'
 if ($ResetSettings) { Write-Output 'Saved settings and known legacy profile imports were reset; bundled camera defaults restored. Logs and unknown files were retained.' }
+elseif ($rateMigrated) { Write-Output 'Existing camera frame-rate settings were set to 5 once for this version. Later upgrades keep a user-changed rate. Calibration, mounts, hotkeys and other saved preferences were left unchanged.' }
+else { Write-Output 'Saved camera frame-rate settings were left unchanged. Calibration, mounts, hotkeys and other saved preferences were left unchanged.' }

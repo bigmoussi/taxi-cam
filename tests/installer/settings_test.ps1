@@ -34,6 +34,56 @@ function Assert-Saved($Expected) {
         Assert-SettingsTest ((Test-Path -LiteralPath $path -PathType Leaf) -and (Get-FileHash -LiteralPath $path).Hash -eq $Expected[$path]) "Saved file changed: $path"
     }
 }
+function Get-PreservedSettingsMap {
+    $map = @{}
+    foreach ($target in @(Get-TaxiSettingsTargets -Installation $app -IncludeMount)) {
+        $leaf = [IO.Path]::GetFileName($target.path)
+        if ($leaf -eq 'settings.ini' -or $target.path -match '[\\/]profiles[\\/]') { continue }
+        if (Test-Path -LiteralPath $target.path -PathType Leaf) { $map[$target.path] = (Get-FileHash -LiteralPath $target.path).Hash }
+    }
+    return $map
+}
+function Get-ExistingRateMap {
+    $map = @{}
+    foreach ($target in @(Get-TaxiCameraRateTargets)) {
+        if (Test-Path -LiteralPath $target.path -PathType Leaf) { $map[$target.path] = (Get-FileHash -LiteralPath $target.path).Hash }
+    }
+    return $map
+}
+function Assert-ForcedCameraRate([string]$ExpectedRate = '5') {
+    $found = 0
+    $settingsPath = Get-TaxiCameraRateSettingsPath
+    foreach ($target in @(Get-TaxiCameraRateTargets)) {
+        if (-not (Test-Path -LiteralPath $target.path -PathType Leaf)) { continue }
+        $rate = Get-TaxiIniKey $target.path 'display' 'camera_rate'
+        if ($null -eq $rate -and $target.path -eq $settingsPath -and (Get-TaxiIniKey $target.path 'display' 'camera_rate_revision') -eq '1') { continue }
+        $found++
+        Assert-SettingsTest ($rate -eq $ExpectedRate) "Install did not write camera_rate=${ExpectedRate}: $($target.path)"
+    }
+    Assert-SettingsTest ($found -gt 0) 'Camera-rate force found no existing settings files to check.'
+}
+function Assert-CameraRateRevision([string]$Path, $Expected) {
+    $actual = Get-TaxiIniKey $Path 'display' 'camera_rate_revision'
+    if ($null -eq $Expected) {
+        Assert-SettingsTest ($null -eq $actual) "Unexpected camera_rate_revision '$actual' on $Path"
+    } else {
+        Assert-SettingsTest ($actual -eq $Expected) "camera_rate_revision is '$actual', expected '$Expected': $Path"
+    }
+}
+function Assert-StampOnlySettings {
+    Assert-SettingsTest (Test-Path -LiteralPath $settingsIni -PathType Leaf) 'Keep-install did not stamp a missing settings.ini.'
+    Assert-CameraRateRevision $settingsIni '1'
+    Assert-SettingsTest ($null -eq (Get-TaxiIniKey $settingsIni 'display' 'camera_rate')) 'Stamp-only settings.ini included camera_rate.'
+}
+function Write-RateFixture([string]$SettingsRate = '', [string]$ProfileRate = '') {
+    $settingsBody = "[aircraft]`r`nprofile=4`r`nautomatic=1`r`n[display]`r`n"
+    if ($SettingsRate.Length) { $settingsBody += "camera_rate=$SettingsRate`r`n" }
+    [IO.File]::WriteAllText($settingsIni, $settingsBody)
+    $profileBody = "[display]`r`n"
+    if ($ProfileRate.Length) { $profileBody += "camera_rate=$ProfileRate`r`n" }
+    $profileBody += "exposure=-7.5`r`n[nose]`r`nforward=27.25`r`n"
+    [IO.File]::WriteAllBytes($profileIni, ([Text.Encoding]::Unicode.GetPreamble() + [Text.Encoding]::Unicode.GetBytes($profileBody)))
+}
 function Invoke-Install([switch]$Reset) {
     & (Join-Path $repoRoot 'installer/install.ps1') -SimulatorDirectory $sim -ExeXml $xml -Destination $app -PayloadDirectory $payload -NoShortcut -ResetSettings:$Reset
 }
@@ -64,7 +114,36 @@ try {
     Copy-Item -LiteralPath (Join-Path $repoRoot 'licenses/native-runtime-notices.txt') -Destination (Join-Path $payload 'THIRD_PARTY_NOTICES.txt')
     Copy-Item -LiteralPath (Join-Path $repoRoot 'taxi-camera-mounts.cfg') -Destination $payload
     $defaultHash = (Get-FileHash -LiteralPath (Join-Path $payload 'taxi-camera-mounts.cfg')).Hash
+
+    $iniUnit = Join-Path $fixture 'ini-unit'
+    New-Item -ItemType Directory -Force -Path $iniUnit | Out-Null
+    $ansiIni = Join-Path $iniUnit 'settings.ini'
+    [IO.File]::WriteAllText($ansiIni, "[aircraft]`r`nprofile=4`r`nautomatic=1`r`n[display]`r`ncamera_rate=15`r`nsingle_camera=0`r`n")
+    Set-TaxiIniKey $ansiIni 'display' 'camera_rate' '5'
+    Assert-SettingsTest ((Get-TaxiIniKey $ansiIni 'display' 'camera_rate') -eq '5') 'ANSI INI writer did not replace camera_rate.'
+    Assert-SettingsTest ((Get-TaxiIniKey $ansiIni 'aircraft' 'profile') -eq '4' -and (Get-TaxiIniKey $ansiIni 'display' 'single_camera') -eq '0') 'ANSI INI writer changed unrelated keys.'
+    $utf16Ini = Join-Path $iniUnit 'fbw-a380x.ini'
+    $utf16 = "[service]`r`nenabled=1`r`n[display]`r`ncamera_rate=30`r`nexposure=-7.5`r`n[nose]`r`nforward=27.25`r`n"
+    [IO.File]::WriteAllBytes($utf16Ini, ([Text.Encoding]::Unicode.GetPreamble() + [Text.Encoding]::Unicode.GetBytes($utf16)))
+    Set-TaxiIniKey $utf16Ini 'display' 'camera_rate' '5'
+    Assert-SettingsTest ((Get-TaxiIniKey $utf16Ini 'display' 'camera_rate') -eq '5') 'UTF-16 INI writer did not replace camera_rate.'
+    Assert-SettingsTest ((Get-TaxiIniKey $utf16Ini 'display' 'exposure') -eq '-7.5' -and (Get-TaxiIniKey $utf16Ini 'nose' 'forward') -eq '27.25') 'UTF-16 INI writer changed calibration.'
+    $bytes = [IO.File]::ReadAllBytes($utf16Ini)
+    Assert-SettingsTest ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) 'UTF-16 INI writer dropped the BOM.'
+    $plainIni = Join-Path $iniUnit 'plain.ini'
+    [IO.File]::WriteAllText($plainIni, "saved fixture without a display section`r`n")
+    Set-TaxiIniKey $plainIni 'display' 'camera_rate' '5'
+    Assert-SettingsTest ((Get-TaxiIniKey $plainIni 'display' 'camera_rate') -eq '5' -and [IO.File]::ReadAllText($plainIni).Contains('saved fixture without a display section')) 'INI writer did not append camera_rate while keeping prior text.'
+    $missingIni = Join-Path $iniUnit 'missing.ini'
+    $refused = $false
+    try { Set-TaxiIniKey $missingIni 'display' 'camera_rate' '5' } catch { $refused = $_.Exception.Message -like 'Settings file is missing*' }
+    Assert-SettingsTest ($refused -and -not (Test-Path -LiteralPath $missingIni)) 'INI writer created a missing settings file.'
+
     $saved = Seed-Settings
+    $settingsIni = Join-Path $local 'Taxi Cam/settings.ini'
+    $profileIni = Join-Path $local 'Taxi Cam/profiles/fbw-a380x.ini'
+    Write-RateFixture '15' '15'
+    $preserved = Get-PreservedSettingsMap
     $unrelated = @{}
     foreach ($path in @((Join-Path $local 'Taxi Cam/logs/keep.log'),(Join-Path $local 'Taxi Cam/history/old.ini'),(Join-Path $local 'Taxi Cam/profiles/custom-aircraft.ini'),(Join-Path $local '380 Taxi Cam/profiles/unknown.ini'))) {
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $path) | Out-Null
@@ -72,14 +151,31 @@ try {
         $unrelated[$path] = (Get-FileHash -LiteralPath $path).Hash
     }
     Invoke-Install
-    Assert-Saved $saved
+    Assert-ForcedCameraRate
+    Assert-CameraRateRevision $settingsIni '1'
+    Assert-SettingsTest ((Get-TaxiIniKey $settingsIni 'aircraft' 'profile') -eq '4' -and (Get-TaxiIniKey $settingsIni 'aircraft' 'automatic') -eq '1') 'Keep-install rate force changed aircraft selection.'
+    Assert-SettingsTest ((Get-TaxiIniKey $profileIni 'display' 'exposure') -eq '-7.5' -and (Get-TaxiIniKey $profileIni 'nose' 'forward') -eq '27.25') 'Keep-install rate force changed calibration.'
+    Assert-Saved $preserved
     Assert-Saved $unrelated
+
+    Set-TaxiIniKey $settingsIni 'display' 'camera_rate' '15'
+    Set-TaxiIniKey $profileIni 'display' 'camera_rate' '15'
+    Assert-CameraRateRevision $settingsIni '1'
+    Invoke-Install
+    Assert-SettingsTest ((Get-TaxiIniKey $settingsIni 'display' 'camera_rate') -eq '15') 'Second keep-install rewrote a user camera_rate after the migration stamp.'
+    Assert-SettingsTest ((Get-TaxiIniKey $profileIni 'display' 'camera_rate') -eq '15') 'Second keep-install rewrote a profile camera_rate after the migration stamp.'
+    Assert-CameraRateRevision $settingsIni '1'
+    Assert-SettingsTest ((Get-TaxiIniKey $profileIni 'display' 'exposure') -eq '-7.5' -and (Get-TaxiIniKey $profileIni 'nose' 'forward') -eq '27.25') 'Second keep-install changed calibration.'
+    Assert-Saved $preserved
+    Assert-Saved $unrelated
+    $rateAfterInstall = Get-ExistingRateMap
 
     $otherCompanion = $true
     $refused = $false
     try { Invoke-Install -Reset } catch { $refused = $_.Exception.Message -like 'Exit every Taxi Cam*' }
     Assert-SettingsTest $refused 'Reset failed to refuse a companion from another installation.'
-    Assert-Saved $saved
+    Assert-Saved $rateAfterInstall
+    Assert-Saved $preserved
     $otherCompanion = $false
 
     $bundledMount = Join-Path $payload 'taxi-camera-mounts.cfg'
@@ -89,7 +185,42 @@ try {
     try { Invoke-Install -Reset } catch { $refused = $_.Exception.Message -like 'Bundled default camera mounts*' }
     finally { Move-Item -LiteralPath $heldMount -Destination $bundledMount }
     Assert-SettingsTest $refused 'Reset silently imported simulator calibration when bundled defaults were missing.'
-    Assert-Saved $saved
+    Assert-Saved $rateAfterInstall
+    Assert-Saved $preserved
+
+    Write-RateFixture '15' '15'
+    Assert-CameraRateRevision $settingsIni $null
+    $exeLock = [IO.File]::Open((Join-Path $app 'taxi-cam.exe'), [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+    $refused = $false
+    try { Invoke-Install } catch { $refused = $true } finally { $exeLock.Dispose() }
+    Assert-SettingsTest $refused 'Locked destination executable did not fail keep-install.'
+    Assert-SettingsTest ((Get-TaxiIniKey $settingsIni 'display' 'camera_rate') -eq '15') 'Failed keep-install left a forced camera_rate after rollback.'
+    Assert-CameraRateRevision $settingsIni $null
+    Assert-SettingsTest ((Get-TaxiIniKey $profileIni 'display' 'camera_rate') -eq '15' -and (Get-TaxiIniKey $profileIni 'nose' 'forward') -eq '27.25') 'Failed keep-install rate rollback dropped calibration.'
+    Assert-Saved $preserved
+    Assert-Saved $unrelated
+    Invoke-Install
+    Assert-ForcedCameraRate
+    Assert-CameraRateRevision $settingsIni '1'
+    Assert-SettingsTest ((Get-TaxiIniKey $settingsIni 'aircraft' 'profile') -eq '4' -and (Get-TaxiIniKey $profileIni 'nose' 'forward') -eq '27.25') 'Retry keep-install after rate rollback changed other settings.'
+
+    Write-RateFixture
+    Assert-SettingsTest ($null -eq (Get-TaxiIniKey $settingsIni 'display' 'camera_rate')) 'Missing-key fixture still had camera_rate.'
+    Assert-CameraRateRevision $settingsIni $null
+    Invoke-Install
+    Assert-ForcedCameraRate
+    Assert-CameraRateRevision $settingsIni '1'
+    Assert-SettingsTest ((Get-TaxiIniKey $settingsIni 'aircraft' 'profile') -eq '4' -and (Get-TaxiIniKey $profileIni 'nose' 'forward') -eq '27.25') 'Missing-key migrate changed other settings.'
+
+    Remove-Item -LiteralPath $settingsIni
+    Invoke-Install
+    Assert-StampOnlySettings
+    Assert-SettingsTest ((Get-TaxiIniKey $profileIni 'display' 'camera_rate') -eq '5') 'Missing settings.ini migrate left a profile rate other than 5.'
+    Set-TaxiIniKey $profileIni 'display' 'camera_rate' '15'
+    Invoke-Install
+    Assert-StampOnlySettings
+    Assert-SettingsTest ((Get-TaxiIniKey $profileIni 'display' 'camera_rate') -eq '15') 'Install after a stamp-only settings.ini rewrote a user profile rate.'
+    $rateAfterInstall = Get-ExistingRateMap
 
     $lockedXmlHash = (Get-FileHash -LiteralPath $xml).Hash
     $xmlLock = [IO.File]::Open($xml, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
@@ -164,6 +295,10 @@ try {
     Invoke-Install
     Assert-SettingsTest ((Get-FileHash -LiteralPath (Join-Path $app 'taxi-camera-mounts.cfg')).Hash -eq $defaultHash) 'Default reinstall into a recorded installation resurrected old simulator calibration.'
     foreach ($target in @(Get-TaxiSettingsTargets -Installation $app)) {
+        if ($target.path -eq $settingsIni) {
+            Assert-StampOnlySettings
+            continue
+        }
         Assert-SettingsTest (-not (Test-Path -LiteralPath $target.path)) 'Default reinstall resurrected known legacy profile settings.'
     }
     Assert-Saved $unrelated
@@ -214,7 +349,7 @@ exit $LASTEXITCODE
     $refused = $false
     try { [void]@(Get-TaxiSettingsTargets -Installation $app) } catch { $refused = $_.Exception.Message -like '*file is a directory*' }
     Assert-SettingsTest $refused 'A directory was accepted as a known settings file.'
-    Write-Output "PASS settings lifecycle: $checks checks; keep defaults, reset defaults with locked startup fallback, multiple startup file rollback, inner/outer rollback, concurrent writer, legacy imports, explicit uninstall removal, unrelated files and path guards. Fixture: $fixture"
+    Write-Output "PASS settings lifecycle: $checks checks; keep defaults, one-shot camera_rate=5 migrate, user override kept, missing-key migrate, rollback of rate and stamp, reset defaults with locked startup fallback, multiple startup file rollback, inner/outer rollback, concurrent writer, legacy imports, explicit uninstall removal, unrelated files and path guards. Fixture: $fixture"
 } finally {
     $env:LOCALAPPDATA = $priorLocal
     $env:TEMP = $priorTemp
