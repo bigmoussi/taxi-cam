@@ -13,6 +13,7 @@ if ($env:GITHUB_ACTIONS -ne 'true' -or $env:GITHUB_REF -ne 'refs/heads/main') { 
 if ($BuildRunId -ne $env:GITHUB_RUN_ID) { throw 'Release publication must use artifacts from this workflow run.' }
 $root = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'release-notes.ps1')
+. (Join-Path $PSScriptRoot 'publish-tag.ps1')
 . (Join-Path $root 'installer/validation_receipt.ps1')
 $receiptPath = Join-Path $root 'build/native/validation.json'
 $receipt = Assert-TaxiNativeReceipt (Split-Path -Parent $receiptPath)
@@ -24,7 +25,15 @@ if ([IO.Path]::GetFileName($installerPath) -cne $expectedInstaller -or
     [IO.Path]::GetFileName($packagePath) -cne "$expectedBase.zip" -or $receipt.buildNumber -ne $BuildNumber) {
     throw 'Release asset names and validated application must match the release build.'
 }
-$tag = "v$($receipt.version)-build.$BuildNumber"
+# Workflow run numbers identify artifacts. The published tag is the next
+# vX.Y.Z-build.N after the last release tag on this main commit's history.
+# Checkout has no persisted credentials. Fetch tags and origin/main through
+# gh's credential helper, scoped to this command; no token is written to config.
+& git -C $root -c 'credential.helper=!gh auth git-credential' fetch origin --tags --force
+if ($LASTEXITCODE -ne 0) { throw 'Could not fetch release tags from origin.' }
+& git -C $root -c 'credential.helper=!gh auth git-credential' fetch origin main:refs/remotes/origin/main --force
+if ($LASTEXITCODE -ne 0) { throw 'Could not fetch origin/main.' }
+$tag = Get-TaxiNextPublishTag -Repository $root -Commit $Commit -Version $receipt.version
 $title = "Taxi Cam $($receipt.version)"
 function Invoke-Gh([string[]]$Arguments) {
     $result = @(& gh @Arguments)
@@ -59,14 +68,9 @@ if ($existing) {
         return
     }
 }
-# Last published point is the latest v*-build.N tag on origin/main (or main).
-# Checkout has no persisted credentials. Fetch that tip and its tags through
-# gh's credential helper, scoped to this command; no token is written to config.
-& git -c 'credential.helper=!gh auth git-credential' fetch origin --tags --force
-if ($LASTEXITCODE -ne 0) { throw 'Could not fetch published tags.' }
-& git -c 'credential.helper=!gh auth git-credential' fetch origin main:refs/remotes/origin/main --force
-if ($LASTEXITCODE -ne 0) { throw 'Could not fetch origin/main.' }
-$previous = Get-TaxiLastPublishedMainTag -Repository $root -ExcludeTag $tag
+# Notes start after the last release tag on main, including unpublished
+# first-parent merges that landed between that tag and this commit.
+$previous = Get-TaxiLastMainReleaseTag -Repository $root -Commit $Commit -ExcludeCommit
 $entries = @(Get-TaxiReleaseChangeEntries -Repository $root -FromRef $previous -ToCommit $Commit)
 $numbers = @($entries | Where-Object { $_.Number -gt 0 } | ForEach-Object { [int]$_.Number })
 try {
