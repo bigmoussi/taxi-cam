@@ -133,4 +133,39 @@ $emptyNotes = Format-TaxiReleaseChanges -Repository 'rthoms334/taxi-cam' -Previo
 Assert-True ($ciOnly.Count -eq 1 -and $ciOnly[0].Number -eq 10) 'Range ending before later user commits keeps earlier merges.'
 Assert-True (($emptyNotes -join "`n") -match 'No user-facing pull requests') 'An empty rollup must not invent features.'
 
-Write-Output "PASS release note rollup: $checks checks for last-published range, pull-request titles, deduplication and CI-only exclusion."
+Assert-True ((Get-TaxiLastPublishedMainTag -Repository $fixture) -ceq 'v0.8.0-build.1') `
+    'A single matching tag on main is the last published point.'
+Assert-True ($null -eq (ConvertTo-TaxiPublishedTagVersion 'v0.8.0-build.01')) 'Leading-zero build tags are not published points.'
+Assert-True ($null -eq (ConvertTo-TaxiPublishedTagVersion 'v1.2.3')) 'Tags without a build number are not published points.'
+
+$null = Invoke-TestGit @('switch','--quiet','-c','off-main-tag')
+'off-main' | Set-Content -LiteralPath (Join-Path $fixture 'src/app.txt') -Encoding ascii
+Commit-Fixture 'feat: off-main higher version'
+$null = Invoke-TestGit @('tag','v9.9.9-build.99')
+$null = Invoke-TestGit @('switch','--quiet','main')
+Assert-True ((Get-TaxiLastPublishedMainTag -Repository $fixture) -ceq 'v0.8.0-build.1') `
+    'A higher version tag that is not on main is ignored.'
+$null = Invoke-TestGit @('tag','v0.8.1-build.2')
+Assert-True ((Get-TaxiLastPublishedMainTag -Repository $fixture) -ceq 'v0.8.1-build.2') `
+    'The latest matching tag reachable on main wins.'
+Assert-True ((Get-TaxiLastPublishedMainTag -Repository $fixture -ExcludeTag 'v0.8.1-build.2') -ceq 'v0.8.0-build.1') `
+    'The tag being created is excluded from the previous-publish baseline.'
+
+$origin = Join-Path $repo ('build/release-note-tests/' + [Guid]::NewGuid().ToString('N') + '-origin.git')
+$null = & git init --bare --quiet $origin
+if ($LASTEXITCODE -ne 0) { throw 'Could not create a bare origin for last-tag tests.' }
+$null = Invoke-TestGit @('remote','add','origin',$origin)
+$null = Invoke-TestGit @('push','--quiet','origin','HEAD:main')
+$null = Invoke-TestGit @('push','--quiet','origin','--tags')
+$null = Invoke-TestGit @('fetch','--quiet','origin','main:refs/remotes/origin/main')
+'local-only' | Set-Content -LiteralPath (Join-Path $fixture 'src/app.txt') -Encoding ascii
+Commit-Fixture 'feat: local-only later tag'
+$null = Invoke-TestGit @('tag','v0.8.2-build.3')
+Assert-True ((Get-TaxiLastPublishedMainTag -Repository $fixture) -ceq 'v0.8.1-build.2') `
+    'origin/main is preferred over a newer local-only main tag.'
+$afterOrigin = @(Get-TaxiReleaseChangeEntries -Repository $fixture `
+    -FromRef (Get-TaxiLastPublishedMainTag -Repository $fixture) -ToCommit (Get-FixtureCommit 'HEAD'))
+Assert-True ((@($afterOrigin | Where-Object { $_.Title -ceq 'feat: local-only later tag' })).Count -eq 1) `
+    'Notes roll up first-parent changes on main after the last origin/main tag.'
+
+Write-Output "PASS release note rollup: $checks checks for last-tag-on-main, pull-request titles, deduplication and CI-only exclusion."
