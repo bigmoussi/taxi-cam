@@ -2,6 +2,12 @@
 
 Nose-wheel and tail cameras for Microsoft Flight Simulator 2024. Use the aircraft's **TAXI** button or a keyboard shortcut to see both views on the upper part of its Primary Flight Display (PFD).
 
+This was built out of curiosity - what would it take to actually get this to work.. 
+Looking at what the community was doing with reshade and DLSSG, it got me wondering if I could use the same patterns here to transform the output with some MSFS camera views.
+Turns out it was and ran reasonably well on my setup (9800x3d and 5070Ti). 
+Its not universally compatible with every setup out there so be very aware that it might not work for you. 
+If you are up for reporting issues then I can try and help out.
+
 ## Compatibility
 
 - **DLSSG and Reshade mods** - There are a vast number of different configs out there for reshade and unsupported DLSSG mods - if you raise an issue I will endeavour to investigate and see what can be done. A best effort has been made to change the archetecture to move the processing downstream of reshade to avoid conflicts but some may remain due to other mods potentially using the same patterns to transform the output.
