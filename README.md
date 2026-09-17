@@ -5,6 +5,7 @@ Nose-wheel and tail cameras for Microsoft Flight Simulator 2024. Use the aircraf
 ## Compatibility
 
 - **DLSSG and Reshade mods** - There are a vast number of different configs out there for reshade and unsupported DLSSG mods - if you raise an issue I will endeavour to investigate and see what can be done. A best effort has been made to change the archetecture to move the processing downstream of reshade to avoid conflicts but some may remain due to other mods potentially using the same patterns to transform the output.
+- **Sim Update 7** - Make sure you have the stable version of MSFS (SU6 - 1.8.16.0) - SU7 is not supported currently.
 
 ## Important notice
 
