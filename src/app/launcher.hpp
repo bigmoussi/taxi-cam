@@ -1,9 +1,12 @@
 #pragma once
 #include <windows.h>
 #include <tlhelp32.h>
+#include <winreg.h>
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <cwchar>
+#include <cwctype>
 #include <string>
 #include <vector>
 #include "module_inventory.hpp"
@@ -52,12 +55,224 @@ inline bool same_user(HANDLE process) {
   CloseHandle(other);
   return ok;
 }
-inline DWORD find_simulator(const std::wstring& expected) {
+inline std::wstring normalize_path_separators(std::wstring path) {
+  for (auto& c : path)
+    if (c == L'/')
+      c = L'\\';
+  while (path.size() > 3 && path.back() == L'\\')
+    path.pop_back();
+  return path;
+}
+inline bool simulator_exe_name(const std::wstring& path) {
+  const auto slash = path.find_last_of(L"\\/");
+  const auto* leaf = slash == std::wstring::npos ? path.c_str() : path.c_str() + slash + 1;
+  return _wcsicmp(leaf, L"FlightSimulator2024.exe") == 0;
+}
+inline bool contains_ci(const std::wstring& haystack, const wchar_t* needle) {
+  const size_t n = std::wcslen(needle);
+  if (!n || haystack.size() < n)
+    return false;
+  return std::search(haystack.begin(), haystack.end(), needle, needle + n, [](wchar_t a, wchar_t b) {
+           return towlower(static_cast<wint_t>(a)) == towlower(static_cast<wint_t>(b));
+         }) != haystack.end();
+}
+inline bool known_msfs2024_layout(const std::wstring& path) {
+  if (!simulator_exe_name(path))
+    return false;
+  const auto normalized = normalize_path_separators(path);
+  return contains_ci(normalized, L"\\XboxGames\\Microsoft Flight Simulator 2024\\Content\\FlightSimulator2024.exe") ||
+         contains_ci(normalized, L"\\steamapps\\common\\MSFS2024\\FlightSimulator2024.exe") ||
+         contains_ci(normalized, L"\\steamapps\\common\\Limitless\\FlightSimulator2024.exe") ||
+         (contains_ci(normalized, L"\\WindowsApps\\Microsoft.Limitless_") && contains_ci(normalized, L"\\FlightSimulator2024.exe"));
+}
+inline bool file_exists(const std::wstring& path) {
+  const DWORD attributes = GetFileAttributesW(path.c_str());
+  return attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY);
+}
+inline void add_unique_path(std::vector<std::wstring>& out, const std::wstring& path) {
+  const auto normalized = normalize_path_separators(path);
+  if (normalized.empty())
+    return;
+  for (const auto& existing : out)
+    if (_wcsicmp(existing.c_str(), normalized.c_str()) == 0)
+      return;
+  out.push_back(normalized);
+}
+inline void add_existing_simulator(std::vector<std::wstring>& out, const std::wstring& path) {
+  if (file_exists(path))
+    add_unique_path(out, path);
+}
+inline void add_steam_library_simulators(std::vector<std::wstring>& out, const std::wstring& library_root) {
+  const auto root = normalize_path_separators(library_root);
+  if (root.empty())
+    return;
+  add_existing_simulator(out, root + L"\\steamapps\\common\\MSFS2024\\FlightSimulator2024.exe");
+  add_existing_simulator(out, root + L"\\steamapps\\common\\Limitless\\FlightSimulator2024.exe");
+}
+inline bool is_vdf_space(wchar_t c) {
+  return c == L' ' || c == L'\t' || c == L'\r' || c == L'\n';
+}
+inline std::vector<std::wstring> steam_library_roots_from_vdf(const std::wstring& text) {
+  std::vector<std::wstring> roots;
+  for (size_t i = 0; i + 6 <= text.size(); ++i) {
+    if (_wcsnicmp(text.c_str() + i, L"\"path\"", 6) != 0)
+      continue;
+    if (i > 0 && !is_vdf_space(text[i - 1]) && text[i - 1] != L'{' && text[i - 1] != L'}')
+      continue;
+    size_t pos = i + 6;
+    while (pos < text.size() && is_vdf_space(text[pos]))
+      ++pos;
+    if (pos >= text.size() || text[pos] != L'"')
+      continue;
+    ++pos;
+    std::wstring raw;
+    while (pos < text.size() && text[pos] != L'"') {
+      if (text[pos] == L'\\' && pos + 1 < text.size()) {
+        raw.push_back(text[pos + 1]);
+        pos += 2;
+        continue;
+      }
+      raw.push_back(text[pos++]);
+    }
+    add_unique_path(roots, raw);
+  }
+  return roots;
+}
+inline std::wstring registry_string(HKEY root, const wchar_t* subkey, const wchar_t* value) {
+  wchar_t buffer[32768]{};
+  DWORD size = sizeof(buffer);
+  if (RegGetValueW(root, subkey, value, RRF_RT_REG_SZ, nullptr, buffer, &size) != ERROR_SUCCESS)
+    return {};
+  return buffer;
+}
+inline std::wstring steam_install_root() {
+  auto path = registry_string(HKEY_CURRENT_USER, L"Software\\Valve\\Steam", L"SteamPath");
+  if (path.empty())
+    path = registry_string(HKEY_LOCAL_MACHINE, L"SOFTWARE\\WOW6432Node\\Valve\\Steam", L"InstallPath");
+  if (path.empty())
+    path = L"C:\\Program Files (x86)\\Steam";
+  return normalize_path_separators(path);
+}
+inline std::wstring read_small_text_file(const std::wstring& path) {
+  HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                            FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (file == INVALID_HANDLE_VALUE)
+    return {};
+  LARGE_INTEGER size{};
+  if (!GetFileSizeEx(file, &size) || size.QuadPart <= 0 || size.QuadPart > 1024 * 1024) {
+    CloseHandle(file);
+    return {};
+  }
+  std::string bytes(static_cast<size_t>(size.QuadPart), '\0');
+  DWORD read = 0;
+  const bool ok = ReadFile(file, bytes.data(), static_cast<DWORD>(bytes.size()), &read, nullptr) && read == bytes.size();
+  CloseHandle(file);
+  if (!ok)
+    return {};
+  size_t start = 0;
+  if (bytes.size() >= 3 && static_cast<unsigned char>(bytes[0]) == 0xEF && static_cast<unsigned char>(bytes[1]) == 0xBB &&
+      static_cast<unsigned char>(bytes[2]) == 0xBF)
+    start = 3;
+  const int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, bytes.data() + start, static_cast<int>(bytes.size() - start), nullptr, 0);
+  if (n <= 0)
+    return {};
+  std::wstring text(static_cast<size_t>(n), L'\0');
+  MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, bytes.data() + start, static_cast<int>(bytes.size() - start), text.data(), n);
+  return text;
+}
+inline void add_xboxgames_simulators(std::vector<std::wstring>& out) {
+  wchar_t candidate[] = L"A:\\XboxGames\\Microsoft Flight Simulator 2024\\Content\\FlightSimulator2024.exe";
+  const DWORD drives = GetLogicalDrives();
+  for (int i = 0; i < 26; ++i) {
+    if ((drives & (1u << i)) == 0)
+      continue;
+    candidate[0] = static_cast<wchar_t>(L'A' + i);
+    add_existing_simulator(out, candidate);
+  }
+}
+inline void add_windowsapps_limitless(std::vector<std::wstring>& out) {
+  WIN32_FIND_DATAW data{};
+  HANDLE find = FindFirstFileW(L"C:\\Program Files\\WindowsApps\\Microsoft.Limitless_*", &data);
+  if (find == INVALID_HANDLE_VALUE)
+    return;
+  do {
+    if ((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 || data.cFileName[0] == L'.')
+      continue;
+    add_existing_simulator(out, std::wstring(L"C:\\Program Files\\WindowsApps\\") + data.cFileName + L"\\FlightSimulator2024.exe");
+  } while (FindNextFileW(find, &data));
+  FindClose(find);
+}
+inline std::vector<std::wstring> discover_msfs2024_executables(const std::wstring& configured) {
+  std::vector<std::wstring> out;
+  add_existing_simulator(out, configured);
+  add_xboxgames_simulators(out);
+  add_windowsapps_limitless(out);
+  const auto steam = steam_install_root();
+  add_steam_library_simulators(out, steam);
+  for (const auto& library : steam_library_roots_from_vdf(read_small_text_file(steam + L"\\steamapps\\libraryfolders.vdf")))
+    add_steam_library_simulators(out, library);
+  return out;
+}
+inline bool accepted_simulator_image(const std::wstring& live, const std::wstring& configured, const std::vector<std::wstring>& known) {
+  if (!simulator_exe_name(live))
+    return false;
+  if (!configured.empty() && same_path(configured, live))
+    return true;
+  for (const auto& candidate : known)
+    if (same_path(candidate, live))
+      return true;
+  if (known_msfs2024_layout(live))
+    return true;
+  return configured.empty();
+}
+struct SimulatorMatch {
+  DWORD pid{};
+  std::wstring path;
+};
+inline DWORD select_simulator(const std::vector<SimulatorMatch>& matches, const std::wstring& configured) {
+  if (matches.empty())
+    return 0;
+  std::vector<const SimulatorMatch*> preferred;
+  if (!configured.empty()) {
+    for (const auto& match : matches)
+      if (same_path(configured, match.path))
+        preferred.push_back(&match);
+    if (preferred.size() > 1)
+      return 0;
+    if (preferred.size() == 1)
+      return preferred[0]->pid;
+  }
+  if (matches.size() == 1)
+    return matches[0].pid;
+  bool all_same = true;
+  for (size_t i = 1; i < matches.size(); ++i)
+    if (!same_path(matches[0].path, matches[i].path)) {
+      all_same = false;
+      break;
+    }
+  if (all_same)
+    return 0;
+  DWORD pid = matches[0].pid;
+  for (const auto& match : matches)
+    if (match.pid && match.pid < pid)
+      pid = match.pid;
+  return pid;
+}
+struct SimulatorAttach {
+  DWORD pid{};
+  std::wstring path;
+  unsigned accepted{};
+  bool used_configured{};
+};
+inline SimulatorAttach find_simulator_attach(const std::wstring& expected) {
+  SimulatorAttach result;
   HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
   if (snapshot == INVALID_HANDLE_VALUE)
-    return 0;
-  DWORD found = 0, session{};
+    return result;
+  DWORD session{};
   ProcessIdToSessionId(GetCurrentProcessId(), &session);
+  const auto known = discover_msfs2024_executables(expected);
+  std::vector<SimulatorMatch> matches;
   PROCESSENTRY32W entry{};
   entry.dwSize = sizeof(entry);
   if (Process32FirstW(snapshot, &entry))
@@ -69,21 +284,27 @@ inline DWORD find_simulator(const std::wstring& expected) {
       HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, entry.th32ProcessID);
       if (!process)
         continue;
-      wchar_t path[32768];
+      wchar_t path[32768]{};
       DWORD length = 32768;
-      const bool match =
-          QueryFullProcessImageNameW(process, 0, path, &length) && same_user(process) && (expected.empty() || same_path(expected, path));
+      const bool ok =
+          QueryFullProcessImageNameW(process, 0, path, &length) && same_user(process) && accepted_simulator_image(path, expected, known);
       CloseHandle(process);
-      if (match) {
-        if (found) {
-          found = 0;
-          break;
-        }
-        found = entry.th32ProcessID;
-      }
+      if (ok)
+        matches.push_back({entry.th32ProcessID, path});
     } while (Process32NextW(snapshot, &entry));
   CloseHandle(snapshot);
-  return found;
+  result.accepted = static_cast<unsigned>(matches.size());
+  result.pid = select_simulator(matches, expected);
+  for (const auto& match : matches)
+    if (match.pid == result.pid) {
+      result.path = match.path;
+      result.used_configured = !expected.empty() && same_path(expected, match.path);
+      break;
+    }
+  return result;
+}
+inline DWORD find_simulator(const std::wstring& expected) {
+  return find_simulator_attach(expected).pid;
 }
 inline bool read_exact(HANDLE process, std::uintptr_t address, void* data, SIZE_T count) {
   SIZE_T read{};
@@ -179,7 +400,8 @@ inline LaunchResult load_bridge(DWORD pid,
     return {false, ERROR_ACCESS_DENIED, L"MSFS must run under the same Windows account."};
   wchar_t path[32768]{};
   DWORD n = 32768;
-  if (!QueryFullProcessImageNameW(process, 0, path, &n) || (!expected_exe.empty() && !same_path(expected_exe, path)))
+  if (!QueryFullProcessImageNameW(process, 0, path, &n) ||
+      !accepted_simulator_image(path, expected_exe, discover_msfs2024_executables(expected_exe)))
     return {false, ERROR_BAD_ENVIRONMENT, L"Simulator executable path changed; attach refused."};
   auto inventory = modules(pid, &trace.module_error, &trace.module_attempts);
   if (trace.module_error)

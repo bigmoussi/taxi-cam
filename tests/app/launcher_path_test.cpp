@@ -83,6 +83,102 @@ void module_checks() {
   const auto current = taxi_camera::standalone::modules(GetCurrentProcessId(), &error, &attempts);
   require(!error && !current.empty() && attempts > 0, "Real Windows module enumeration remains usable");
 }
+bool mkdir_p(const std::wstring& path) {
+  if (CreateDirectoryW(path.c_str(), nullptr) || GetLastError() == ERROR_ALREADY_EXISTS)
+    return true;
+  const auto slash = path.find_last_of(L"\\/");
+  return slash != std::wstring::npos && mkdir_p(path.substr(0, slash)) &&
+         (CreateDirectoryW(path.c_str(), nullptr) || GetLastError() == ERROR_ALREADY_EXISTS);
+}
+bool write_empty_file(const std::wstring& path) {
+  HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (file == INVALID_HANDLE_VALUE)
+    return false;
+  CloseHandle(file);
+  return true;
+}
+void dual_install_checks(const std::wstring& original, const std::wstring& alias, const std::wstring& copy) {
+  using taxi_camera::standalone::accepted_simulator_image;
+  using taxi_camera::standalone::add_steam_library_simulators;
+  using taxi_camera::standalone::discover_msfs2024_executables;
+  using taxi_camera::standalone::known_msfs2024_layout;
+  using taxi_camera::standalone::select_simulator;
+  using taxi_camera::standalone::steam_library_roots_from_vdf;
+
+  require(known_msfs2024_layout(L"D:\\SteamLibrary\\steamapps\\common\\MSFS2024\\FlightSimulator2024.exe"), "Steam MSFS2024 layout");
+  require(known_msfs2024_layout(L"C:/Program Files (x86)/Steam/steamapps/common/Limitless/FlightSimulator2024.exe"),
+          "Steam Limitless layout");
+  require(known_msfs2024_layout(L"C:\\XboxGames\\Microsoft Flight Simulator 2024\\Content\\FlightSimulator2024.exe"), "XboxGames layout");
+  require(known_msfs2024_layout(L"C:\\Program Files\\WindowsApps\\Microsoft.Limitless_1.8.16.0_x64__8wekyb3d8bbwe\\FlightSimulator2024.exe"),
+          "WindowsApps Limitless layout");
+  require(!known_msfs2024_layout(L"C:\\not-a-simulator\\FlightSimulator2024.exe"), "Random FlightSimulator2024.exe is not a 2024 install");
+  require(!known_msfs2024_layout(L"C:\\XboxGames\\Microsoft Flight Simulator 2024\\Content\\SimConnect.dll"), "Non-exe layout rejected");
+  require(!known_msfs2024_layout(L"C:\\Program Files\\WindowsApps\\Other.App_1.0.0.0_x64__8wekyb3d8bbwe\\FlightSimulator2024.exe"),
+          "Unrelated WindowsApps package rejected");
+
+  const auto steam = L"D:\\SteamLibrary\\steamapps\\common\\MSFS2024\\FlightSimulator2024.exe";
+  const auto store = L"C:\\XboxGames\\Microsoft Flight Simulator 2024\\Content\\FlightSimulator2024.exe";
+  require(accepted_simulator_image(store, steam, {}), "Configured Steam missing must still accept a live Store 2024");
+  require(accepted_simulator_image(steam, store, {}), "Configured Store missing must still accept a live Steam 2024");
+  wchar_t named_root[MAX_PATH]{};
+  require(GetTempPathW(MAX_PATH, named_root) != 0, "Temporary directory for named 2024 fixtures");
+  const auto named = std::wstring(named_root) + L"taxi-dual-named-" + std::to_wstring(GetCurrentProcessId());
+  const auto steam_file = named + L"\\steam\\FlightSimulator2024.exe";
+  const auto store_file = named + L"\\store\\FlightSimulator2024.exe";
+  const auto steam_alias = named + L"\\steam-alias\\FlightSimulator2024.exe";
+  require(mkdir_p(named + L"\\steam") && mkdir_p(named + L"\\store") && mkdir_p(named + L"\\steam-alias"),
+          "Create named 2024 fixture directories");
+  require(CopyFileW(original.c_str(), steam_file.c_str(), TRUE) != FALSE, "Create named Steam fixture");
+  require(CopyFileW(copy.c_str(), store_file.c_str(), TRUE) != FALSE, "Create named Store fixture");
+  require(CreateHardLinkW(steam_alias.c_str(), steam_file.c_str(), nullptr) != FALSE, "Create named Steam alias");
+  require(accepted_simulator_image(steam_file, store_file, {steam_file}), "Discovered configured file remains accepted");
+  require(!accepted_simulator_image(store_file, steam_file, {steam_file}), "Separate non-2024 copy is not a fallback candidate");
+  require(accepted_simulator_image(steam_alias, steam_file, {}), "Configured path aliases still match");
+  require(accepted_simulator_image(L"C:\\temp\\FlightSimulator2024.exe", L"", {}), "Empty hint still accepts any 2024 process name");
+  require(!accepted_simulator_image(L"C:\\temp\\NotTheSimulator.exe", L"", {}), "Wrong process name is never a candidate");
+  DeleteFileW(steam_alias.c_str());
+  DeleteFileW(store_file.c_str());
+  DeleteFileW(steam_file.c_str());
+  RemoveDirectoryW((named + L"\\steam-alias").c_str());
+  RemoveDirectoryW((named + L"\\store").c_str());
+  RemoveDirectoryW((named + L"\\steam").c_str());
+  RemoveDirectoryW(named.c_str());
+
+  require(select_simulator({{10, copy}}, original) == 10, "Configured file not running selects the other 2024");
+  require(select_simulator({{5, original}, {10, copy}}, original) == 5, "Configured install wins when both are running");
+  require(select_simulator({{10, original}, {5, copy}}, L"") == 5, "Two live 2024 installs without a hint pick the lowest PID");
+  require(select_simulator({{5, original}, {10, alias}}, original) == 0, "Two processes of the same configured file stay ambiguous");
+  require(select_simulator({{20, original}, {10, copy}}, L"C:\\missing\\FlightSimulator2024.exe") == 10,
+          "Hint that is not running picks the lowest distinct 2024 PID");
+  require(select_simulator({}, original) == 0, "No live 2024 remains unmatched");
+
+  const auto vdf = steam_library_roots_from_vdf(
+      L"\"libraryfolders\"\n{\n\t\"0\"\n\t{\n\t\t\"path\"\t\t\"C:\\\\Program Files (x86)\\\\Steam\"\n\t}\n\t\"1\"\n\t{\n\t\t\"path\"\t\t"
+      L"\"D:\\\\SteamLibrary\"\n\t}\n}\n");
+  require(vdf.size() == 2 && _wcsicmp(vdf[0].c_str(), L"C:\\Program Files (x86)\\Steam") == 0 &&
+              _wcsicmp(vdf[1].c_str(), L"D:\\SteamLibrary") == 0,
+          "Steam libraryfolders.vdf yields both library roots");
+
+  wchar_t temporary[MAX_PATH]{};
+  require(GetTempPathW(MAX_PATH, temporary) != 0, "Temporary directory for Steam library fixture");
+  const auto library = std::wstring(temporary) + L"taxi-steam-lib-" + std::to_wstring(GetCurrentProcessId());
+  const auto msfs = library + L"\\steamapps\\common\\MSFS2024\\FlightSimulator2024.exe";
+  require(mkdir_p(library + L"\\steamapps\\common\\MSFS2024"), "Create Steam MSFS2024 fixture directory");
+  require(write_empty_file(msfs), "Create Steam MSFS2024 fixture executable");
+  std::vector<std::wstring> discovered;
+  add_steam_library_simulators(discovered, library);
+  require(discovered.size() == 1 && _wcsicmp(discovered[0].c_str(), msfs.c_str()) == 0, "Steam library discovery finds MSFS2024.exe");
+  const auto known = discover_msfs2024_executables(original);
+  bool saw_configured = false;
+  for (const auto& path : known)
+    saw_configured = saw_configured || taxi_camera::standalone::same_path(path, original);
+  require(saw_configured, "Discovery includes the configured executable when it exists");
+  DeleteFileW(msfs.c_str());
+  RemoveDirectoryW((library + L"\\steamapps\\common\\MSFS2024").c_str());
+  RemoveDirectoryW((library + L"\\steamapps\\common").c_str());
+  RemoveDirectoryW((library + L"\\steamapps").c_str());
+  RemoveDirectoryW(library.c_str());
+}
 }  // namespace
 
 int main() {
@@ -102,6 +198,7 @@ int main() {
     require(!same_path(files.original, files.copy), "A separate copy must not match");
     require(!same_path(files.original, files.original + L".missing"), "Missing alias must not match");
     require(!same_path(L"", files.original) && !same_path(files.original, L""), "Empty path must not match");
+    dual_install_checks(files.original, files.alias, files.copy);
 
     require(DeleteFileW(files.alias.c_str()) != FALSE, "Remove test alias");
     require(CopyFileW(files.copy.c_str(), files.alias.c_str(), TRUE) != FALSE, "Replace alias with a distinct file");
@@ -124,7 +221,7 @@ int main() {
     require(!complete.schedule({true, 0, L"Loaded"}, 1000), "Successful load never retried");
     LaunchRetry overflow;
     require(!overflow.schedule(pending, UINT64_MAX), "Retry deadline cannot overflow");
-    std::puts("PASS launcher paths and startup: aliases, replaced files, bounded preflight retries and terminal remote-load failures.");
+    std::puts("PASS launcher paths and startup: aliases, dual-install attach, bounded preflight retries and terminal remote-load failures.");
     return 0;
   } catch (const std::exception& error) {
     std::fprintf(stderr, "FAIL launcher paths: %s\n", error.what());

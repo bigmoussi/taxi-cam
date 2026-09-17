@@ -895,7 +895,8 @@ DWORD WINAPI connection_worker(void*) {
       Sleep(100);
       continue;
     }
-    const DWORD pid = win::find_simulator(expected_simulator);
+    const auto attach = win::find_simulator_attach(expected_simulator);
+    const DWORD pid = attach.pid;
     if (attached && (pid != attached || (process && WaitForSingleObject(process, 0) == WAIT_OBJECT_0))) {
       mailbox.close();
       if (process)
@@ -916,6 +917,7 @@ DWORD WINAPI connection_worker(void*) {
       }
     }
     if (pid && pid != attached) {
+      win::log_attach(win::settings_directory(), attach, expected_simulator);
       attached = pid;
       simulator_pid = pid;
       attempted = false;
@@ -936,8 +938,8 @@ DWORD WINAPI connection_worker(void*) {
           mailbox.unlock();
         }
         win::LaunchDiagnostics launch_diagnostics;
-        const auto loaded =
-            win::load_bridge(attached, expected_simulator, installation + L"\\taxi-camera-bridge.dll", &running, &launch_diagnostics);
+        const auto loaded = win::load_bridge(attached, attach.path.empty() ? expected_simulator : attach.path,
+                                            installation + L"\\taxi-camera-bridge.dll", &running, &launch_diagnostics);
         win::log_launch(win::settings_directory(), attached, loaded, launch_diagnostics);
         const bool retrying = startup_retry.schedule(loaded, GetTickCount64());
         attempted = !retrying;

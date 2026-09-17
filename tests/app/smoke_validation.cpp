@@ -83,7 +83,17 @@ int wmain(int argc, wchar_t** argv) {
     require(!refused.open(GetCurrentProcessId(), false), "Incompatible mailbox accepted");
     owner.close();
     reader.close();
-    require(find_simulator(L"C:\\not-a-simulator\\FlightSimulator2024.exe") == 0, "Wrong simulator path accepted");
+    const DWORD found = find_simulator(L"C:\\not-a-simulator\\FlightSimulator2024.exe");
+    if (found) {
+      HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, found);
+      require(process != nullptr, "Live simulator process disappeared");
+      wchar_t path[32768]{};
+      DWORD n = 32768;
+      require(QueryFullProcessImageNameW(process, 0, path, &n), "Query live simulator path");
+      CloseHandle(process);
+      require(known_msfs2024_layout(path), "Non-2024 process accepted as simulator");
+      require(!same_path(L"C:\\not-a-simulator\\FlightSimulator2024.exe", path), "Fake configured path must not be the live image");
+    }
     require(argc == 2, "Provide exact bridge DLL");
     std::wstring install = argv[1];
     install.resize(install.find_last_of(L"\\/"));
