@@ -1,5 +1,57 @@
 Set-StrictMode -Version Latest
 
+function ConvertTo-TaxiPublishedTagVersion([string]$Tag) {
+    if ($Tag -cnotmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-build\.(0|[1-9][0-9]*)$') {
+        return $null
+    }
+    [pscustomobject]@{
+        Tag = $Tag
+        Major = [uint32]$Matches[1]
+        Minor = [uint32]$Matches[2]
+        Patch = [uint32]$Matches[3]
+        Build = [uint32]$Matches[4]
+    }
+}
+
+function Get-TaxiPublishedMainTip([string]$Repository) {
+    foreach ($name in @('refs/remotes/origin/main', 'refs/heads/main')) {
+        $sha = [string](& git -C $Repository rev-parse -q --verify $name)
+        if ($LASTEXITCODE -eq 0 -and $sha -match '^[0-9a-fA-F]{40}$') { return $sha }
+    }
+    throw 'Could not resolve origin/main or main for the last published tag.'
+}
+
+function Compare-TaxiPublishedTagVersion($Left, $Right) {
+    foreach ($field in @('Major', 'Minor', 'Patch', 'Build')) {
+        if ($Left.$field -ne $Right.$field) { return ([int64]$Left.$field - [int64]$Right.$field) }
+    }
+    return 0
+}
+
+function Get-TaxiLastPublishedMainTag {
+    param(
+        [Parameter(Mandatory=$true)][string]$Repository,
+        [string]$ExcludeTag
+    )
+    # Last published point is the latest v*-build.N tag reachable on
+    # origin/main, or main when the remote-tracking ref is absent. GitHub
+    # release metadata and the exact built commit are not consulted.
+    $tip = Get-TaxiPublishedMainTip $Repository
+    $best = $null
+    foreach ($tag in @(& git -C $Repository tag --list)) {
+        if ([string]::IsNullOrWhiteSpace($tag)) { continue }
+        if ($ExcludeTag -and $tag -ceq $ExcludeTag) { continue }
+        $parsed = ConvertTo-TaxiPublishedTagVersion $tag
+        if (-not $parsed) { continue }
+        & git -C $Repository merge-base --is-ancestor $tag $tip
+        if ($LASTEXITCODE -eq 1) { continue }
+        if ($LASTEXITCODE -ne 0) { throw 'Could not check whether a published tag is on main.' }
+        if (-not $best -or (Compare-TaxiPublishedTagVersion $parsed $best) -gt 0) { $best = $parsed }
+    }
+    if ($best) { return [string]$best.Tag }
+    return $null
+}
+
 function Test-TaxiReleaseChangeIsNoise([string]$Subject, [string[]]$Paths) {
     if ($Subject -match '^(?i)Merge (remote-tracking branch\b|origin/|branch )') { return $true }
     if ($Subject -match '^(?i)Merge .+ into ') { return $true }

@@ -27,8 +27,12 @@ if ([IO.Path]::GetFileName($installerPath) -cne $expectedInstaller -or
 }
 # Workflow run numbers identify artifacts. The published tag is the next
 # vX.Y.Z-build.N after the last release tag on this main commit's history.
-& git -C $root -c 'credential.helper=!gh auth git-credential' fetch origin --tags
+# Checkout has no persisted credentials. Fetch tags and origin/main through
+# gh's credential helper, scoped to this command; no token is written to config.
+& git -C $root -c 'credential.helper=!gh auth git-credential' fetch origin --tags --force
 if ($LASTEXITCODE -ne 0) { throw 'Could not fetch release tags from origin.' }
+& git -C $root -c 'credential.helper=!gh auth git-credential' fetch origin main:refs/remotes/origin/main --force
+if ($LASTEXITCODE -ne 0) { throw 'Could not fetch origin/main.' }
 $tag = Get-TaxiNextPublishTag -Repository $root -Commit $Commit -Version $receipt.version
 $title = "Taxi Cam $($receipt.version)"
 function Invoke-Gh([string[]]$Arguments) {
@@ -93,8 +97,16 @@ if (-not $existing) {
 # Keep the release a draft until all assets are uploaded. Reruns repair drafts
 # but never replace a published release's assets.
 [void](Invoke-Gh -Arguments @('release','upload',$tag,$packagePath,$installerPath,$checksum,$receiptPath,'--repo',$Repository,'--clobber'))
-$main = Invoke-Gh -Arguments @('api',"repos/$Repository/commits/main",'--jq','.sha')
-$latest = if ($main -eq $Commit) { '--latest=true' } else { '--latest=false' }
+$recorded = & git rev-parse -q --verify "$tag^{commit}"
+if ($LASTEXITCODE -eq 0) {
+    if ($recorded -ne $Commit) { throw 'Existing publish tag targets a different commit.' }
+} else {
+    & git tag $tag $Commit
+    if ($LASTEXITCODE -ne 0) { throw 'Could not record the publish tag locally.' }
+}
+# Auto-update reads GitHub's latest published release. Mark this one Latest
+# only when it is the last v*-build.N tag reachable on origin/main (or main).
+$latest = if ((Get-TaxiLastPublishedMainTag -Repository $root) -ceq $tag) { '--latest=true' } else { '--latest=false' }
 [void](Invoke-Gh -Arguments @('release','edit',$tag,'--repo',$Repository,'--draft=false',$latest))
 $url = Invoke-Gh -Arguments @('release','view',$tag,'--repo',$Repository,'--json','url','--jq','.url')
 Write-Output "Published $url"

@@ -20,7 +20,7 @@ Supporting files are kept separate:
 | `tools/diagnostics/` | Optional interface-inventory, pose, material and telemetry tools for development |
 | `installer/` | Inno Setup definition, package/build/bootstrap scripts and embedded install/uninstall helpers |
 | `ci/` | Semantic version calculation, pinned toolchain helpers and release publication |
-| `.github/workflows/` | GitHub Actions build and release workflow |
+| `.github/workflows/` | GitHub Actions PR test-build and gated Windows release workflows |
 | `docs/` | Architecture, integration contracts and development documentation |
 | `licenses/` | Required third-party source/runtime notices |
 | `LICENSE` | Project copyright notice and GNU GPLv3-only terms |
