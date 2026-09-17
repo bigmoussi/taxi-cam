@@ -147,7 +147,7 @@ function Format-TaxiReleaseChanges {
     $lines = @(
         '## Changes',
         '',
-        "Merged pull requests and first-parent changes $since. Unpublished builds between these releases are included."
+        "Merged pull requests and first-parent changes $since. Unpublished builds after that last tag on main are included."
     )
     $items = @($Entries)
     if ($items.Count -eq 0) {

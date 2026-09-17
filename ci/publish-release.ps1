@@ -13,6 +13,7 @@ if ($env:GITHUB_ACTIONS -ne 'true' -or $env:GITHUB_REF -ne 'refs/heads/main') { 
 if ($BuildRunId -ne $env:GITHUB_RUN_ID) { throw 'Release publication must use artifacts from this workflow run.' }
 $root = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'release-notes.ps1')
+. (Join-Path $PSScriptRoot 'publish-tag.ps1')
 . (Join-Path $root 'installer/validation_receipt.ps1')
 $receiptPath = Join-Path $root 'build/native/validation.json'
 $receipt = Assert-TaxiNativeReceipt (Split-Path -Parent $receiptPath)
@@ -24,7 +25,11 @@ if ([IO.Path]::GetFileName($installerPath) -cne $expectedInstaller -or
     [IO.Path]::GetFileName($packagePath) -cne "$expectedBase.zip" -or $receipt.buildNumber -ne $BuildNumber) {
     throw 'Release asset names and validated application must match the release build.'
 }
-$tag = "v$($receipt.version)-build.$BuildNumber"
+# Workflow run numbers identify artifacts. The published tag is the next
+# vX.Y.Z-build.N after the last release tag on this main commit's history.
+& git -C $root -c 'credential.helper=!gh auth git-credential' fetch origin --tags
+if ($LASTEXITCODE -ne 0) { throw 'Could not fetch release tags from origin.' }
+$tag = Get-TaxiNextPublishTag -Repository $root -Commit $Commit -Version $receipt.version
 $title = "Taxi Cam $($receipt.version)"
 function Invoke-Gh([string[]]$Arguments) {
     $result = @(& gh @Arguments)
@@ -59,19 +64,9 @@ if ($existing) {
         return
     }
 }
-# Only published, non-draft ancestor tags are the notes baseline. Every later
-# first-parent merge and conventional headline is rolled up, including merges
-# that landed in unpublished builds after that release.
-$previous = $null
-foreach ($candidate in @($releases | Where-Object { -not $_.draft -and $_.tag_name -match '^v[0-9].*-build\.[0-9]+$' -and $_.tag_name -ne $tag } | Sort-Object published_at -Descending)) {
-    # Checkout has no persisted credentials. Fetch only this tag through gh's
-    # credential helper, scoped to this command; no token is written to config.
-    & git -c 'credential.helper=!gh auth git-credential' fetch origin "refs/tags/$($candidate.tag_name):refs/tags/$($candidate.tag_name)"
-    if ($LASTEXITCODE -ne 0) { throw 'Could not fetch release baseline tag.' }
-    & git merge-base --is-ancestor $candidate.tag_name $Commit
-    if ($LASTEXITCODE -eq 0) { $previous = $candidate.tag_name; break }
-    if ($LASTEXITCODE -ne 1) { throw 'Could not check release ancestry.' }
-}
+# Notes start after the last release tag on main, including unpublished
+# first-parent merges that landed between that tag and this commit.
+$previous = Get-TaxiLastMainReleaseTag -Repository $root -Commit $Commit -ExcludeCommit
 $entries = @(Get-TaxiReleaseChangeEntries -Repository $root -FromRef $previous -ToCommit $Commit)
 $numbers = @($entries | Where-Object { $_.Number -gt 0 } | ForEach-Object { [int]$_.Number })
 try {

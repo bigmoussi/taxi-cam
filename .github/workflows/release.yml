@@ -50,6 +50,9 @@ jobs:
       - name: Test release note rollup
         run: ./ci/release_notes_test.ps1
 
+      - name: Test publish tags on main
+        run: ./ci/publish_tag_test.ps1
+
       - name: Cache verified compiler archive
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -143,6 +146,7 @@ jobs:
           "When ready, select Review deployments on this run, select release, then Approve and deploy. The Publish release job will publish these exact files." >> $env:GITHUB_STEP_SUMMARY
 
   publish:
+    # Only this approval-gated job creates vX.Y.Z-build.N on the main commit.
     name: Publish release
     needs: build
     if: github.ref == 'refs/heads/main'
@@ -162,6 +166,7 @@ jobs:
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
+          fetch-tags: true
           persist-credentials: false
 
       - name: Download and publish approved artifacts
