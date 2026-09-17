@@ -6,6 +6,12 @@ README, documentation, issue-template and other repository-only changes do not t
 
 The build workflow can also be started manually from GitHub Actions. Only successful builds from `main` can be published.
 
+## Pull-request test builds
+
+Every pull request to `main` runs the [Windows PR test build](../.github/workflows/pr-test-build.yml) workflow. It bootstraps the compiler pinned in `dependencies.json`, runs `build.ps1 -Validate -WarpOnly` and `smoke-test.ps1` against the exact `taxi-cam.exe` and `taxi-camera-bridge.dll` from that run, and uploads those binaries with `validation.json` and `SHA256SUMS.txt` as `windows-pr-test-build-<pr>-run-<number>-attempt-<attempt>`. That artifact is a test/PR build only: the job does not package an installer, does not run `ci/publish-release.ps1`, and cannot publish a GitHub release.
+
+This check does not wait for release-environment approval. Mark **PR test build** as a required status check in GitHub branch protection if merges should wait for it. Publication remains the approval-gated job on the main-branch Windows build and release workflow.
+
 ## Download, check, then publish
 
 1. Open the **Windows build and release** run in GitHub Actions. Wait for **Build and validate** to finish; **Publish release** will show **Waiting** for approval.
