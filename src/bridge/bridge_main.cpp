@@ -395,6 +395,8 @@ DWORD run_impl() {
     scene_runtime::service();
     const auto scene = native_camera::scene_snapshot();
     const auto output = scene_runtime::snapshot(key);
+    if (scene.stop_sequence != last_stop_sequence)
+      progress.reset();
     if (now >= next_recovery) {
       const bool eligible = (mask || test_scene) && !failed && !output.failed && scene.pair.state == engine_camera::State::active &&
                             scene.requested_feeds == 2 && !scene.pose_waiting && !scene.view_waiting &&
@@ -534,41 +536,41 @@ DWORD run_impl() {
       }
       char detail[1536];
       const auto boundaries = engine_hook::render_boundary::statistics();
-      std::snprintf(
-          detail, sizeof(detail),
-          "profile=%u matched=%u connected=%u requested=%u ipc_busy=%llu buttons_valid=%u held=%u expired=%u output=%u "
-          "stop_seq=%llu stop=%s "
-          "retry=%u pending=%u pose_wait=%u view_wait=%u waits=%llu ready=%u/%u inspection=%s/%s entries=%llu/%llu suspended=%u "
-          "gates=%u/%u tail=%s "
-          "draws=%llu unknown_lists=%llu invalid_recordings=%llu scoped_invalidations=%llu invalid_draws=%llu "
-          "lease_failures=%llu global_aliases=%llu overflows=%llu reasons=0x%x capture_stalled=%u "
-          "barrier_max=%llu barrier_truncated=%llu probe_ms=%.3f queries=%llu query_ms=%.3f read_ms=%.3f "
-          "allocation_queries=%llu page_queries=%llu region_queries=%llu aa_ms=%.3f "
-          "inspections=%llu updates=%llu clear_states=%llu | %.256s",
-          applied_profile, aircraft_matches, connected, requested, static_cast<unsigned long long>(control.busy_reads()), buttons.valid,
-          desired.held, desired.timed_out, output.output, static_cast<unsigned long long>(scene.stop_sequence),
-          native_camera::scene_stop_reason_name(scene.stop_reason), scene.recovery_attempts, scene.recovery_pending, scene.pose_waiting,
-          scene.view_waiting, static_cast<unsigned long long>(scene.view_wait_count), scene.ready[0], scene.ready[1],
-          scene.inspection_status[0], scene.inspection_status[1], static_cast<unsigned long long>(scene.pair.owned_ids[0]),
-          static_cast<unsigned long long>(scene.pair.owned_ids[1]), demand.suspend, scene.gates[0], scene.gates[1],
-          output.capture.tail_status, static_cast<unsigned long long>(output.capture.source_draws),
-          static_cast<unsigned long long>(output.capture.unknown_submitted_lists),
-          static_cast<unsigned long long>(output.capture.invalid_source_recordings),
-          static_cast<unsigned long long>(output.capture.scoped_source_invalidations),
-          static_cast<unsigned long long>(output.capture.invalid_draws),
-          static_cast<unsigned long long>(output.capture.source_lease_failures),
-          static_cast<unsigned long long>(output.capture.global_aliases),
-          static_cast<unsigned long long>(output.capture.recording_overflows), output.capture.last_invalidation_reasons, progress.stalled(),
-          static_cast<unsigned long long>(boundaries.maximum_legacy_batch),
-          static_cast<unsigned long long>(boundaries.metadata_truncated_calls), scene.observer_last_ms,
-          static_cast<unsigned long long>(scene.performance.query_calls), scene.performance.query_ms, scene.performance.read_ms,
-          static_cast<unsigned long long>(scene.performance.query_allocation_calls),
-          static_cast<unsigned long long>(scene.performance.query_page_calls),
-          static_cast<unsigned long long>(scene.performance.query_fallback_calls),
-          scene.performance.stage_ms[static_cast<std::size_t>(native_camera::ProbeStage::aa)],
-          static_cast<unsigned long long>(scene.inspection_count),
-          static_cast<unsigned long long>(scene.updates), static_cast<unsigned long long>(graphics.clear_states),
-          scene.stop_reason == native_camera::SceneStopReason::none ? "" : scene.stop_detail.c_str());
+      std::snprintf(detail, sizeof(detail),
+                    "profile=%u matched=%u connected=%u requested=%u ipc_busy=%llu buttons_valid=%u held=%u expired=%u output=%u "
+                    "stop_seq=%llu stop=%s "
+                    "retry=%u pending=%u pose_wait=%u view_wait=%u waits=%llu ready=%u/%u inspection=%s/%s entries=%llu/%llu suspended=%u "
+                    "gates=%u/%u tail=%s "
+                    "draws=%llu unknown_lists=%llu invalid_recordings=%llu scoped_invalidations=%llu invalid_draws=%llu "
+                    "lease_failures=%llu global_aliases=%llu overflows=%llu reasons=0x%x capture_stalled=%u "
+                    "barrier_max=%llu barrier_truncated=%llu probe_ms=%.3f queries=%llu query_ms=%.3f read_ms=%.3f "
+                    "allocation_queries=%llu page_queries=%llu region_queries=%llu aa_ms=%.3f "
+                    "inspections=%llu updates=%llu clear_states=%llu | %.256s",
+                    applied_profile, aircraft_matches, connected, requested, static_cast<unsigned long long>(control.busy_reads()),
+                    buttons.valid, desired.held, desired.timed_out, output.output, static_cast<unsigned long long>(scene.stop_sequence),
+                    native_camera::scene_stop_reason_name(scene.stop_reason), scene.recovery_attempts, scene.recovery_pending,
+                    scene.pose_waiting, scene.view_waiting, static_cast<unsigned long long>(scene.view_wait_count), scene.ready[0],
+                    scene.ready[1], scene.inspection_status[0], scene.inspection_status[1],
+                    static_cast<unsigned long long>(scene.pair.owned_ids[0]), static_cast<unsigned long long>(scene.pair.owned_ids[1]),
+                    demand.suspend, scene.gates[0], scene.gates[1], output.capture.tail_status,
+                    static_cast<unsigned long long>(output.capture.source_draws),
+                    static_cast<unsigned long long>(output.capture.unknown_submitted_lists),
+                    static_cast<unsigned long long>(output.capture.invalid_source_recordings),
+                    static_cast<unsigned long long>(output.capture.scoped_source_invalidations),
+                    static_cast<unsigned long long>(output.capture.invalid_draws),
+                    static_cast<unsigned long long>(output.capture.source_lease_failures),
+                    static_cast<unsigned long long>(output.capture.global_aliases),
+                    static_cast<unsigned long long>(output.capture.recording_overflows), output.capture.last_invalidation_reasons,
+                    progress.stalled(), static_cast<unsigned long long>(boundaries.maximum_legacy_batch),
+                    static_cast<unsigned long long>(boundaries.metadata_truncated_calls), scene.observer_last_ms,
+                    static_cast<unsigned long long>(scene.performance.query_calls), scene.performance.query_ms, scene.performance.read_ms,
+                    static_cast<unsigned long long>(scene.performance.query_allocation_calls),
+                    static_cast<unsigned long long>(scene.performance.query_page_calls),
+                    static_cast<unsigned long long>(scene.performance.query_fallback_calls),
+                    scene.performance.stage_ms[static_cast<std::size_t>(native_camera::ProbeStage::aa)],
+                    static_cast<unsigned long long>(scene.inspection_count), static_cast<unsigned long long>(scene.updates),
+                    static_cast<unsigned long long>(graphics.clear_states),
+                    scene.stop_reason == native_camera::SceneStopReason::none ? "" : scene.stop_detail.c_str());
       log_status(status, detail);
       char pfd_detail[640];
       std::snprintf(pfd_detail, sizeof(pfd_detail),

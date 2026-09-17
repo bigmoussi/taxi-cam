@@ -94,6 +94,13 @@ class ViewResizeRecovery {
     clear();
     return true;
   }
+  // Caller inspected a closed ready pair but could not prove the existing Bitmap
+  // still matches the pane. Release the one-shot authorization so a later update
+  // may restore instead of sitting in wait after an unused resize token.
+  void release_resize_authorization() noexcept {
+    if (pending_ && !failed_)
+      resize_issued_ = false;
+  }
   bool pending() const noexcept { return pending_; }
   bool failed() const noexcept { return failed_; }
   void clear() noexcept { *this = {}; }  // Explicit lifecycle reset, never automatic retry.

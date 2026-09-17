@@ -110,8 +110,11 @@ class SceneRecovery {
     return true;
   }
   void resumed_retained_resolution() noexcept {
-    if (requested_ && !pending_ && reason_ == SceneStopReason::resolution_changed)
+    if (requested_ && !pending_ && reason_ == SceneStopReason::resolution_changed) {
       reason_ = SceneStopReason::none;
+      // Bump the control-loop snapshot so "Camera dimensions restored" is logged.
+      ++sequence_;
+    }
   }
   bool requested() const noexcept { return requested_; }
   void capture_progress(std::uint64_t now) noexcept {

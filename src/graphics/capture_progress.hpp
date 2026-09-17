@@ -30,6 +30,7 @@ class CaptureProgress {
   }
 
   bool stalled() const noexcept { return stalled_; }
+  void reset() noexcept { *this = {}; }
 
  private:
   bool watching_ = false, stalled_ = false;

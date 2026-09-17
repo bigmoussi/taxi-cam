@@ -73,6 +73,13 @@ int main() {
   require(policy.observe(owner, ids, 11, views) == Action::wait && policy.observe(owner, ids, 12, views) == Action::wait,
           "Resize permission cannot be issued twice");
   require(policy.finish(owner, ids) && !policy.pending() && !policy.failed(), "Success ends only this cycle");
+  policy.clear();
+  require(policy.begin(owner, ids), "Release cycle begins");
+  require(policy.observe(owner, ids, 20, views) == Action::wait, "Release cycle first closed update waits");
+  require(policy.observe(owner, ids, 21, views) == Action::resize, "Release cycle authorizes resize");
+  policy.release_resize_authorization();
+  require(policy.observe(owner, ids, 22, views) == Action::resize, "Unused resize authorization can be released for a later update");
+  require(policy.finish(owner, ids) && !policy.pending() && !policy.failed(), "Released authorization can still finish");
 
   for (unsigned feed = 0; feed < 2; ++feed) {
     policy.clear();
