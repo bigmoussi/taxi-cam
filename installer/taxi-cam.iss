@@ -216,7 +216,7 @@ begin
   ExplicitXml := ExpandConstant('{param:EXEXML|}') <> '';
   SettingsPage := CreateInputOptionPage(XmlPage.ID, 'Saved settings',
     'Keep your settings or start with the defaults',
-    'Keep your camera profiles, calibration, reference guides and keyboard shortcuts. Camera frame rate is set to 5 (minimum 5, range 5–60). Clear this box to reset saved settings to the defaults.',
+    'Keep your camera profiles, calibration, reference guides and keyboard shortcuts. Camera frame rate is set to 10 (minimum 5, range 5–60). Clear this box to reset saved settings to the defaults.',
     False, False);
   SettingsPage.Add('&Keep existing settings (recommended)');
   SettingsPage.Values[0] := ExpandConstant('{param:RESETSETTINGS|0}') <> '1';
