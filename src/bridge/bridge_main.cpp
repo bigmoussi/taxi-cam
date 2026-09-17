@@ -521,7 +521,7 @@ DWORD run_impl() {
       else
         // Dominant-activity profiles (FBW A380, A350). Keep Lvar/material IDs out of UI copy.
         target_message = is("no_candidates") || is("insufficient_candidates")
-                             ? "No matching display textures yet. Reload the flight with Taxi Cam already running, or assign PFDs manually."
+                             ? "No matching display textures yet. If you connected after the aircraft loaded, keep Taxi Cam running and use Restart Flight; or assign PFDs manually."
                          : is("ambiguous_activity") || is("incomparable_rates")
                              ? "Multiple display textures look active. Wait for a clear pair, or assign the PFDs manually."
                          : is("no_activity") ? "Matching display textures are idle. Power the panels or assign PFDs manually."
