@@ -1,8 +1,10 @@
 #include "d3d12_bridge.hpp"
 #include <dxgi1_6.h>
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <cstring>
+#include <vector>
 #include <memory>
 #include <mutex>
 #include <tuple>
@@ -164,6 +166,7 @@ struct Registry {
   // one relaxed load. Never allocate or lock unless this flag is still set.
   std::atomic<bool> live_backfill{};
   std::uint64_t backfill_started_ms{};
+  std::uint64_t backfill_inventory_ms{};
   struct SeenResources {
     static constexpr unsigned Capacity = 1024;
     static constexpr unsigned Probes = 8;
@@ -197,30 +200,57 @@ struct Registry {
     }
   } seen_resources;
   struct LiveBindHint {
-    std::atomic<ID3D12GraphicsCommandList*> list{};
-    std::atomic<ID3D12Resource*> resource{};
-    std::atomic<unsigned> entries{};
+    // One slot per in-flight list. A global hint was wiped by Reset/ClearState
+    // on any other list, so MSFS association never survived cockpit recording.
+    static constexpr unsigned Slots = 8;
+    std::array<std::atomic<ID3D12GraphicsCommandList*>, Slots> lists{};
+    std::array<std::atomic<ID3D12Resource*>, Slots> resources{};
+    std::array<std::atomic<unsigned>, Slots> entries{};
     void note(ID3D12GraphicsCommandList* native, ID3D12Resource* p) noexcept {
       if (!native || !p)
         return;
-      if (list.load(std::memory_order_relaxed) != native) {
-        list.store(native, std::memory_order_relaxed);
-        resource.store(p, std::memory_order_relaxed);
-        entries.store(1, std::memory_order_relaxed);
-        return;
+      int empty = -1;
+      for (unsigned i = 0; i < Slots; ++i) {
+        const auto owner = lists[i].load(std::memory_order_relaxed);
+        if (owner == native) {
+          if (resources[i].load(std::memory_order_relaxed) == p)
+            return;
+          resources[i].store(p, std::memory_order_relaxed);
+          entries[i].fetch_add(1, std::memory_order_relaxed);
+          return;
+        }
+        if (!owner && empty < 0)
+          empty = static_cast<int>(i);
       }
-      if (resource.load(std::memory_order_relaxed) == p)
+      if (empty < 0)
         return;
-      resource.store(p, std::memory_order_relaxed);
-      entries.fetch_add(1, std::memory_order_relaxed);
+      const auto i = static_cast<unsigned>(empty);
+      ID3D12GraphicsCommandList* expected = nullptr;
+      if (!lists[i].compare_exchange_strong(expected, native, std::memory_order_relaxed) && expected != native)
+        return;
+      resources[i].store(p, std::memory_order_relaxed);
+      entries[i].store(1, std::memory_order_relaxed);
     }
     ID3D12Resource* take(ID3D12GraphicsCommandList* native) noexcept {
-      if (!native || list.load(std::memory_order_relaxed) != native || entries.load(std::memory_order_relaxed) != 1)
+      if (!native)
         return nullptr;
-      entries.store(0, std::memory_order_relaxed);
-      return resource.load(std::memory_order_relaxed);
+      for (unsigned i = 0; i < Slots; ++i) {
+        if (lists[i].load(std::memory_order_relaxed) != native)
+          continue;
+        if (entries[i].load(std::memory_order_relaxed) != 1)
+          return nullptr;
+        entries[i].store(0, std::memory_order_relaxed);
+        return resources[i].load(std::memory_order_relaxed);
+      }
+      return nullptr;
     }
-    void clear() noexcept { entries.store(0, std::memory_order_relaxed); }
+    void clear(ID3D12GraphicsCommandList* native) noexcept {
+      if (!native)
+        return;
+      for (unsigned i = 0; i < Slots; ++i)
+        if (lists[i].load(std::memory_order_relaxed) == native)
+          entries[i].store(0, std::memory_order_relaxed);
+    }
   } live_bind;
   std::array<std::atomic<ID3D12Resource*>, 8> backfill_displays{};
 };
@@ -370,6 +400,16 @@ bool same_device(ID3D12Device* device) noexcept {
   return equal;
 }
 constexpr unsigned LiveBackfillNeeded = 2;
+constexpr std::uint64_t LiveBackfillAdmitMs = 3000;
+constexpr std::uint64_t LiveBackfillAssociateMs = 10000;
+std::array<std::uint64_t, 2> dominant_activity_pair(const profiles::AircraftProfile& profile,
+                                                   const std::vector<PfdTargetObservation>& inventory) noexcept {
+  if (inventory.size() != 2 || !inventory[0].id || !inventory[1].id || inventory[0].id == inventory[1].id)
+    return {};
+  const auto high = std::max(inventory[0].id, inventory[1].id);
+  const auto low = std::min(inventory[0].id, inventory[1].id);
+  return profile.higher_id_left ? std::array<std::uint64_t, 2>{high, low} : std::array<std::uint64_t, 2>{low, high};
+}
 bool display_item(const Registry& r, const Resource& item) noexcept {
   return item.alive && profiles::matches_display(*r.profile, static_cast<UINT>(item.desc.Width), item.desc.Height, item.desc.MipLevels,
                                                 static_cast<UINT>(item.desc.Format));
@@ -1462,7 +1502,7 @@ HRESULT STDMETHODCALLTYPE reset(ID3D12GraphicsCommandList* native, ID3D12Command
     item->graphics.reset(++item->recording, true);
     item->graphics.bind_pipeline(pso);
     if (registry().live_backfill.load(std::memory_order_relaxed))
-      registry().live_bind.clear();
+      registry().live_bind.clear(native);
     boundary::successful_reset(native, item->id);
       runtime::manager().successful_reset(native, item->id);
     } else {
@@ -1501,7 +1541,7 @@ struct ClearState {
     l.graphics.reset(l.recording, l.ready);
     l.graphics.bind_pipeline(p);
     if (registry().live_backfill.load(std::memory_order_relaxed))
-      registry().live_bind.clear();
+      registry().live_bind.clear(l.native);
     // This is still the same recording. Keep boundary/capture invalidations,
     // render-pass scope and readiness; only an actual Reset can renew them.
   }
@@ -1604,7 +1644,7 @@ struct Targets {
       if (count == 1 && !l.targets[0].resource && input[0].ptr)
         relevant |= bind_live_rtv(r, l, input[0].ptr);
       else if (count != 1)
-        r.live_bind.clear();
+        r.live_bind.clear(l.native);
     }
     if (!snapshots || !relevant || !recording_observed(l))
       return;
@@ -1946,6 +1986,7 @@ bool initialize_graphics(IUnknown* reported) noexcept {
   r.error = ok ? "native_graphics_ready" : "native_hook_installation_failed";
   if (ok) {
     r.backfill_started_ms = 0;
+    r.backfill_inventory_ms = 0;
     r.live_backfill.store(true, std::memory_order_relaxed);
   } else
     ++r.failures;
@@ -2067,12 +2108,19 @@ void service_live_backfill(std::uint64_t now, std::size_t inventory_count) noexc
     maybe_stop_live_backfill(r);
     if (!r.live_backfill.load(std::memory_order_relaxed))
       return;
+    if (!r.backfill_inventory_ms)
+      r.backfill_inventory_ms = now ? now : 1;
+    // List filled; keep associating RTVs. The empty-list 3 s cut must not
+    // freeze stamps/calibration while candidates are already visible.
+    if (now - r.backfill_inventory_ms >= LiveBackfillAssociateMs)
+      r.live_backfill.store(false, std::memory_order_relaxed);
+    return;
   }
   if (!r.backfill_started_ms) {
     r.backfill_started_ms = now ? now : 1;
     return;
   }
-  if (now - r.backfill_started_ms >= 3000)
+  if (now - r.backfill_started_ms >= LiveBackfillAdmitMs)
     r.live_backfill.store(false, std::memory_order_relaxed);
 }
 bool assign_targets(std::uint64_t left, std::uint64_t right) noexcept {
@@ -2161,6 +2209,10 @@ void discover_pfds(std::uint64_t now) noexcept {
         r.routes.adopt_detected(detection.targets);
       else if (ranked_group && detection.invalidates_targets)
         r.routes.forget_detected();
+      else if (!ranked_group && !r.routes.targets[0] && !r.routes.targets[1]) {
+        if (const auto pair = dominant_activity_pair(*r.profile, inventory); pair[0])
+          r.routes.adopt_detected(pair);
+      }
     }
     refresh_selected(r);
   });

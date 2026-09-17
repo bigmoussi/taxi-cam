@@ -962,6 +962,15 @@ void native_case(bool warp,
     list->OMSetRenderTargets(1, &rtvs[i], FALSE, nullptr);
   }
   require(win::pfd_inventory().size() == 2, "Learn-on-use admits pre-existing display textures");
+  win::discover_pfds(GetTickCount64());
+  const auto learned_pair = win::target_ids();
+  if (profile.pfd_detection == taxi_camera::profiles::PfdDetectionPolicy::dominant_activity) {
+    require(learned_pair[0] && learned_pair[1] && learned_pair[0] != learned_pair[1],
+            "Exactly two learned displays adopt so ready and calibration have targets");
+  } else {
+    require(learned_pair[0] == 0 && learned_pair[1] == 0,
+            "Allocation-group profiles do not adopt a partial two-texture list");
+  }
   const auto key = win::graphics_status().device;
   const auto successful_copies = [] {
     const auto s = win::graphics_status();

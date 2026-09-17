@@ -508,7 +508,7 @@ DWORD run_impl() {
     const char* target_message = graphics.ready && inventory.empty()
                                      ? "Waiting for cockpit displays to be drawn. They are learned on first use; Restart Flight if the "
                                        "list stays empty."
-                                     : "Detecting display textures for the selected aircraft profile.";
+                                     : "Select the left and right displays, or wait for automatic assignment.";
     if (selected_profile && selected_profile->pfd_detection == profiles::PfdDetectionPolicy::ini_a380_allocation_group) {
       const auto is = [&](const char* reason) { return std::strcmp(graphics.target_detection, reason) == 0; };
       target_message = !settings.auto_detect        ? "Automatic PFD selection is off. Select the left and right displays manually."

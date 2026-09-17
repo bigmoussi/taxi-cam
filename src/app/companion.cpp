@@ -742,15 +742,15 @@ void draw_page(HDC dc) {
     sample = status;
     live = connection;
   }
+  const bool has_displays = sample.candidate_count != 0 || sample.left_id != 0 || sample.right_id != 0;
   if (page == 0) {
     panel(dc, 244, 137, 766, 140);
     text(dc,
          !sample.graphics_ready ? L"Waiting for the simulator"
-         : sample.candidate_count ? L"Native bridge connected"
-                                  : L"Native bridge connected — waiting for cockpit displays",
-         266, 153, 500, 30, heading, sample.graphics_ready && sample.candidate_count ? Accent : Text);
-    const bool late_empty_pfds =
-        sample.graphics_ready && sample.candidate_count == 0 && sample.left_id == 0 && sample.right_id == 0;
+         : has_displays         ? L"Native bridge connected"
+                                : L"Native bridge connected — waiting for cockpit displays",
+         266, 153, 500, 30, heading, sample.graphics_ready && has_displays ? Accent : Text);
+    const bool late_empty_pfds = sample.graphics_ready && !has_displays;
     const auto line = late_empty_pfds ? std::wstring(L"Waiting for cockpit displays to be drawn. "
                                                      L"Restart Flight only if the list stays empty.")
                       : sample.heartbeat ? widen(sample.message)
@@ -825,7 +825,7 @@ void draw_page(HDC dc) {
     std::swprintf(data, 1024,
                   L"Bridge                 %s\nCamera pair         %s\nLeft / right PFD    %llu / %llu\nCaptured frames  "
                   L"%llu\nCompositions       %llu\nPFD writes            %llu\nHook failures        %llu",
-                  sample.graphics_ready ? (sample.candidate_count ? L"Connected" : L"Waiting for displays") : L"Waiting",
+                  sample.graphics_ready ? (has_displays ? L"Connected" : L"Waiting for displays") : L"Waiting",
                   sample.scene_ready ? L"Ready" : L"Waiting",
                   static_cast<unsigned long long>(sample.left_id), static_cast<unsigned long long>(sample.right_id),
                   static_cast<unsigned long long>(sample.captures), static_cast<unsigned long long>(sample.composed),
@@ -1610,7 +1610,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
             const std::lock_guard lock(app_mutex);
             sample = status;
           }
-          if (sample.graphics_ready && sample.candidate_count == 0) {
+          if (sample.graphics_ready && sample.candidate_count == 0 && sample.left_id == 0 && sample.right_id == 0) {
             notice = L"Waiting for cockpit displays to be drawn. Restart Flight only if the list stays empty.";
             InvalidateRect(hwnd, nullptr, FALSE);
           }

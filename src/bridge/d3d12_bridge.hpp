@@ -42,8 +42,10 @@ void set_graphics_observation_demand(bool enabled) noexcept;
 void set_graphics_diagnostics_enabled(bool enabled) noexcept;
 GraphicsStatus graphics_status() noexcept;
 std::vector<PfdTargetObservation> pfd_inventory();
-// Control-thread only. Turns off late-attach barrier/copy/OM extras after a
-// healthy inventory or a short timeout. Not called from recording hooks.
+// Control-thread only. Turns off late-attach barrier/copy/OM extras after two
+// display resources and RTVs, or after a short empty-list timeout. A filled
+// list keeps association a little longer so stamps/calibration can light.
+// Not called from recording hooks.
 void service_live_backfill(std::uint64_t now, std::size_t inventory_count) noexcept;
 bool assign_targets(std::uint64_t left, std::uint64_t right) noexcept;
 void set_target_mask(unsigned mask) noexcept;
