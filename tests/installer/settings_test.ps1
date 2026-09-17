@@ -55,7 +55,7 @@ function Assert-ForcedCameraRate([string]$ExpectedRate = '5') {
     foreach ($target in @(Get-TaxiCameraRateTargets)) {
         if (-not (Test-Path -LiteralPath $target.path -PathType Leaf)) { continue }
         $found++
-        Assert-SettingsTest ((Get-TaxiIniKey $target.path 'display' 'camera_rate') -eq $ExpectedRate) "Install did not write camera_rate=$ExpectedRate: $($target.path)"
+        Assert-SettingsTest ((Get-TaxiIniKey $target.path 'display' 'camera_rate') -eq $ExpectedRate) "Install did not write camera_rate=${ExpectedRate}: $($target.path)"
     }
     Assert-SettingsTest ($found -gt 0) 'Camera-rate force found no existing settings files to check.'
 }
