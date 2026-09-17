@@ -1033,7 +1033,7 @@ std::uint64_t SceneCaptureManager::before_submission(ID3D12CommandQueue* queue,
   return result.receipt;
 }
 
-bool SceneCaptureManager::finish_transaction(std::uint64_t receipt, bool refused) noexcept {
+bool SceneCaptureManager::finish_transaction(std::uint64_t receipt, bool refused, bool fatal) noexcept {
   if (transaction_owner != this || thread_receipt != receipt || !receipt)
     return false;
   bool success = false;
@@ -1048,8 +1048,10 @@ bool SceneCaptureManager::finish_transaction(std::uint64_t receipt, bool refused
       success = SUCCEEDED(pending.queue->Signal(pending.device->timeline, pending.value));
       if (success)
         pending.device->last_signal = pending.value;
-      if (!success || refused)
+      if (!success || (refused && fatal))
         fail_device(*pending.device);
+      else if (refused)
+        pending.device->source_states.invalidate_all();
       for (std::size_t index = 0; index < packets_.size(); ++index) {
         if (!(pending.packets & (1u << index)))
           continue;
@@ -1083,17 +1085,26 @@ void SceneCaptureManager::after_submission(ID3D12CommandQueue* queue, std::uint6
   if (transaction_owner == this && transaction_.queue == queue)
     finish_transaction(receipt, false);
 }
-void SceneCaptureManager::submission_refused(ID3D12CommandQueue* queue, engine_hook::queue_submit::Refusal) noexcept {
+void SceneCaptureManager::submission_refused(ID3D12CommandQueue* queue, engine_hook::queue_submit::Refusal reason) noexcept {
+  const bool fatal = reason != engine_hook::queue_submit::Refusal::contended_submission &&
+                     reason != engine_hook::queue_submit::Refusal::reentrant_submission;
   if (transaction_owner == this) {
-    finish_transaction(thread_receipt, true);
+    finish_transaction(thread_receipt, true, fatal);
     return;
   }
-  // The wrapper may refuse before taking a receipt (e.g. oversized batch). It
-  // forwards first, so exact referenced packets are unknown: quarantine device.
+  // Contended and same-thread re-entrant submits still forwarded the original
+  // batch. Invalidate source state so capture stays fail-closed without
+  // permanently disabling the device — frame-generation helpers re-enter this
+  // queue while Present is blocked on the owner thread.
+  // Oversized or malformed batches remain fatal: referenced packets are unknown.
   const std::lock_guard lock(mutex_);
   for (auto& owner : devices_)
-    if (owner.active && compatible_queue(queue, owner))
-      fail_device(owner);
+    if (owner.active && compatible_queue(queue, owner)) {
+      if (fatal)
+        fail_device(owner);
+      else
+        owner.source_states.invalidate_all();
+    }
 }
 
 SceneCaptureManager::Submission SceneCaptureManager::begin_private_submission(std::uint64_t key, ID3D12CommandQueue* queue) noexcept {

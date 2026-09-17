@@ -181,6 +181,8 @@ class SceneCaptureManager {
   // Discovery runs without submission serialization. Only fully observed,
   // unrelated recordings bypass it; all other batches revalidate under both
   // manager and submission locks before retaining leases or queuing a fence.
+  // Contended or same-thread re-entrant submits invalidate source state instead
+  // of failing the device, so Present/frame-generation helpers can forward.
   std::uint64_t before_submission(ID3D12CommandQueue*, UINT, ID3D12CommandList* const*) noexcept;
   void after_submission(ID3D12CommandQueue*, std::uint64_t receipt) noexcept;
   void submission_refused(ID3D12CommandQueue*, engine_hook::queue_submit::Refusal) noexcept;
@@ -294,7 +296,7 @@ class SceneCaptureManager {
                       Packet* required_packet = nullptr) noexcept;
   bool record_copy(ID3D12GraphicsCommandList*, ID3D12Resource*, ID3D12Resource*, bool, std::uint64_t, bool) noexcept;
   Submission begin_transaction(Device&, ID3D12CommandQueue*, std::uint16_t, bool) noexcept;
-  bool finish_transaction(std::uint64_t, bool refused) noexcept;
+  bool finish_transaction(std::uint64_t, bool refused, bool fatal = true) noexcept;
 
   SceneHandoff& handoff_;
   mutable std::mutex mutex_;

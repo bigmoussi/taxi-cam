@@ -12,7 +12,7 @@ namespace taxi_camera::engine_hook::queue_submit {
 inline constexpr unsigned kMaximumQueues = 8;
 inline constexpr unsigned kMaximumCommandLists = 256;
 
-enum class Refusal { oversized_batch, invalid_batch, reentrant_submission };
+enum class Refusal { oversized_batch, invalid_batch, reentrant_submission, contended_submission };
 
 struct Callbacks {
   void* context = nullptr;
@@ -82,14 +82,21 @@ struct Statistics {
 // no live unloading, queue-reference release or executable-code allocation.
 // Failed registration retains no queue reference unless queue_retained is true.
 //
-// Registered calls serialize before/original/after on that queue. The wrapper
-// forwards the original queue/count/list-array exactly once, even when capture
-// is refused. Notifications must not throw, call registration/removal APIs or
-// take locks that can be held by their callers. Only after may submit private
-// compositor or explicitly owned tail work as described above; a nested before/original submission
-// quarantines the outer receipt through refused.
-// The original public COM method uses its documented Win64 ABI. This is not an
-// SEH fault barrier or a guarantee that invalid application submissions execute.
+// Observed before/original/after stay serialized on that queue so a Wait queued
+// in before always has a later Signal. A thread that cannot take the submit lock
+// immediately forwards the original batch without waiting: Present and
+// frame-generation helpers must not block on Taxi Cam. That contended path
+// reports Refusal::contended_submission after forwarding so capture can
+// invalidate source state without failing the device or stalling DXGI.
+// Unrelated observed batches (before returns zero) release the lock before the
+// original ExecuteCommandLists. The wrapper forwards the original
+// queue/count/list-array exactly once, even when capture is refused.
+// Notifications must not throw, call registration/removal APIs or take locks
+// that can be held by their callers. Only after may submit private compositor
+// or explicitly owned tail work as described above; a nested before/original
+// submission reports reentrant_submission. The original public COM method uses
+// its documented Win64 ABI. This is not an SEH fault barrier or a guarantee
+// that invalid application submissions execute.
 Result register_queue(ID3D12CommandQueue* queue, const Callbacks& callbacks) noexcept;
 
 // Optional native bootstrap discovery. Called outside the submission/registry locks,
@@ -98,9 +105,10 @@ Result register_queue(ID3D12CommandQueue* queue, const Callbacks& callbacks) noe
 using UnknownQueueObserver = void (*)(ID3D12CommandQueue*) noexcept;
 bool set_unknown_queue_observer(UnknownQueueObserver) noexcept;
 
-// Disables notifications and waits only for an already-entered CPU wrapper on
-// this queue to return. Does not wait for the GPU or release anything. Repeating
-// registration with the identical callbacks may enable this retained queue.
+// Disables notifications and waits only for an observed wrapper that still holds
+// this queue's submit lock. Contended and unrelated forwards do not hold it.
+// Does not wait for the GPU or release anything. Repeating registration with
+// the identical callbacks may enable this retained queue.
 Result disable_queue(ID3D12CommandQueue* queue) noexcept;
 
 // Stops notifications and exchanges only our slot value for the saved original.
