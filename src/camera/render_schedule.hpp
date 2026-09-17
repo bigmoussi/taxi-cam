@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include "../shared/camera_rate.hpp"
 
 namespace taxi_camera::native_camera {
 
@@ -12,7 +13,7 @@ namespace taxi_camera::native_camera {
 class RenderSchedule {
  public:
   void configure(unsigned rate, unsigned feeds = 2) noexcept {
-    rate_ = std::clamp(rate, 15u, 60u);
+    rate_ = std::clamp(rate, kMinimumCameraRate, kMaximumCameraRate);
     feeds_ = std::clamp(feeds, 1u, 2u);
     if (next_feed_ >= feeds_)
       next_feed_ = 0;
@@ -64,7 +65,7 @@ class RenderSchedule {
   unsigned feeds() const noexcept { return feeds_; }
 
  private:
-  unsigned rate_ = 15;
+  unsigned rate_ = kDefaultCameraRate;
   unsigned feeds_ = 2;
   unsigned next_feed_ = 0;
   bool have_time_ = false;

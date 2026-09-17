@@ -1,6 +1,6 @@
 #include "scene_runtime.hpp"
-#include "../hooks/render_boundary_observer.hpp"
 #include "../bridge/native_hooks.hpp"
+#include "../hooks/render_boundary_observer.hpp"
 #include "scene_frame_output.hpp"
 
 #include <algorithm>
@@ -28,6 +28,7 @@ struct Device {
 };
 struct Runtime {
   std::mutex mutex;
+  bool gpu_timing_enabled = false;
   std::array<Device, SceneCaptureManager::MaximumDevices> devices;
 };
 Runtime& runtime() {
@@ -66,6 +67,14 @@ SceneCaptureManager& manager() {
   static auto* const instance = new SceneCaptureManager(scene_handoff());
   return *instance;
 }
+void set_gpu_timing_enabled(bool enabled) {
+  const standalone::OwnedWork owned_work_guard;
+  const std::lock_guard lock(runtime().mutex);
+  runtime().gpu_timing_enabled = enabled;
+  manager().set_gpu_timing_enabled(enabled);
+  for (auto& item : runtime().devices)
+    item.output.set_gpu_timing_enabled(enabled);
+}
 
 bool init_device(std::uint64_t key, ID3D12Device* device) {
   const std::lock_guard lock(runtime().mutex);
@@ -78,6 +87,7 @@ bool init_device(std::uint64_t key, ID3D12Device* device) {
       return false;
     item.key = key;
     item.native = device;  // Manager retains this device until process exit.
+    item.output.set_gpu_timing_enabled(runtime().gpu_timing_enabled);
     return true;
   }
   return false;
@@ -360,8 +370,13 @@ void service() {
 Snapshot snapshot(std::uint64_t key) {
   const std::lock_guard lock(runtime().mutex);
   Snapshot result;
-  if (const auto* item = find(key)) {
+  if (auto* item = find(key)) {
     result = item->status;
+    result.gpu_timing_enabled = runtime().gpu_timing_enabled;
+    const auto timings = item->output.gpu_timings();
+    result.composition_gpu = timings[0];
+    result.output_copy_gpu = timings[1];
+    result.patch_gpu = timings[2];
     result.completed_frames = item->output.completed_submissions();
     result.patch_requests = item->output.patch_requests();
     result.patch_draws = item->output.patch_draws();

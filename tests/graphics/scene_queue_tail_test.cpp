@@ -262,10 +262,10 @@ void tail_run(bool warp_requested, bool enhanced, bool born_render_target) {
     check(packet.tail_list->Close(), "Close unused other-device tail list");
   }
   require(manager->source_rate_ == 15, "Capture rate default remains15");
-  for (const auto setting : std::array<std::array<std::uint32_t, 2>, 8>{
-           {{0, 15}, {14, 15}, {20, 20}, {21, 21}, {30, 30}, {60, 60}, {61, 60}, {0xffffffffu, 60}}}) {
+  for (const auto setting :
+       std::array<std::array<std::uint32_t, 2>, 8>{{{0, 5}, {4, 5}, {5, 5}, {14, 14}, {20, 20}, {60, 60}, {61, 60}, {0xffffffffu, 60}}}) {
     manager->set_source_rate(setting[0]);
-    require(manager->source_rate_ == setting[1], "Capture rate follows15..60 clamp rather than former20fps ceiling");
+    require(manager->source_rate_ == setting[1], "Capture rate follows shared5..60 clamp");
   }
   manager->set_source_rate(20);
   Commands producer, second_queue, consumer, unknown;
@@ -408,6 +408,8 @@ void tail_run(bool warp_requested, bool enhanced, bool born_render_target) {
                            {reinterpret_cast<std::uint64_t>(sources[0].p), reinterpret_cast<std::uint64_t>(sources[1].p)}),
           "Publish tail pair");
   manager->begin_source_tracking();
+  require(manager->statistics().capture_copy_gpu.samples == 0, "GPU capture timing default inactive");
+  manager->set_gpu_timing_enabled(true);
   DrawFixture draw;
   draw.initialize(device.p, DXGI_FORMAT_R11G11B10_FLOAT);
   constexpr float colors[2][2][4] = {{{0.25f, 0.5f, 0.75f, 1}, {2, 4, 0.125f, 1}}, {{1, 0, 0.5f, 1}, {0.125f, 1, 2, 1}}};
@@ -417,6 +419,14 @@ void tail_run(bool warp_requested, bool enhanced, bool born_render_target) {
   std::uint64_t checked_pixels = 0;
   for (unsigned frame = 0; frame < 3; ++frame) {
     Sleep(70);  // Production15..20Hz cap also applies to this real GPU fixture.
+    if (frame == 1) {
+      const auto before_idle = manager->statistics().tail_captures;
+      manager->set_capture_enabled(false);
+      producer.queue->ExecuteCommandLists(1, &original);
+      drain(producer.queue.p);
+      require(manager->statistics().tail_captures == before_idle, "Idle admitted new capture tails");
+      manager->set_capture_enabled(true);
+    }
     if (frame < 2) {
       check(producer.allocator->Reset(), "Reset completed producer allocator");
       check(producer.list->Reset(producer.allocator.p, nullptr), "Reset completed producer list");
@@ -509,6 +519,11 @@ void tail_run(bool warp_requested, bool enhanced, bool born_render_target) {
     }
   }
   require(manager->statistics().tail_captures == 6, "Unexpected persistent/replay tail captures");
+  const auto capture_timing = manager->statistics().capture_copy_gpu;
+  require(capture_timing.samples == 6 && capture_timing.rejected == 0 && capture_timing.total_ms >= capture_timing.maximum_ms,
+          "Private tail timing did not measure each completed copy exactly once");
+  require(manager->statistics().capture_copy_gpu.samples == 6, "Tail timing polling double counted samples");
+  manager->set_gpu_timing_enabled(false);
   // GPU completion and the pixel walk above may take longer than one interval
   // on a hosted runner. Validate capture timestamps rather than assuming this
   // replay is still immediate. A burst checks any additional captures per feed.
@@ -564,9 +579,11 @@ void tail_run(bool warp_requested, bool enhanced, bool born_render_target) {
       "{\"passed\":true,\"warp\":%s,\"enhanced\":%s,\"born_render_target\":%s,\"checked_pixels\":%llu,\"tail_captures\":%llu,\"replayed\":"
       "true,"
       "\"two_producer_queues\":true,\"persistent_rt\":true,\"reset_receipt_lease\":true,\"stop_releases_sources\":true,"
-      "\"tail_device_reuse\":true,\"scoped_target_invalidation\":true,\"checks\":%u}\n",
+      "\"tail_device_reuse\":true,\"scoped_target_invalidation\":true,\"idle_reset_recovery\":true,"
+      "\"baseline_tail_captures\":6,\"gpu_timing_samples\":6,\"replay_tail_captures\":%llu,\"checks\":%u}\n",
       warp_requested ? "true" : "false", enhanced ? "true" : "false", born_render_target ? "true" : "false",
-      static_cast<unsigned long long>(checked_pixels), static_cast<unsigned long long>(rate_checked_captures), checks);
+      static_cast<unsigned long long>(checked_pixels), static_cast<unsigned long long>(rate_checked_captures),
+      static_cast<unsigned long long>(rate_checked_captures - 6), checks);
 }
 }  // namespace
 int main(int argc, char** argv) {

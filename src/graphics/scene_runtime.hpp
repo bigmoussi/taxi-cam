@@ -21,6 +21,8 @@ bool copy_patch(ID3D12GraphicsCommandList*,
                 const D3D12_RECT& content,
                 ID3D12GraphicsCommandList7* enhanced = nullptr);
 struct Snapshot {
+  bool gpu_timing_enabled = false;
+  GpuTimingStatistics composition_gpu, output_copy_gpu, patch_gpu;
   bool initialized = false;
   bool output = false;
   bool failed = false;
@@ -38,6 +40,7 @@ struct Snapshot {
   SceneCaptureManager::Statistics capture;
 };
 SceneCaptureManager& manager();
+void set_gpu_timing_enabled(bool enabled);
 bool init_device(std::uint64_t key, ID3D12Device* device);
 void destroy_device(std::uint64_t key);
 bool init_queue(std::uint64_t key, ID3D12CommandQueue* queue);

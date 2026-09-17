@@ -81,6 +81,7 @@ float SceneFrameOutput::display_exposure() const noexcept {
   return compositor_ ? compositor_->display_exposure() : CameraCompositorD3D12::DefaultExposureEv;
 }
 bool SceneFrameOutput::fail(const char* error) noexcept {
+  gpu_timing_.abandon();
   error_ = error;
   failed_ = true;
   return false;
@@ -217,8 +218,16 @@ bool SceneFrameOutput::prepare(ID3D12Resource* nose, DXGI_FORMAT nose_format, ID
   }
   if (FAILED(allocator_->Reset()) || FAILED(list_->Reset(allocator_, nullptr)))
     return fail("Resetting the completed private composition list failed.");
+  gpu_timing_.discard_unsubmitted();
+  const bool timed = gpu_timing_enabled_ && gpu_timing_.begin(device_, queue_, list_);
+  if (timed)
+    gpu_timing_.start(0);
   if (FAILED(compositor_->record(list_, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_DEST)))
     return fail("Recording the two-camera composition failed.");
+  if (timed) {
+    gpu_timing_.end(0);
+    gpu_timing_.start(1);
+  }
   D3D12_RESOURCE_BARRIER barrier{};
   barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
   barrier.Transition = {buffer_, 0, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST};
@@ -236,8 +245,18 @@ bool SceneFrameOutput::prepare(ID3D12Resource* nose, DXGI_FORMAT nose_format, ID
   barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
   barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COMMON;
   list_->ResourceBarrier(1, &barrier);
+  if (timed) {
+    gpu_timing_.end(1);
+    if (patch_requests_)
+      gpu_timing_.start(2);
+  }
   if (!prepare_patches())
     return false;
+  if (timed) {
+    if (patch_requests_)
+      gpu_timing_.end(2);
+    gpu_timing_.resolve();
+  }
   if (FAILED(list_->Close()))
     return fail("Closing the private composition list failed.");
   prepared_ = true;
@@ -253,6 +272,7 @@ bool SceneFrameOutput::submit() noexcept {
   ++submitted_;
   if (FAILED(queue_->Signal(fence_, submitted_)))
     return fail("Signaling the private composition completion fence failed.");
+  gpu_timing_.submitted(fence_, submitted_);
   for (auto& patch : patches_)
     if (patch.recorded) {
       patch.written = true;
@@ -266,6 +286,7 @@ bool SceneFrameOutput::discard_prepared() noexcept {
     return false;
   if (FAILED(allocator_->Reset()) || FAILED(list_->Reset(allocator_, nullptr)) || FAILED(list_->Close()))
     return fail("Discarding the never-submitted private composition list failed.");
+  gpu_timing_.discard_unsubmitted();
   for (auto& patch : patches_)
     patch.recorded = false;
   prepared_ = false;

@@ -4,6 +4,7 @@
 #include <array>
 #include <cstdint>
 #include "../profiles/catalog.hpp"
+#include "owned_gpu_timing.hpp"
 
 namespace taxi_camera {
 class CameraCompositorD3D12;
@@ -33,6 +34,13 @@ class SceneFrameOutput {
   // may replay the stable buffer until process exit, beyond our own fence.
   ~SceneFrameOutput() = default;
   bool initialize(ID3D12Device* device) noexcept;
+  void set_gpu_timing_enabled(bool enabled) noexcept { gpu_timing_enabled_ = enabled; }
+  // Composition, output-buffer copy, all requested patch draws/copies. These
+  // never include native simulator scene rendering or application PFD copies.
+  std::array<GpuTimingStatistics, 3> gpu_timings() noexcept {
+    gpu_timing_.poll();
+    return gpu_timing_.statistics();
+  }
   // Serialized with prepare/submit. Changes only the next recording; a closed
   // prepared recording must first be submitted or discarded.
   bool set_display_exposure(float ev) noexcept;
@@ -94,6 +102,8 @@ class SceneFrameOutput {
   D3D12_GPU_VIRTUAL_ADDRESS address_ = 0;
   std::uint64_t submitted_ = 0;
   bool prepared_ = false;
+  bool gpu_timing_enabled_ = false;
+  OwnedGpuTiming<3> gpu_timing_;
   bool failed_ = false;
   const char* error_ = "";
 };

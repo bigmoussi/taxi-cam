@@ -21,6 +21,17 @@ $managerBoundaryObject = Join-Path $managerBuild 'render-boundary-gpu-validation
 & $managerCompiler @managerFlags -c (Join-Path $managerRoot 'src/hooks/render_boundary_observer.cpp') -o $managerBoundaryObject
 if ($LASTEXITCODE -ne 0) { throw 'Native render boundary GPU compilation failed.' }
 $managerObjects += $managerBoundaryObject
+$sourceObservationExecutable = Join-Path $managerBuild 'source-observation-test.exe'
+& $managerCompiler @managerFlags -fno-access-control -static (Join-Path $repoRoot 'tests/graphics/source_observation_test.cpp') @managerObjects -ld3d12 -ld3dcompiler -ldxgi -ldxguid -o $sourceObservationExecutable
+if ($LASTEXITCODE -ne 0) { throw 'Source observation test compile failed.' }
+$sourceObservationOutput = & $sourceObservationExecutable
+if ($LASTEXITCODE -ne 0) { throw 'Source observation validation failed.' }
+$sourceObservationResult = $sourceObservationOutput | ConvertFrom-Json
+if ($sourceObservationResult.passed -ne $true -or $sourceObservationResult.combined_draw -ne $true -or $sourceObservationResult.idle_reset_recovery -ne $true) {
+  throw 'Invalid source observation receipt.'
+}
+$sourceObservationOutput | Set-Content -LiteralPath (Join-Path $managerBuild 'source-observation.json') -Encoding utf8
+Write-Output $sourceObservationOutput
 $tailExecutable = Join-Path $managerBuild 'scene-queue-tail-test.exe'
 & $managerCompiler @managerFlags -fno-access-control -static (Join-Path $repoRoot 'tests/graphics/scene_queue_tail_test.cpp') @managerObjects $managerQueueObject -ld3d12 -ld3dcompiler -ldxgi -ldxguid -o $tailExecutable
 if ($LASTEXITCODE -ne 0) { throw 'Queue tail test compile failed.' }
@@ -35,7 +46,9 @@ foreach ($tailAdapter in @('hardware', 'warp')) {
     if ($LASTEXITCODE -ne 0) { throw "Queue tail validation failed: $tailAdapter/$tailModel." }
     $tailResult = $tailOutput | ConvertFrom-Json
     # Three complete pairs at the fixture's current 736 x (251 + 496) dimensions.
-    if ($tailResult.passed -ne $true -or $tailResult.checked_pixels -ne (3 * 736 * (251 + 496)) -or $tailResult.tail_captures -ne 6 -or
+    if ($tailResult.passed -ne $true -or $tailResult.checked_pixels -ne (3 * 736 * (251 + 496)) -or
+        $tailResult.baseline_tail_captures -ne 6 -or $tailResult.gpu_timing_samples -ne 6 -or $tailResult.replay_tail_captures -lt 2 -or
+        $tailResult.tail_captures -ne (6 + $tailResult.replay_tail_captures) -or $tailResult.idle_reset_recovery -ne $true -or
         $tailResult.reset_receipt_lease -ne $true -or $tailResult.stop_releases_sources -ne $true -or $tailResult.tail_device_reuse -ne $true) {
       throw 'Invalid queue tail receipt.'
     }

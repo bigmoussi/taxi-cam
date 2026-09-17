@@ -104,7 +104,7 @@ std::uint64_t request_scene_profile_transition(std::uint32_t id) noexcept;
 void request_scene_stop(bool keep_telemetry = false) noexcept;
 void note_scene_capture_progress(std::uint64_t now_ms) noexcept;
 // Atomic configuration only; consumed by the observer, never calls the engine.
-// Limits activation opportunities to 15..60 per second per selected feed.
+// Limits activation opportunities to 5..60 per second per selected feed.
 // Close activation gates while retaining owned views; no ownership changes.
 void suspend_scene_rendering(bool suspended) noexcept;
 void request_scene_rate(unsigned rate, unsigned feeds = 2) noexcept;

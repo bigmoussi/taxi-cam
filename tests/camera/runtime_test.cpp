@@ -160,15 +160,18 @@ void wrong_host_public_flow() {
 
   // This API is a pure atomic settings mailbox even on the wrong host. Editing
   // it cannot bypass the executable guard, install a hook or queue creation.
-  const std::array<std::array<unsigned, 4>, 9> settings{{{0, 0, 15, 1},
-                                                         {14, 1, 15, 1},
-                                                         {17, 2, 17, 2},
-                                                         {20, 3, 20, 2},
-                                                         {21, 2, 21, 2},
-                                                         {30, 2, 30, 2},
-                                                         {60, 1, 60, 1},
-                                                         {61, 3, 60, 2},
-                                                         {0xffffffffu, 0xffffffffu, 60, 2}}};
+  const std::array<std::array<unsigned, 4>, 12> settings{{{0, 0, 5, 1},
+                                                          {4, 1, 5, 1},
+                                                          {5, 1, 5, 1},
+                                                          {10, 2, 10, 2},
+                                                          {14, 1, 14, 1},
+                                                          {17, 2, 17, 2},
+                                                          {20, 3, 20, 2},
+                                                          {21, 2, 21, 2},
+                                                          {30, 2, 30, 2},
+                                                          {60, 1, 60, 1},
+                                                          {61, 3, 60, 2},
+                                                          {0xffffffffu, 0xffffffffu, 60, 2}}};
   for (const auto& values : settings) {
     nc::request_scene_rate(values[0], values[1]);
     const auto snapshot = nc::scene_snapshot();

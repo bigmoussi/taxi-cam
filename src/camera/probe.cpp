@@ -2,6 +2,7 @@
 
 #include "../graphics/scene_handoff.hpp"
 #include "../hooks/observer_hook.hpp"
+#include "../shared/camera_rate.hpp"
 #include "activation_mask.hpp"
 #include "aircraft_inventory.hpp"
 #include "aircraft_scene_pose.hpp"
@@ -42,7 +43,7 @@ struct Runtime {
   std::atomic<bool> hooked{false};
   std::atomic<bool> enabled{false};
   std::atomic<bool> suspended{false};
-  std::atomic<unsigned> requested_settings{15u | (2u << 8)};
+  std::atomic<unsigned> requested_settings{kDefaultCameraRate | (2u << 8)};
   // Protected by mutex; never used directly by a native engine call.
   MountPair requested_mounts = default_mounts();
   const profiles::AircraftProfile* requested_profile = &profiles::A380;
@@ -1611,7 +1612,7 @@ void suspend_scene_rendering(bool suspended) noexcept {
 }
 
 void request_scene_rate(unsigned rate, unsigned feeds) noexcept {
-  const auto settings = std::clamp(rate, 15u, 60u) | (std::clamp(feeds, 1u, 2u) << 8);
+  const auto settings = std::clamp(rate, kMinimumCameraRate, kMaximumCameraRate) | (std::clamp(feeds, 1u, 2u) << 8);
   state().requested_settings.store(settings, std::memory_order_release);
 }
 

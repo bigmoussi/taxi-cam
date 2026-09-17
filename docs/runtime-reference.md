@@ -46,17 +46,20 @@ The INI contains `[service]`, `[display]`, `[nose]`, `[tail]` and `[guides]` sec
 
 Saves validate the complete settings object, flush a temporary UTF-16 file and replace the INI atomically.
 
+Night-boost preference revision 1 sets `night_boost` to 8 once for each existing profile, including legacy imports, when that profile is first loaded. The migration patches only `night_boost` and `night_boost_revision` in a temporary copy and atomically replaces the profile. Calibration, unknown INI keys, other display preferences and the globally selected aircraft are preserved. New profiles also default to 8. Later user edits retain the revision marker and are respected on subsequent loads. If the migration cannot be saved, 8 applies in memory and persistence is retried on the next load; valid calibration still loads. Installer and ZIP upgrades use this same companion migration.
+
 | Saved field | Default | Range or purpose |
 | --- | --- | --- |
 | `enabled` | 1 | Enable the camera service |
 | `follow_taxi` | 1; iniBuilds A380: 0 | Read aircraft TAXI controls; 0 uses manual control |
 | `auto_detect` | 1 | Detect the PFD pair using the profile's policy |
-| `camera_rate` | 15 | Integer 15–60, activation limit per camera |
+| `camera_rate` | 15 | Integer 5–60, activation limit per camera |
 | `single_camera` | 0 | Render only the nose for a performance test |
 | `automatic_exposure` | 1 | Adjust exposure from ambient light |
 | `exposure` | −11.5 for all aircraft | Daytime EV, −16 to +4 |
 | `speed_red`, `speed_green`, `speed_blue` | 22 / 255, 109 / 255, 19 / 255 for all aircraft (`#166D13`) | Normalized RGB, 0–1, edited with the colour picker |
-| `night_boost` | 4 | Maximum automatic boost, 0–8 EV |
+| `night_boost` | 8 | Maximum automatic boost, 0–8 EV; existing profiles migrate once |
+| `night_boost_revision` | 1 on save or migration | Per-profile migration marker; not a user control |
 | `calibration_budget` | 4096 | 64–16384 identification-draw batches per window |
 
 Boolean settings use 0 or 1. Numeric values must be finite. The single-camera test does not supply the two images required for the normal PFD composition.
@@ -207,6 +210,7 @@ The mapping carries values, IDs and bounded text. It carries no camera pixels or
 | Ambient-light sampling / freshness | 500 ms / 1500 ms |
 | Held TAXI intent after an invalid gap starts | Less than 2000 ms |
 | PFD discovery | 1000 ms; three qualifying windows to confirm |
+| PFD candidate rows in companion status | 1000 ms; profile changes clear the snapshot |
 | Capture-recovery check | 250 ms |
 | Diagnostic log snapshot | 5000 ms and each control/scene-stop transition |
 
@@ -252,7 +256,7 @@ Private-code mismatch diagnostics identify the failed discovery or validation st
 
 A counter measures work at its stage, not frames visibly presented. For example, increasing compositions with zero stamps points to display routing or PFD draw eligibility.
 
-The frame-rate setting limits activation opportunities for each camera. Each opening is followed by a closed camera-manager interval. At low simulator update rates, opening and closing can therefore require work on every manager update even at the 15 fps setting; the setting does not guarantee 15 completed frames per camera or remove the cost of those updates. Compare render-thread and GPU timings with TAXI off/on at the same cockpit view when investigating stutter.
+The frame-rate setting limits activation opportunities for each camera. Each opening is followed by a closed camera-manager interval. At low simulator update rates, opening and closing can therefore require work on every manager update even at the default 15 setting. The 5 and 10 settings can reduce that workload further, with less frequent camera updates. Settings do not guarantee completed image FPS. Compare render-thread, presented-frame and GPU timings with TAXI off/on at the same cockpit view when investigating stutter; loaded hooks retain essential tracking while OFF, so binary comparisons are also needed to measure changes in their standing overhead.
 
 `probe_ms`, `query_ms` and `read_ms` describe the last serviced inspection callback, not every simulator frame. `inspections` counts serviced callbacks; its change over a log interval gives their frequency. Skipped callbacks leave the last timings visible. `clear_states` counts observed application graphics-state resets. These measurements exclude MSFS scene rendering and GPU time.
 
@@ -275,6 +279,13 @@ The log's `queries` and `query_ms` cover actual calls to the instrumented memory
 Status also contains the active side mask, target IDs, hook failures, applied exposure and GS. A status GS of −1 means unavailable. The candidate list contains up to 16 IDs, cumulative draw counts, dimensions, mip counts and formats for the selected profile.
 
 `probe_cpu_ms` and `probe_max_ms` record elapsed camera-observer callback time, not OS thread-CPU or GPU time. The ten IPC `stage_ms` values remain manager, pool, lifecycle, entries, view 1, view 2, handoff, pose, activation and publication. The separate log field `aa_ms` records recurring AA preparation, including its verification work; initial AA setup remains within lifecycle timing. It does not add an eleventh IPC stage or change the shared-memory layout. Memory-query/read timings overlap the stage that performs them, so these values must not be added as independent costs.
+
+Two developer diagnostics can be enabled in the environment inherited by MSFS before the bridge starts. Both are disabled by default and leave the shared-memory layout unchanged:
+
+- `TAXI_CAM_GRAPHICS_DIAGNOSTICS=1` enables cumulative lookup, cache-hit, registry-lookup and idle-bypass counters in `Graphics work` log records. The observation generation and invalidation count distinguish idle transitions from normal recording resets. These diagnostic counter increments are disabled during ordinary operation.
+- `TAXI_CAM_GPU_TIMING=1` enables asynchronous timestamp spans on Taxi Cam's own command lists. `GPU timing` records contain cumulative `samples`, `rejected`, `total_ms` and `max_ms` for private queue-tail capture copies, composition, the output-buffer copy and requested patch preparation. Results are read only after the existing completion fence; diagnostics add no CPU wait for the GPU. Intervals between snapshots use differences in sample counts and totals. Zero samples mean no completed measurement, not zero cost.
+
+These GPU spans exclude MSFS scene rendering, captures inserted into replayable application command lists and application PFD delivery. They are GPU elapsed intervals rather than presented-frame times. No timestamps are inserted into replayable application lists. Existing capture/composition counters still report work events, not displayed FPS. Keep timed and untimed runs separate when assessing instrumentation overhead.
 
 For installation and local build commands, see the [README](../README.md). For automated validation and downloadable assets, see [Releases](releases.md).
 
