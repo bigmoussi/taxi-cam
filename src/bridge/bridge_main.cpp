@@ -505,17 +505,29 @@ DWORD run_impl() {
                     identity.fresh ? "The loaded aircraft is not supported by the selected profile." : "Waiting for aircraft identity.",
                     identity.type[0] ? identity.type.data() : "unavailable");
     const char* target_message = "Detecting display textures for the selected aircraft profile.";
-    if (selected_profile && selected_profile->pfd_detection == profiles::PfdDetectionPolicy::ini_a380_allocation_group) {
+    if (selected_profile) {
       const auto is = [&](const char* reason) { return std::strcmp(graphics.target_detection, reason) == 0; };
-      target_message = !settings.auto_detect        ? "Automatic PFD selection is off. Select the left and right displays manually."
-                       : is("incomplete_inventory") ? "Display tracking was incomplete. Select the left and right PFDs manually."
-                       : is("ini_group_incomplete") ? "Waiting for all eight iniBuilds A380 display textures."
-                       : is("ini_group_ambiguous")
-                           ? "Extra iniBuilds A380 display textures make automatic selection ambiguous. Select PFDs manually."
-                       : is("ini_group_format")   ? "This iniBuilds A380 display format needs manual PFD selection."
-                       : is("ini_group_inactive") ? "Waiting for all eight iniBuilds A380 displays to update."
-                       : is("detected")           ? "PFD identities changed. Re-select the aircraft profile or choose the PFDs manually."
-                                                  : "Checking the iniBuilds A380 display group across three active samples.";
+      if (!settings.auto_detect)
+        target_message = "Automatic PFD selection is off. Select the left and right displays manually.";
+      else if (selected_profile->pfd_detection == profiles::PfdDetectionPolicy::ini_a380_allocation_group)
+        target_message = is("incomplete_inventory") ? "Display tracking was incomplete. Select the left and right PFDs manually."
+                         : is("ini_group_incomplete") ? "Waiting for all eight iniBuilds A380 display textures."
+                         : is("ini_group_ambiguous")
+                             ? "Extra iniBuilds A380 display textures make automatic selection ambiguous. Select PFDs manually."
+                         : is("ini_group_format")   ? "This iniBuilds A380 display format needs manual PFD selection."
+                         : is("ini_group_inactive") ? "Waiting for all eight iniBuilds A380 displays to update."
+                         : is("detected")           ? "PFD identities changed. Waiting for the display group to stabilize, or choose the PFDs manually."
+                                                    : "Checking the iniBuilds A380 display group across three active samples.";
+      else
+        // Dominant-activity profiles (FBW A380, A350). Keep Lvar/material IDs out of UI copy.
+        target_message = is("no_candidates") || is("insufficient_candidates")
+                             ? "No matching display textures yet. Reload the flight with Taxi Cam already running, or assign PFDs manually."
+                         : is("ambiguous_activity") || is("incomparable_rates")
+                             ? "Multiple display textures look active. Wait for a clear pair, or assign the PFDs manually."
+                         : is("no_activity") ? "Matching display textures are idle. Power the panels or assign PFDs manually."
+                         : is("detected") || is("stabilizing")
+                             ? "Confirming display texture identities for the selected aircraft profile."
+                             : "Detecting display textures for the selected aircraft profile.";
     }
     const auto stopped_camera = camera_stop_message(scene);
     const char* message =
@@ -571,7 +583,7 @@ DWORD run_impl() {
                     "lease_failures=%llu global_aliases=%llu overflows=%llu reasons=0x%x capture_stalled=%u "
                     "barrier_max=%llu barrier_truncated=%llu probe_ms=%.3f queries=%llu query_ms=%.3f read_ms=%.3f "
                     "allocation_queries=%llu page_queries=%llu region_queries=%llu aa_ms=%.3f "
-                    "inspections=%llu updates=%llu clear_states=%llu | %.256s",
+                    "inspections=%llu updates=%llu clear_states=%llu detection=%s | %.256s",
                     applied_profile, aircraft_matches, connected, requested, static_cast<unsigned long long>(control.busy_reads()),
                     buttons.valid, desired.held, desired.timed_out, output.output, static_cast<unsigned long long>(scene.stop_sequence),
                     native_camera::scene_stop_reason_name(scene.stop_reason), scene.recovery_attempts, scene.recovery_pending,
@@ -595,7 +607,7 @@ DWORD run_impl() {
                     static_cast<unsigned long long>(scene.performance.query_fallback_calls),
                     scene.performance.stage_ms[static_cast<std::size_t>(native_camera::ProbeStage::aa)],
                     static_cast<unsigned long long>(scene.inspection_count), static_cast<unsigned long long>(scene.updates),
-                    static_cast<unsigned long long>(graphics.clear_states),
+                    static_cast<unsigned long long>(graphics.clear_states), graphics.target_detection,
                     scene.stop_reason == native_camera::SceneStopReason::none ? "" : scene.stop_detail.c_str());
       log_status(status, detail);
       char pfd_detail[640];

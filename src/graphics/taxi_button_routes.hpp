@@ -63,7 +63,10 @@ class TaxiButtonRoutes {
       return false;
     targets = selection;
     detected_targets_ = {};
-    assigned_ = selection[0] != 0 || selection[1] != 0;
+    // Any nonzero manual ID anchors side order for the rest of the session,
+    // even after that GPU identity is later destroyed. Both-Auto clears it.
+    manual_session_ = selection[0] != 0 || selection[1] != 0;
+    assigned_ = manual_session_;
     return true;
   }
   bool assign(unsigned side, std::uint64_t id) noexcept {
@@ -71,19 +74,23 @@ class TaxiButtonRoutes {
       return false;
     targets[side] = id;
     detected_targets_[side] = 0;
+    manual_session_ = true;
     assigned_ = true;
     return true;
   }
 
   // Detector ordering is only an initial-session hint. Once a side is known,
-  // retain every surviving identity through replacement. With both lost,
-  // semantic labels or an explicit assignment are required to recover sides.
+  // retain every surviving identity through replacement. When both auto-owned
+  // identities are destroyed, a freshly confirmed pair may be adopted again;
+  // explicit manual anchors still require both-Auto or a profile reload.
   bool adopt_detected(const std::array<std::uint64_t, 2>& detected, bool exact_names = false) noexcept {
     if (!detected[0] || !detected[1] || detected[0] == detected[1])
       return false;
     if (exact_names || (!assigned_ && !targets[0] && !targets[1])) {
       targets = detected;
       detected_targets_ = exact_names ? std::array<std::uint64_t, 2>{} : detected;
+      if (exact_names)
+        manual_session_ = true;
       assigned_ = true;
       return true;
     }
@@ -101,17 +108,22 @@ class TaxiButtonRoutes {
   }
 
   void forget(std::uint64_t id) noexcept {
-    assigned_ = assigned_ || targets[0] != 0 || targets[1] != 0;
     for (unsigned side = 0; side < targets.size(); ++side)
       if (targets[side] == id) {
         targets[side] = 0;
         detected_targets_[side] = 0;
       }
+    if (targets[0] || targets[1])
+      assigned_ = true;
+    else
+      // Auto-only both-lost reopens discovery. A sticky manual session still
+      // refuses until both-Auto or reset(), matching prior side-order guards.
+      assigned_ = manual_session_;
   }
 
   // An allocation-rank policy must be withdrawn when its complete-group
-  // evidence changes. Explicit sides and semantic-name assignments survive;
-  // the existing both-lost guard still requires an explicit session retry.
+  // evidence changes. Explicit live sides and sticky manual sessions survive;
+  // auto-only both-lost reopens discovery on the next confirmed group.
   void forget_detected() noexcept {
     const auto previous = detected_targets_;
     for (auto id : previous)
@@ -131,6 +143,9 @@ class TaxiButtonRoutes {
 
  private:
   bool assigned_ = false;
+  // True after any nonzero select_explicit/assign or exact-name adopt. Sticky
+  // across forget() so destroyed manual IDs cannot be replaced by a heuristic.
+  bool manual_session_ = false;
   std::array<std::uint64_t, 2> detected_targets_{};
 };
 

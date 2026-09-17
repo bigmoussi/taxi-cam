@@ -94,8 +94,12 @@ int main() {
   assert(replacements.targets[0] == 60000 && replacements.targets[1] == 43712);
   replacements.forget(60000);
   replacements.forget(43712);
-  assert(!replacements.adopt_detected({80000, 70000}));       // Both lost: no new creation-order guess.
-  assert(replacements.adopt_detected({70000, 80000}, true));  // Exact names restore semantic identity.
+  // Auto-only both-lost reopens discovery; a confirmed pair may be adopted again.
+  assert(replacements.adopt_detected({80000, 70000}));
+  assert(replacements.targets[0] == 80000 && replacements.targets[1] == 70000);
+  replacements.forget(80000);
+  replacements.forget(70000);
+  assert(replacements.adopt_detected({70000, 80000}, true));  // Exact names also restore identity.
   assert(replacements.targets[0] == 70000 && replacements.targets[1] == 80000);
   replacements.forget(70000);
   replacements.forget(80000);
@@ -104,8 +108,8 @@ int main() {
   assert(replacements.targets[1] == 90000);
 
   // Existing live A350 textures stay eligible across the deliberate A35K ->
-  // A359 profile change. Clearing only public IDs used to leave assigned_ set,
-  // permanently refusing even a newly confirmed pair in the new profile.
+  // A359 profile change. Profile reset clears ownership; auto both-lost
+  // also reopens discovery without requiring a profile reload (issue #43).
   static taxi_camera::PfdTargetDetector profile_detector;
   taxi_camera::TaxiButtonRoutes profile_routes;
   std::array<taxi_camera::PfdTargetObservation, 2> live{{{280, 10000, 1644, 1024, 1, 27}, {279, 9000, 1644, 1024, 1, 27}}};
@@ -134,9 +138,10 @@ int main() {
   assert(profile_routes.matches(280, 1) && profile_routes.matches(279, 2));
   profile_routes.forget(280);
   profile_routes.forget(279);
-  assert(!profile_routes.adopt_detected(confirm(taxi_camera::profiles::A359)));
-  assert(profile_routes.active_mask(true, true, true) == 0);  // Ordinary both-lost remains ambiguous.
-  profile_routes.reset();                                     // A deliberate reload of the same aircraft releases old ownership.
+  // Auto-detected both-lost may reacquire without a profile reload (issue #43).
+  assert(profile_routes.adopt_detected(confirm(taxi_camera::profiles::A359)));
+  assert(profile_routes.matches(280, 1) && profile_routes.matches(279, 2));
+  profile_routes.reset();
   assert(profile_routes.adopt_detected(confirm(taxi_camera::profiles::A359)));
   assert(profile_routes.matches(280, 1) && profile_routes.matches(279, 2));
   profile_routes.reset();
@@ -151,7 +156,7 @@ int main() {
   assert(!profile_routes.adopt_detected({0, 279}));
   assert(!profile_routes.adopt_detected({280, 280}));
   assert(profile_routes.adopt_detected(confirm(taxi_camera::profiles::A35K)));
-  std::puts("Aircraft session reacquisition: PASS; same-aircraft reload, A350/A380 round trip, ordinary both-lost still refused");
+  std::puts("Aircraft session reacquisition: PASS; same-aircraft reload, A350/A380 round trip, auto both-lost reacquires");
   // An explicit partial choice is authoritative for that side, independent of
   // detector ordering. Zero is Auto, never a resource identity.
   taxi_camera::TaxiButtonRoutes selections;
@@ -170,7 +175,7 @@ int main() {
   assert(selections.targets[0] == 901 && selections.targets[1] == 279);
   selections.forget(901);
   selections.forget(279);
-  assert(!selections.adopt_detected({902, 903}));  // Ordinary destruction still refuses.
+  assert(!selections.adopt_detected({902, 903}));  // Sticky manual session still refuses after destruction.
   assert(selections.select_explicit({0, 0}));
   assert(selections.active_mask(true, true, true) == 0);
   assert(selections.adopt_detected({902, 903}));  // Explicit both-Auto releases old ownership.
@@ -180,14 +185,13 @@ int main() {
   assert(selections.select_explicit({903, 902}));  // Explicit swap replaces both atomically.
   assert(selections.matches(903, 1) && selections.matches(902, 2));
   // Losing the complete ini allocation group withdraws only heuristic sides.
-  // It does not weaken manual anchors or the existing both-lost refusal.
+  // Auto-only both-lost may reacquire; sticky manual anchors still refuse.
   taxi_camera::TaxiButtonRoutes ranked;
   assert(ranked.adopt_detected({211, 209}));
   ranked.forget_detected();
   assert((ranked.targets == std::array<std::uint64_t, 2>{0, 0}));
-  assert(!ranked.adopt_detected({311, 309}));
-  assert(ranked.select_explicit({0, 0}));
   assert(ranked.adopt_detected({311, 309}));
+  assert((ranked.targets == std::array<std::uint64_t, 2>{311, 309}));
   assert(ranked.assign(0, 311));  // Making one side explicit preserves it.
   ranked.forget_detected();
   assert((ranked.targets == std::array<std::uint64_t, 2>{311, 0}));
@@ -202,16 +206,25 @@ int main() {
   assert(ranked.select_explicit({511, 509}));
   ranked.forget_detected();
   assert((ranked.targets == std::array<std::uint64_t, 2>{511, 509}));
+  ranked.forget(511);
+  ranked.forget(509);
+  assert(!ranked.adopt_detected({611, 609}));  // Sticky manual session still refuses.
+  assert(ranked.select_explicit({0, 0}));
+  assert(ranked.adopt_detected({611, 609}));
   ranked.reset();
   assert(ranked.adopt_detected({611, 609}, true));  // Semantic names are not rank evidence.
   ranked.forget_detected();
   assert((ranked.targets == std::array<std::uint64_t, 2>{611, 609}));
+  ranked.forget(611);
+  ranked.forget(609);
+  assert(!ranked.adopt_detected({711, 709}));  // Exact-name sessions stay manual.
   ranked.reset();
   assert(ranked.adopt_detected({711, 709}));
   assert(!ranked.select_explicit({711, 711}));
   ranked.forget_detected();
   assert((ranked.targets == std::array<std::uint64_t, 2>{0, 0}));
-  std::puts("Ranked auto selection invalidation: PASS; explicit and semantic sides preserved, both-lost still refused");
+  assert(ranked.adopt_detected({811, 809}));  // Auto both-lost reacquires.
+  std::puts("Ranked auto selection invalidation: PASS; explicit/semantic sticky, auto both-lost reacquires");
   std::puts("Explicit manual/Auto routing: PASS; partial anchors preserved, duplicate pair unchanged");
   std::puts("Taxi button routes: PASS");
 }

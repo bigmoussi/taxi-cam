@@ -269,6 +269,7 @@ The log's `queries` and `query_ms` cover actual calls to the instrumented memory
 | --- | --- |
 | No bridge status | Companion connection, executable path/structure and bridge startup |
 | Empty PFD texture list after starting Taxi Cam inside a loaded flight | The bridge may have missed existing texture/RTV creation. Reload the aircraft or flight with Taxi Cam running so the display resources are recreated; a panel redraw alone does not recover them. If the list stays empty after recreation, investigate display dimensions and formats. |
+| Stuck on “Detecting display textures…” after targets previously appeared | Bridge log `detection=` status and left/right IDs. Auto-only both-lost should reacquire a confirmed pair; sticky manual assignments need both-Auto or a profile reselect. If `detection=detected` while left/right stay 0 on an older build, that was the both-lost refusal. |
 | Camera compatibility check failed | Reported instruction-discovery, function-boundary, object-identity or activation-data failure; include the launcher and bridge logs in the support report |
 | Scenes not ready | Camera lifecycle and fresh aircraft/camera telemetry |
 | Scenes ready, zero captures | Scene-to-texture match, source state and queue observation |
