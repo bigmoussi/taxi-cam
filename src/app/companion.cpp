@@ -623,8 +623,8 @@ void build_controls() {
       if (profiles::Catalog[i]->id == s.profile)
         SendMessageW(combo, CB_SETCURSEL, i, 0);
     toggle(L"Auto aircraft", 230, s.auto_profile, 707, 318, 140);
-    toggle(L"Service", 220, s.enabled, 860, 318, 135);
     toggle(L"Auto-connect", 240, auto_connect.load(std::memory_order_acquire), 707, 236, 155);
+    toggle(L"Service", 220, s.enabled, 870, 236, 135);
     button(L"Connect", 241, 260, 236, 130, 34);
     button(L"Reconnect / Reset", 242, 405, 236, 200, 34);
     const auto* profile = profiles::find(s.profile);
