@@ -27,4 +27,6 @@ Assert-Absent 'installer/build\.ps1' 'PR workflow must not compile a release ins
 Assert-Absent '(?m)^\s+environment:\s*$' 'PR workflow must not wait for the release environment.'
 Assert-Absent 'contents:\s*write' 'PR workflow must not request write access.'
 Assert-Absent 'gh release' 'PR workflow must not create GitHub releases.'
+Assert-Absent 'BUILD_NUMBER' 'PR workflow must not stamp a release build number.'
+Assert-Absent 'releases/latest' 'PR workflow must not advertise an auto-update source.'
 Write-Output "PASS PR test-build workflow: $checks checks for pull_request CI, native validate/smoke, test artifacts and no publication."

@@ -28,7 +28,10 @@ Assert (Test-NewerUpdate (ConvertTo-UpdateVersion 'v0.8.0-build.10') $current) '
 Assert (Test-NewerUpdate (ConvertTo-UpdateVersion 'v0.8.1-build.1') $current) 'Patch version before build'
 Assert (Test-NewerUpdate (ConvertTo-UpdateVersion 'v0.9.0-build.1') $current) 'Version before build'
 Assert (-not (Test-NewerUpdate $current $current)) 'No reinstall'
-foreach ($tag in @('v0.8.0-build.01','v0.8.0-build.-1','v0.8.0-build.4294967296','v0.8.0-build.10;calc','v0.8.0-build.10-preview')) {
+Assert (-not (Test-NewerUpdate (ConvertTo-UpdateVersion 'v0.8.0-build.8') $current)) 'Lower published build ignored'
+Assert (-not (Test-NewerUpdate (ConvertTo-UpdateVersion 'v0.7.9-build.999') $current)) 'Older version ignored despite larger build'
+Assert (Test-NewerUpdate $current (ConvertTo-UpdateVersion 'v0.8.0-build.0')) 'Published build updates local or PR build 0'
+foreach ($tag in @('v0.8.0-build.01','v0.8.0-build.-1','v0.8.0-build.4294967296','v0.8.0-build.10;calc','v0.8.0-build.10-preview','v0.8.0-pr.12','v0.8.0-test.1','v0.8.0','pr-12')) {
     Reject { ConvertTo-UpdateVersion $tag } 'Malformed tag'
 }
 $release = Release
