@@ -754,7 +754,7 @@ void draw_page(HDC dc) {
          264, 446, 530, 30, small, Muted, DT_LEFT | DT_WORDBREAK);
     panel(dc, 244, 511, 766, 102);
     text(dc, L"Camera frame rate", 264, 525, 460, 30, heading);
-    text(dc, L"Min 5 fps per camera (range 5–60). This install sets 5.", 264, 564, 540, 24, small, Muted);
+    text(dc, L"Min 5 fps per camera (range 5–60). This install sets 10.", 264, 564, 540, 24, small, Muted);
     text(dc, L"Cameras and TAXI buttons turn off above 60 knots.", 250, 630, 730, 24, small, Muted);
   } else if (page == 1) {
     constexpr const wchar_t* labels[]{L"Right (m)", L"Up (m)", L"Forward (m)", L"Pitch (deg)", L"Yaw (deg)", L"Lens (rad)"};
@@ -778,7 +778,7 @@ void draw_page(HDC dc) {
     const wchar_t* descriptions[]{
         L"Exposure compensation in EV. Your calibrated baseline is −8.8.", L"Gradually brighten the camera display as ambient light drops.",
         L"Additional exposure at night, from 0 to +8 EV. Default: +8 EV.",
-        L"Activation limit per camera: min 5 fps, range 5–60. Install default: 5."};
+        L"Activation limit per camera: min 5 fps, range 5–60. Install default: 10."};
     for (int i = 0; i < 4; ++i) {
       panel(dc, 244, ys[i], 766, 105);
       text(dc, names[i], 264, ys[i] + 12, 515, 29, heading);

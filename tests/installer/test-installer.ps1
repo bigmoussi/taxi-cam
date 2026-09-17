@@ -68,13 +68,13 @@ function Assert-Settings($Hashes,[switch]$Removed,[switch]$RateForced) {
         $path = Join-Path $fixtureLocalAppData $relative
         if ($Removed -and $relative -in $knownSettings) {
             if ($relative -eq 'Taxi Cam/settings.ini' -and (Test-Path -LiteralPath $path -PathType Leaf) -and
-                (Get-TaxiIniKey $path 'display' 'camera_rate_revision') -eq '1' -and
+                (Get-TaxiIniKey $path 'display' 'camera_rate_revision') -eq '2' -and
                 $null -eq (Get-TaxiIniKey $path 'display' 'camera_rate')) {
                 continue
             }
             Assert-That (-not (Test-Path -LiteralPath $path)) "Opt-in settings removal retained $relative."
         } elseif ($RateForced -and $relative -in $rateSettings) {
-            Assert-That ((Test-Path -LiteralPath $path -PathType Leaf) -and (Get-TaxiIniKey $path 'display' 'camera_rate') -eq '5') "Keep-install did not force camera_rate=5: $relative."
+            Assert-That ((Test-Path -LiteralPath $path -PathType Leaf) -and (Get-TaxiIniKey $path 'display' 'camera_rate') -eq '10') "Keep-install did not force camera_rate=10: $relative."
             Assert-That ([IO.File]::ReadAllText($path).Contains("settings fixture: $relative")) "Keep-install rate force dropped prior settings text: $relative."
         } else {
             Assert-That ((Test-Path -LiteralPath $path -PathType Leaf) -and (Get-FileHash -LiteralPath $path).Hash -eq $Hashes[$relative]) "Saved or unrelated settings changed: $relative."

@@ -53,8 +53,8 @@ Night-boost preference revision 1 sets `night_boost` to 8 once for each existing
 | `enabled` | 1 | Enable the camera service |
 | `follow_taxi` | 1; iniBuilds A380: 0 | Read aircraft TAXI controls; 0 uses manual control |
 | `auto_detect` | 1 | Detect the PFD pair using the profile's policy |
-| `camera_rate` | 5 | Integer 5–60 (minimum 5), activation limit per camera. The first keep-install of this version writes 5 into existing `settings.ini` and known aircraft profile INIs; later upgrades keep a user-changed rate. Missing keys use 5. |
-| `camera_rate_revision` | 1 after the one-shot install migrate | Installer migration marker on `settings.ini`; not a user control. Later installs skip the rate write when this is 1. |
+| `camera_rate` | 10 | Integer 5–60 (minimum 5), activation limit per camera. The first keep-install of this version writes 10 into existing `settings.ini` and known aircraft profile INIs; later upgrades keep a user-changed rate. Missing keys use 10. |
+| `camera_rate_revision` | 2 after the one-shot install migrate | Installer migration marker on `settings.ini`; not a user control. Later installs skip the rate write when this is 2. Revision 1 (the earlier force-5 migrate) is migrated once to 10. |
 | `single_camera` | 0 | Render only the nose for a performance test |
 | `automatic_exposure` | 1 | Adjust exposure from ambient light |
 | `exposure` | −11.5 for all aircraft | Daytime EV, −16 to +4 |
@@ -257,7 +257,7 @@ Private-code mismatch diagnostics identify the failed discovery or validation st
 
 A counter measures work at its stage, not frames visibly presented. For example, increasing compositions with zero stamps points to display routing or PFD draw eligibility.
 
-The frame-rate setting limits activation opportunities for each camera. Each opening is followed by a closed camera-manager interval. The range is 5–60 (minimum 5); install and the shipped default use 5. At low simulator update rates, opening and closing can therefore require work on every manager update at higher chosen rates. The 5 and 10 settings reduce that workload with less frequent camera updates. Settings do not guarantee completed image FPS. Compare render-thread, presented-frame and GPU timings with TAXI off/on at the same cockpit view when investigating stutter; loaded hooks retain essential tracking while OFF, so binary comparisons are also needed to measure changes in their standing overhead.
+The frame-rate setting limits activation opportunities for each camera. Each opening is followed by a closed camera-manager interval. The range is 5–60 (minimum 5); install and the shipped default use 10. At low simulator update rates, opening and closing can therefore require work on every manager update at higher chosen rates. The 5 setting reduces that workload with less frequent camera updates. Settings do not guarantee completed image FPS. Compare render-thread, presented-frame and GPU timings with TAXI off/on at the same cockpit view when investigating stutter; loaded hooks retain essential tracking while OFF, so binary comparisons are also needed to measure changes in their standing overhead.
 
 `probe_ms`, `query_ms` and `read_ms` describe the last serviced inspection callback, not every simulator frame. `inspections` counts serviced callbacks; its change over a log interval gives their frequency. Skipped callbacks leave the last timings visible. `clear_states` counts observed application graphics-state resets. These measurements exclude MSFS scene rendering and GPU time.
 

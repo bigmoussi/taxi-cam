@@ -103,7 +103,7 @@ void missing_rate_uses_shipped_default_without_rewriting_saved_fifteen() {
   require(ini(path, L"display", L"camera_rate") == L"<missing>", "camera_rate key removed from isolated profile");
   require(load_settings(loaded, L"missing-installation", saved.profile) && loaded.camera_rate == taxi_camera::kDefaultCameraRate &&
               loaded.mounts == saved.mounts,
-          "A profile with no camera_rate key uses the shipped default of 5");
+          "A profile with no camera_rate key uses the shipped default of 10");
   require(!contains_utf16(contents(path), L"camera_rate="), "Loading a missing rate must not write a rate key");
 }
 
@@ -318,7 +318,7 @@ int main() {
                    std::to_wstring(GetTickCount64());
     require(std::filesystem::create_directories(fixture_root), "Create ignored test root");
     require(Settings{}.night_boost == 8.f && Settings{}.camera_rate == taxi_camera::kDefaultCameraRate && valid_settings(Settings{}),
-            "Default night boost is eight and the shipped camera rate is five");
+            "Default night boost is eight and the shipped camera rate is ten");
     missing_rate_uses_shipped_default_without_rewriting_saved_fifteen();
     all_profiles_migrate_once();
     completed_revisions_preserve_custom_values();

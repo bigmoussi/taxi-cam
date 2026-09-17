@@ -219,10 +219,11 @@ function Set-TaxiIniKey([string]$Path, [string]$Section, [string]$Key, [string]$
     Write-TaxiIniFile $Path $loaded.encoding ([string]::Join($newline, $lines))
 }
 
-# One-shot install migrate, matching night_boost_revision: write camera_rate=5
-# once, then leave later user overrides alone. The stamp lives on settings.ini
-# so a companion profile save cannot clear it.
-$script:TaxiCameraRateMigrationRevision = '1'
+# One-shot install migrate, matching night_boost_revision: write camera_rate=10
+# once, then leave later user overrides alone. Bump this stamp so people who
+# already received the force-5 migrate (revision 1) are moved to 10 once.
+# The stamp lives on settings.ini so a companion profile save cannot clear it.
+$script:TaxiCameraRateMigrationRevision = '2'
 
 function Get-TaxiCameraRateSettingsPath {
     return (@(Get-TaxiCameraRateTargets) | Select-Object -First 1).path
@@ -294,7 +295,7 @@ function New-TaxiCameraRateMigrationStamp($Entry) {
     }
 }
 
-function Set-TaxiForcedCameraRate([object[]]$Snapshot, [int]$Rate = 5) {
+function Set-TaxiForcedCameraRate([object[]]$Snapshot, [int]$Rate = 10) {
     if ($Rate -lt 5 -or $Rate -gt 60) { throw "Camera rate $Rate is outside 5-60." }
     $settingsPath = Get-TaxiCameraRateSettingsPath
     $settingsEntry = @($Snapshot | Where-Object { $_.path -eq $settingsPath })[0]
