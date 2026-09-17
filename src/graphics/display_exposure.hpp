@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include "../shared/exposure_settings.hpp"
 
 namespace taxi_camera {
 
@@ -21,7 +22,7 @@ struct DisplayExposureState {
 class DisplayExposureController {
  public:
   static constexpr float DayExposureEv = -8.8f;
-  static constexpr float DefaultNightBoostEv = 4;
+  static constexpr float DefaultNightBoostEv = kDefaultNightBoostEv;
   static constexpr float MaximumNightBoostEv = 8;
   static constexpr std::uint64_t MaximumLightingAgeMs = 1500;
   static constexpr float SlewEvPerSecond = 1;

@@ -6,14 +6,16 @@
 #include <cstdio>
 #include <cwchar>
 #include "../profiles/catalog.hpp"
+#include "camera_rate.hpp"
+#include "exposure_settings.hpp"
 #include "version.hpp"
 
 namespace taxi_camera::standalone {
 constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 8;
 constexpr const wchar_t* Version = TAXI_CAM_VERSION_WIDE;
 struct Settings {
-  std::uint32_t enabled = 1, camera_rate = 15, automatic_exposure = 1;
-  float exposure = profiles::A380.exposure, night_boost = 4.f;
+  std::uint32_t enabled = 1, camera_rate = kDefaultCameraRate, automatic_exposure = 1;
+  float exposure = profiles::A380.exposure, night_boost = kDefaultNightBoostEv;
   std::uint64_t route_request{}, left_id{}, right_id{};
   std::uint64_t profile_request{};         // Session-only: selecting the same profile is an explicit retry.
   std::uint64_t aircraft_session_epoch{};  // Scope manual previews and texture IDs to the observed flight.
@@ -82,8 +84,9 @@ inline bool valid_settings(const Settings& s) noexcept {
         m[5] < 0.05 || m[5] > 1.55)
       return false;
   }
-  return s.enabled <= 1 && s.camera_rate >= 15 && s.camera_rate <= 60 && s.automatic_exposure <= 1 && std::isfinite(s.exposure) &&
-         s.exposure >= -16 && s.exposure <= 4 && std::isfinite(s.night_boost) && s.night_boost >= 0 && s.night_boost <= 8;
+  return s.enabled <= 1 && s.camera_rate >= kMinimumCameraRate && s.camera_rate <= kMaximumCameraRate && s.automatic_exposure <= 1 &&
+         std::isfinite(s.exposure) && s.exposure >= -16 && s.exposure <= 4 && std::isfinite(s.night_boost) && s.night_boost >= 0 &&
+         s.night_boost <= 8;
 }
 class Mailbox {
  public:

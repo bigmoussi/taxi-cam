@@ -1,6 +1,8 @@
 #pragma once
 
 #include "../hooks/queue_submit_observer.hpp"
+#include "../shared/camera_rate.hpp"
+#include "owned_gpu_timing.hpp"
 #include "scene_capture_d3d12.hpp"
 #include "scene_handoff.hpp"
 #include "scene_source_state.hpp"
@@ -56,6 +58,7 @@ class SceneCaptureManager {
     const char* last_refusal = "not_observed";
   };
   struct Statistics {
+    GpuTimingStatistics capture_copy_gpu;
     std::uint64_t captures = 0, submissions = 0, resets = 0;
     std::uint64_t completed = 0, skipped = 0, quarantined = 0, bytes = 0;
     std::uint64_t render_target_writes = 0, render_target_rewrites = 0;
@@ -90,6 +93,11 @@ class SceneCaptureManager {
   void begin_source_tracking() noexcept;
   void stop_source_tracking() noexcept;
   void set_source_rate(std::uint32_t frames_per_second) noexcept;
+  // Suppress NEW GPU capture work only. Source state/alias/draw observation,
+  // immutable replay effects and existing packet/consumer ordering must continue
+  // while idle, including for persistent textures created directly in RT state.
+  void set_capture_enabled(bool enabled) noexcept;
+  void set_gpu_timing_enabled(bool enabled) noexcept;
   bool register_source_candidate(std::uint64_t device_key,
                                  ID3D12Resource*,
                                  std::uint64_t resource_generation,
@@ -104,6 +112,14 @@ class SceneCaptureManager {
                          ID3D12Resource* const* targets,
                          const std::uint64_t* resource_generations) noexcept;
   void after_source_draw(ID3D12GraphicsCommandList*, std::uint64_t object_generation, bool allowed) noexcept;
+  // Equivalent to adjacent stage/after calls after the actual native draw,
+  // with one lookup/lock and the same generation and resource-lease checks.
+  void observe_source_draw_after(ID3D12GraphicsCommandList*,
+                                 std::uint64_t object_generation,
+                                 UINT count,
+                                 ID3D12Resource* const* targets,
+                                 const std::uint64_t* resource_generations,
+                                 bool allowed) noexcept;
   void observe_source_legacy(ID3D12GraphicsCommandList*, std::uint64_t object_generation, const D3D12_RESOURCE_BARRIER&) noexcept;
   void observe_source_enhanced(ID3D12GraphicsCommandList*, std::uint64_t object_generation, const D3D12_TEXTURE_BARRIER&) noexcept;
   void invalidate_source_recording(ID3D12GraphicsCommandList*,
@@ -214,6 +230,7 @@ class SceneCaptureManager {
   };
   struct Packet {
     SceneCaptureD3D12 gpu;
+    OwnedGpuTiming<1> tail_timing;
     D3D12_RESOURCE_DESC description{};
     SceneCopyMatch match;
     std::uint64_t token = 0, device_key = 0, submitted = 0;
@@ -234,6 +251,9 @@ class SceneCaptureManager {
     std::uint16_t packets = 0;
     bool private_work = false;
     bool source_work = false;
+    // Query ownership belongs to the actual private lists executed by this
+    // receipt, not to a packet that may later host an application capture.
+    std::uint16_t timed_tail_packets = 0;
     std::array<SourceLease, source_state::Tracker::capacity> source_leases{};
     std::size_t source_lease_count = 0;
     std::array<std::uint32_t, MaximumPackets> packet_positions{};
@@ -249,6 +269,7 @@ class SceneCaptureManager {
   bool register_list(ID3D12GraphicsCommandList*, std::uint64_t, std::uint64_t, bool observed) noexcept;
   void observe_unknown_lists(ID3D12CommandQueue*, UINT, ID3D12CommandList* const*) noexcept;
   void retire_list(List&) noexcept;
+  void apply_source_draw(List&, source_state::Key, bool allowed) noexcept;
   static void release_source_leases(std::array<SourceLease, source_state::Tracker::capacity>&, std::size_t&) noexcept;
   static bool retain_source_lease(std::array<SourceLease, source_state::Tracker::capacity>&,
                                   std::size_t&,
@@ -286,7 +307,9 @@ class SceneCaptureManager {
   std::array<std::atomic<std::uint64_t>, MaximumDevices * 128> source_handles_{}, source_generations_{}, source_device_keys_{};
   std::array<std::atomic<std::uint64_t>, 16> source_filter_{};
   bool source_tracking_ = false;
-  std::uint32_t source_rate_ = 15;
+  bool capture_enabled_ = true;
+  bool gpu_timing_enabled_ = false;
+  std::uint32_t source_rate_ = kDefaultCameraRate;
   std::array<std::uint64_t, 2> last_tail_us_{};
   Transaction transaction_;
   std::uint64_t next_token_ = 0, next_receipt_ = 0;

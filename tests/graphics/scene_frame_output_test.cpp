@@ -8,9 +8,9 @@
 #include <memory>
 #include <stdexcept>
 #include <vector>
-#include "../support/reference_overlay_oracle.hpp"
 #include "../../src/graphics/camera_compositor_d3d12.hpp"
 #include "../../src/graphics/scene_capture_manager.hpp"
+#include "../support/reference_overlay_oracle.hpp"
 
 namespace {
 using Output = taxi_camera::SceneFrameOutput;
@@ -83,6 +83,9 @@ void run(bool warp) {
   require(manager->register_device(7, device.p), "Register manager device");
   auto output = std::make_unique<Output>();
   require(output->initialize(device.p), output->error());
+  for (const auto& timing : output->gpu_timings())
+    require(timing.samples == 0 && timing.total_ms == 0, "GPU timing default is inactive");
+  output->set_gpu_timing_enabled(true);
   require(output->display_exposure() == taxi_camera::CameraCompositorD3D12::DefaultExposureEv, "Output exposure default");
   require(!output->set_display_exposure(std::numeric_limits<float>::quiet_NaN()) &&
               output->display_exposure() == taxi_camera::CameraCompositorD3D12::DefaultExposureEv,
@@ -196,6 +199,8 @@ void run(bool warp) {
     require(!output->patch(patch_format, patch_replay.width, patch_replay.height, patch_replay.content).buffer,
             "New typed patch is not published by prepare, even after earlier output submissions");
     require(output->discard_prepared(), "Discard closed never-submitted composition");
+    for (const auto& timing : output->gpu_timings())
+      require(timing.samples == frame, "Discarded composition produced GPU timings");
     require(output->completed_submissions() == frame, "Unsubmitted/discarded work counted as GPU-completed warmup");
     require(!output->submit(), "Discarded composition was submitted");
     require(!output->patch(patch_format, patch_replay.width, patch_replay.height, patch_replay.content).buffer,
@@ -213,6 +218,11 @@ void run(bool warp) {
     require(output->submit(), output->error());
     require(manager->end_private_submission(transaction.receipt), "Private timeline signal");
     require(!output->idle(), "Output fence did not cover blocked work");
+    // Turning diagnostics off cannot discard pending query storage or publish
+    // a result before its existing completion fence.
+    output->set_gpu_timing_enabled(false);
+    for (const auto& timing : output->gpu_timings())
+      require(timing.samples == frame, "Blocked GPU work produced premature timings");
     require(output->submissions() == frame + 1 && output->completed_submissions() == frame,
             "A blocked GPU submission incorrectly counted as completed warmup");
     require(!output->discard_prepared(), "Submitted work could be discarded");
@@ -232,16 +242,24 @@ void run(bool warp) {
     check(patch_replay.commands.list->Close(), "Close typed patch consumer once");
     ID3D12CommandList* consumers[]{consumer.list.p, patch_replays[0].commands.list.p, patch_replays[1].commands.list.p};
     const auto consumer_count = frame + 2;
+    manager->set_capture_enabled(false);
     const auto receipt = manager->before_submission(consumer.queue.p, consumer_count, consumers);
     require(receipt != 0, "Persistent consumer lost its timeline registration");
     consumer.queue->ExecuteCommandLists(consumer_count, consumers);
     manager->after_submission(consumer.queue.p, receipt);
+    manager->set_capture_enabled(true);
     check(consumer.queue->Signal(completed.p, frame * 2 + 2), "Consumer completion");
     require(completed->GetCompletedValue() < frame * 2 + 2, "Consumer passed blocked composition");
     check(blocked->Signal(frame + 1), "Release output queue");
     wait([&] { return completed->GetCompletedValue() >= frame * 2 + 2; });
     require(output->idle() && output->submissions() == frame + 1, "Output submission did not retire");
     require(output->completed_submissions() == frame + 1, "Retired GPU work was not available to the prewarm completion check");
+    for (const auto& timing : output->gpu_timings())
+      require(timing.samples == frame + 1 && timing.rejected == 0 && timing.total_ms >= timing.maximum_ms && timing.maximum_ms >= 0,
+              "Completed owned GPU spans were not measured exactly once");
+    for (const auto& timing : output->gpu_timings())
+      require(timing.samples == frame + 1, "Polling counted a GPU span twice");
+    output->set_gpu_timing_enabled(true);
     require(output->address() == stable_address && output->buffer() == stable_buffer, "Stable output address changed");
     void* mapped = nullptr;
     D3D12_RANGE range{0, static_cast<SIZE_T>(Output::BufferBytes)};
@@ -307,7 +325,8 @@ void run(bool warp) {
   require(debug_errors == 0, "D3D12 debug layer errors");
   std::printf(
       "{\"passed\":true,\"checks\":%u,\"checked_pixels\":%llu,\"frames\":2,\"stable_address\":true,"
-      "\"consumer_recordings\":3,\"patch_pixels\":102,\"debugLayer\":%s,\"debugErrors\":%u,\"adapter\":\"%s\"}\n",
+      "\"consumer_recordings\":3,\"patch_pixels\":102,\"gpu_timing_fenced\":true,\"debugLayer\":%s,\"debugErrors\":%u,\"adapter\":\"%s\"}"
+      "\n",
       checks, static_cast<unsigned long long>(checked_pixels), debug_layer ? "true" : "false", debug_errors, warp ? "WARP" : "hardware");
 }
 }  // namespace

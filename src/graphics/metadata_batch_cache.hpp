@@ -17,7 +17,7 @@ class MetadataBatchCache {
       auto& slot = scopes_[depth_];
       slot.native = native;
       slot.generation = generation;
-      slot.recording = record ? record->recording : 0;
+      slot.recording = record ? static_cast<std::uint64_t>(record->recording) : 0;
       slot.record = std::move(record);
     }
     ++depth_;
