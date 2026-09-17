@@ -22,7 +22,8 @@ When startup cannot be configured and the original file is verified unchanged, i
 
 | Control | Location and behaviour |
 | --- | --- |
-| **Auto-connect** | **Overview**; when on (default), Taxi Cam attaches as soon as MSFS is detected. When off, wait until MSFS is at the **main menu**, then use **Connect** before loading a flight. Preference is saved in `%LOCALAPPDATA%\Taxi Cam\settings.ini`. |
+| **Auto-connect** | **Overview** connection box; when on (default), Taxi Cam attaches as soon as MSFS is detected. When off, wait until MSFS is at the **main menu**, then use **Connect** before loading a flight. Preference is saved in `%LOCALAPPDATA%\Taxi Cam\settings.ini`. |
+| **Service** | **Overview** connection box, with Connect and Auto-connect; pauses or resumes the camera service without detaching the bridge. |
 | **Connect** | **Overview** or tray menu; starts bridge attach for the live MSFS process. Required when Auto-connect is off. Prefer the main menu. A late Connect learns display textures on the next cockpit draw. Overview heading follows that list; **Restart Flight** only if the list stays empty. |
 | **Reconnect / Reset** | **Overview** or tray menu; clears a stuck attach attempt and retries. Does not stop MSFS, overwrite calibration, or reconstruct display textures created before attach. |
 | **Keyboard shortcuts…** | **Overview → Flight-deck control**; configure left, right and both-display toggles. Defaults are Ctrl + Shift + L / R / B. |
