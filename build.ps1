@@ -278,7 +278,7 @@ if ($Validate) {
     )) {
         $exe = Join-Path $out ($entry.Name + '-test.exe')
         $sources = @($entry.Sources | ForEach-Object { Join-Path $taskRoot $_ })
-        & $compiler @common @sources @libs '-o' $exe
+        & $compiler @common @sources @libs '-ladvapi32' '-o' $exe
         if ($LASTEXITCODE -ne 0) { throw "Native test compilation failed: $($entry.Name)" }
         & $exe
         if ($LASTEXITCODE -ne 0) { throw "Native test failed: $($entry.Name)" }
