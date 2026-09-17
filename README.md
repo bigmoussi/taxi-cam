@@ -66,7 +66,7 @@ Choose **Apply live** to preview the positions, then **Save changes** to keep th
 
 ### Brightness and smoothness
 
-On **Display**, adjust brightness, automatic night exposure and ground-speed text colour. **Camera frame rate** accepts **5–60**, with a default of **5**. Higher values update the cameras more often and increase simulator work. The achieved rate also depends on simulator performance. Choose **Save changes** when finished. Existing profiles that already saved a rate keep that value.
+On **Display**, adjust brightness, automatic night exposure and ground-speed text colour. **Camera frame rate** accepts **5–60** (minimum **5**). Install sets **5**. Higher values update the cameras more often and increase simulator work. The achieved rate also depends on simulator performance. Choose **Save changes** when finished.
 
 All aircraft start with **−11.5 EV** daytime exposure, **Auto exposure** enabled, **8 EV** maximum night boost and the same green ground-speed colour. This update sets existing profiles' maximum night boost to **8** once, when each profile is first loaded. Other saved preferences are preserved, including the Auto exposure choice. Later changes to the night boost remain saved normally. GS displays whole knots by dropping the fractional part: 12.9 knots displays as 12.
 
