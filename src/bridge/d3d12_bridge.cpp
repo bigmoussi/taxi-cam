@@ -422,11 +422,11 @@ bool plausible_resource(ID3D12Resource* native) noexcept {
   if (!committed_readable(native))
     return false;
   void** table{};
-  std::memcpy(&table, native, sizeof(table));
+  std::memcpy(&table, static_cast<const void*>(native), sizeof(table));
   if (!committed_readable(table))
     return false;
   void* query{};
-  std::memcpy(&query, table, sizeof(query));
+  std::memcpy(&query, static_cast<const void*>(table), sizeof(query));
   return image_region(query, true);
 }
 void observe_resource(ID3D12Device* device, IUnknown* object, source_state::Model initial);
