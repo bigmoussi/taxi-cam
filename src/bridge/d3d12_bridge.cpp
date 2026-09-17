@@ -2234,12 +2234,13 @@ void discover_pfds(std::uint64_t now) noexcept {
         r.routes.adopt_detected(detection.targets);
       else if (ranked_group && detection.invalidates_targets)
         r.routes.forget_detected();
-      else if (!ranked_group && !r.routes.targets[0] && !r.routes.targets[1]) {
+      if (!ranked_group && !r.routes.targets[0] && !r.routes.targets[1]) {
         if (const auto pair = dominant_activity_pair(*r.profile, inventory); pair[0])
           r.routes.adopt_detected(pair);
       } else if (ranked_group && (!r.routes.targets[0] || !r.routes.targets[1])) {
-        // Incomplete assignment after a filled eight: replace a stale singleton
-        // that assigned_ would otherwise keep (it is often not last/third-last).
+        // After incomplete→complete the detector reports ini_group_changed
+        // (invalidates). Still adopt a filled idle eight so ready/calibration
+        // are not stuck behind all-eight draw increments or a stale singleton.
         if (const auto pair = allocation_group_pair(*r.profile, inventory); pair[0]) {
           if (!r.routes.adopt_detected(pair) && (!r.routes.targets[0] || !r.routes.targets[1]))
             r.routes.adopt_detected(pair, true);
