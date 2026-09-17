@@ -178,7 +178,40 @@ void invalidation() {
     state_is(tracker, tail, Model::unknown, false);
     tracker.invalidate_all();
     state_is(tracker, nose, Model::unknown, false);
+    require(tracker.rearm_retained_rt() == 2, "invalidation lost the last observed RT models");
+    state_is(tracker, nose, Model::enhanced_rt, false);
+    state_is(tracker, tail, Model::enhanced_rt, false);
   }
+}
+
+void retained_rt_rearm_after_aa_wipe() {
+  Tracker tracker;
+  require(tracker.register_source(nose, Model::legacy_rt), "creation RT refused");
+  require(tracker.apply(record({{nose, Kind::draw}})), "creation draw refused");
+  state_is(tracker, nose, Model::legacy_rt, true);
+  tracker.invalidate_all();
+  state_is(tracker, nose, Model::unknown, false);
+  require(tracker.register_source(nose, Model::legacy_rt), "duplicate after wipe refused");
+  state_is(tracker, nose, Model::unknown, false);
+  require(tracker.apply(record({{nose, Kind::draw}})), "draw after wipe refused");
+  state_is(tracker, nose, Model::unknown, false);
+  require(tracker.rearm_retained_rt() == 1, "live allocation did not restore retained RT");
+  state_is(tracker, nose, Model::legacy_rt, false);
+  require(tracker.apply(record({{nose, Kind::draw}})), "draw after rearm refused");
+  state_is(tracker, nose, Model::legacy_rt, true);
+
+  require(tracker.register_source(tail, Model::enhanced_rt), "tail creation RT refused");
+  require(tracker.apply(record({{tail, Kind::enhanced_rt}, {tail, Kind::draw}})), "tail RT+draw refused");
+  require(tracker.apply(record({{tail, Kind::other}})), "explicit leave-RT refused");
+  tracker.invalidate_all();
+  require(tracker.rearm_retained_rt() == 1, "left-RT source was resurrected or nose was not rearmed");
+  state_is(tracker, nose, Model::legacy_rt, false);
+  state_is(tracker, tail, Model::unknown, false);
+
+  const Key replacement{nose.handle, nose.generation + 1};
+  require(tracker.register_source(replacement, Model::unknown), "replacement generation refused");
+  state_is(tracker, replacement, Model::unknown, false);
+  require(tracker.rearm_retained_rt() == 0, "stale generation retained RT leaked");
 }
 
 void recording_bounds() {
@@ -294,6 +327,7 @@ int main() {
   ordering_permutations();
   registration_generations();
   invalidation();
+  retained_rt_rearm_after_aa_wipe();
   recording_bounds();
   interleaved_draw_compression();
   source_bounds();

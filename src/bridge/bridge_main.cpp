@@ -412,8 +412,10 @@ DWORD run_impl() {
     scene_runtime::service();
     const auto scene = native_camera::scene_snapshot();
     const auto output = scene_runtime::snapshot(key);
-    if (scene.stop_sequence != last_stop_sequence)
+    if (scene.stop_sequence != last_stop_sequence) {
       progress.reset();
+      scene_runtime::manager().rearm_source_states();
+    }
     if (now >= next_recovery) {
       const bool eligible = (mask || test_scene) && !failed && !output.failed && scene.pair.state == engine_camera::State::active &&
                             scene.requested_feeds == 2 && !scene.pose_waiting && !scene.view_waiting &&
@@ -422,10 +424,12 @@ DWORD run_impl() {
         native_camera::note_scene_capture_progress(now);
       last_frames = output.frames;
       // Lost GPU-state evidence says nothing about native camera lifetime.
-      // Keep the pair and its resource generations; only observed barriers and
-      // fresh recordings can restore capture. Never erase/recreate cameras here.
-      progress.observe(now, eligible, output.frames, output.capture.source_draws,
-                       std::strcmp(output.capture.tail_status, "unknown_source_state") == 0);
+      // Keep the pair and its resource generations. AA/upscaler switches can
+      // wipe source-state without new RT barriers; rearm retained RT models
+      // so later draws can capture again. Never erase/recreate cameras here.
+      if (progress.observe(now, eligible, output.frames, output.capture.source_draws,
+                           std::strcmp(output.capture.tail_status, "unknown_source_state") == 0))
+        scene_runtime::manager().rearm_source_states();
       next_recovery = now + 250;
     }
     const auto graphics = win::graphics_status();

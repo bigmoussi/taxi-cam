@@ -89,6 +89,11 @@ int main() {
   assert(tracker.state(old_key).model == ss::Model::unknown);
   assert(tracker.register_source(old_key, ss::Model::legacy_rt));
   assert(tracker.state(old_key).model == ss::Model::unknown);  // Same allocation remains invalid.
+  assert(tracker.rearm_retained_rt() == 1);
+  assert(tracker.state(old_key).model == ss::Model::legacy_rt && !tracker.state(old_key).drawn);
+  ss::Recording old_draw;
+  assert(old_draw.append({old_key, ss::Effect::Kind::draw}));
+  assert(tracker.apply(old_draw) && tracker.state(old_key).drawn);
   tracker.unregister_source(old_key);
   assert(tracker.register_source(new_key, ss::Model::legacy_rt));
   ss::Recording recording;

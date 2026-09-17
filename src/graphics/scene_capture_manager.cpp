@@ -215,11 +215,27 @@ bool SceneCaptureManager::may_be_source(ID3D12Resource* resource) const noexcept
   const auto hash = (reinterpret_cast<std::uint64_t>(resource) >> 4) * 0x9e3779b97f4a7c15ull;
   return resource && (source_filter_[(hash >> 6) & 15].load(std::memory_order_acquire) & (1ull << (hash & 63)));
 }
+unsigned SceneCaptureManager::rearm_source_states_locked() noexcept {
+  unsigned restored = 0;
+  for (auto& owner : devices_)
+    if (owner.active && !owner.failed)
+      restored += owner.source_states.rearm_retained_rt();
+  if (restored)
+    stats_.tail_status = "awaiting_ordered_source_state";
+  return restored;
+}
+
 void SceneCaptureManager::begin_source_tracking() noexcept {
   const std::lock_guard lock(mutex_);
   source_tracking_ = true;
   last_tail_us_ = {};
+  rearm_source_states_locked();
   stats_.tail_status = "awaiting_ordered_source_state";
+}
+
+void SceneCaptureManager::rearm_source_states() noexcept {
+  const std::lock_guard lock(mutex_);
+  rearm_source_states_locked();
 }
 void SceneCaptureManager::stop_source_tracking() noexcept {
   const std::lock_guard lock(mutex_);
@@ -239,6 +255,8 @@ void SceneCaptureManager::set_gpu_timing_enabled(bool enabled) noexcept {
 void SceneCaptureManager::set_capture_enabled(bool enabled) noexcept {
   const std::lock_guard lock(mutex_);
   capture_enabled_ = enabled;
+  if (enabled)
+    rearm_source_states_locked();
 }
 bool SceneCaptureManager::register_source_candidate(std::uint64_t key,
                                                     ID3D12Resource* resource,

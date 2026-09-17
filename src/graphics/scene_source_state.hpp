@@ -7,6 +7,9 @@
 namespace taxi_camera::source_state {
 
 enum class Model { unknown, legacy_rt, enhanced_rt, other };
+inline bool render_target_model(Model model) noexcept {
+  return model == Model::legacy_rt || model == Model::enhanced_rt;
+}
 struct Key {
   std::uint64_t handle = 0, generation = 0;
   bool operator==(const Key&) const = default;
@@ -66,11 +69,17 @@ class Tracker {
   bool apply(const Recording& recording) noexcept;
   State state(Key key) const noexcept;
   void invalidate_all() noexcept;
+  // After an unknown-list / invalid-log wipe, restore the last positively
+  // observed RT model for the same generation. Does not infer RT from a draw
+  // and does not revive a source that already left RT. Returns how many
+  // sources were rearmed.
+  unsigned rearm_retained_rt() noexcept;
 
  private:
   struct Slot {
     Key key;
     State state;
+    Model retained_rt = Model::unknown;
   };
   std::array<Slot, capacity> sources_{};
 };
