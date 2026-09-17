@@ -8,6 +8,8 @@ The native validation run includes `tests/app/camera_hotkeys_test.cpp`: Ctrl + S
 
 `tests/app/startup_state_test.cpp` checks first-launch Settings visibility, later tray starts, explicit manual opens, failed state writes and preview isolation using a private fixture directory. `tests/app/camera_status_test.cpp` verifies distinct status reporting for stopped cameras, pending recovery and successfully recovered cameras.
 
+`tests/app/night_boost_migration_test.cpp` checks the one-time 8 EV preference migration in isolated profile files: all supported aircraft, preservation of calibration and unrelated preferences, legacy import, later user edits, migration revisions and failed-write retry. These CPU-only checks do not validate night rendering in MSFS.
+
 `tests/camera/manager_inspection_test.cpp` checks every manager-chain read and reread, field changes and identity refusals. `tests/camera/scene_recovery_test.cpp` covers temporary pair and manager failures followed by guarded cleanup and bounded retry, startup calibration after an early inspection failure, and fatal identity refusal across later failures. These checks do not establish the cause of an individual simulator memory-read failure.
 
 `tests/camera/local_memory_test.cpp` checks exact reads, access guards, bounded metadata caching and fresh endpoint validation. Large-allocation fixtures verify that overlapping suffix observations reuse a fresh endpoint query while retaining every original metadata comparison, independent queries for separate regions, rejection of conflicting observations and the original cache capacity. Query-count assertions are deterministic; diagnostic timings do not establish simulator FPS gains.
@@ -19,6 +21,12 @@ The native validation run includes `tests/app/camera_hotkeys_test.cpp`: Ctrl + S
 The dynamic compatibility checks cover relocated instruction templates, cross-references, PE metadata and static RTTI identity with synthetic images. `tests/camera/camera_contract_test.cpp` exercises the complete generated model and rejection of incomplete or ambiguous evidence. These tests do not establish compatibility with an unobserved simulator build.
 
 `tests/camera/retained_profile_test.cpp` covers empty startup cancellation, pending native operations and preservation of complete or partial owned pairs. `tests/camera/runtime_test.cpp` exercises the production request API on a wrong-host executable, including a queued empty stop followed by an aircraft-session transition. Mixed DLSS render/display sizes retain independent bounds in `tests/camera/view_resize_test.cpp`.
+
+`tests/camera/render_schedule_test.cpp` covers 5–60 activation budgets, simulator cadence limits, uneven update intervals, live rate/feed changes and mandatory closing intervals. Settings, IPC, saved calibration and hidden UI checks include 5, 10 and 15. The shipped unset default is 5; an already-saved 15 remains 15. Existing scene-demand tests retain bounded startup warmup and repeated OFF/ON ownership checks.
+
+`tests/graphics/metadata_batch_bridge_test.cpp` exercises production lookup caching, idle forwarding, fresh PFD recording requirements, lifetime/address reuse and descriptor discovery. Its isolated CPU timing comparison does not establish simulator FPS. `tests/graphics/source_observation_test.cpp` checks combined draw tracking and idle capture suppression while retaining source-state evidence, recorded consumers and source leases. Frame-output and queue-tail tests cover optional GPU timestamps, completion-fence readback, unsubmitted discard and disabling diagnostics with a measurement pending.
+
+The on-demand [performance sampler](../tools/performance/README.md) has separate isolated checks and does not become part of the installed runtime. Live simulator measurements remain a separate acceptance step.
 
 Additional focused checks remain available:
 

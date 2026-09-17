@@ -220,7 +220,7 @@ bool read_fields(win::Settings& settings, const wchar_t** error = nullptr) {
     *error = nullptr;
   bool ok = true;
   const double rate = number(200, settings.camera_rate, ok);
-  if (rate < 15 || rate > 60 || std::floor(rate) != rate)
+  if (rate < kMinimumCameraRate || rate > kMaximumCameraRate || std::floor(rate) != rate)
     ok = false;
   if (ok)
     settings.camera_rate = static_cast<UINT>(rate);
@@ -416,7 +416,7 @@ bool apply(bool save = true) {
   if (!read_fields(settings, &field_error)) {
     notice = field_error ? field_error
              : page == 5 ? L"Guide X must be 0–50%; Y must be 0–100%. Enter finite numbers."
-                         : L"Check the values: rate 15–60, EV −16 to +4, lens 0.05–1.55.";
+                         : L"Check the values: rate 5–60 (min 5), EV −16 to +4, lens 0.05–1.55.";
     InvalidateRect(window, nullptr, FALSE);
     return false;
   }
@@ -754,7 +754,7 @@ void draw_page(HDC dc) {
          264, 446, 530, 30, small, Muted, DT_LEFT | DT_WORDBREAK);
     panel(dc, 244, 511, 766, 102);
     text(dc, L"Camera frame rate", 264, 525, 460, 30, heading);
-    text(dc, L"15–60 fps per camera. Lower rates leave more time for the sim.", 264, 564, 540, 24, small, Muted);
+    text(dc, L"Min 5 fps per camera (range 5–60). This install sets 5.", 264, 564, 540, 24, small, Muted);
     text(dc, L"Cameras and TAXI buttons turn off above 60 knots.", 250, 630, 730, 24, small, Muted);
   } else if (page == 1) {
     constexpr const wchar_t* labels[]{L"Right (m)", L"Up (m)", L"Forward (m)", L"Pitch (deg)", L"Yaw (deg)", L"Lens (rad)"};
@@ -777,7 +777,8 @@ void draw_page(HDC dc) {
     const wchar_t* names[]{L"Daytime exposure", L"Automatic night exposure", L"Maximum night boost", L"Camera frame rate"};
     const wchar_t* descriptions[]{
         L"Exposure compensation in EV. Your calibrated baseline is −8.8.", L"Gradually brighten the camera display as ambient light drops.",
-        L"Additional exposure at night, from 0 to +8 EV.", L"Activation limit for each camera, from 15 to 60 fps."};
+        L"Additional exposure at night, from 0 to +8 EV. Default: +8 EV.",
+        L"Activation limit per camera: min 5 fps, range 5–60. Install default: 5."};
     for (int i = 0; i < 4; ++i) {
       panel(dc, 244, ys[i], 766, 105);
       text(dc, names[i], 264, ys[i] + 12, 515, 29, heading);

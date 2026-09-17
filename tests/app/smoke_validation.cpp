@@ -18,7 +18,13 @@ int wmain(int argc, wchar_t** argv) {
     using namespace taxi_camera::standalone;
     Settings settings;
     require(valid_settings(settings), "Default settings");
-    for (const auto value : {14u, 61u, 0u, UINT32_MAX}) {
+    require(settings.camera_rate == kDefaultCameraRate, "Default camera rate changed");
+    for (unsigned rate = 5; rate <= 60; ++rate) {
+      auto accepted = settings;
+      accepted.camera_rate = rate;
+      require(valid_settings(accepted), "Supported camera rate refused");
+    }
+    for (const auto value : {4u, 61u, 0u, UINT32_MAX}) {
       auto bad = settings;
       bad.camera_rate = value;
       require(!valid_settings(bad), "Invalid rate admitted");
@@ -62,6 +68,14 @@ int wmain(int argc, wchar_t** argv) {
     require(reader.data()->settings.profile_request == 17 && reader.data()->settings.aircraft_session_epoch == 23,
             "Profile retry and flight scope exchanged");
     reader.unlock();
+    for (const auto rate : {5u, 10u}) {
+      require(owner.lock(100), "Lock low-rate mailbox");
+      owner.data()->settings.camera_rate = rate;
+      owner.unlock();
+      require(reader.lock(100), "Read low-rate mailbox");
+      require(reader.data()->settings.camera_rate == rate && valid_settings(reader.data()->settings), "Low-rate IPC exchange");
+      reader.unlock();
+    }
     require(owner.lock(100), "Mutate test version");
     owner.data()->version = 4;
     owner.unlock();
@@ -103,6 +117,22 @@ int wmain(int argc, wchar_t** argv) {
     saved.camera_rate = 999;
     require(!save_settings(saved), "Reject invalid save");
     require(load_settings(loaded, install) && loaded.camera_rate == 60, "Invalid save must preserve previous settings");
+    for (const auto rate : {5u, 10u}) {
+      saved.camera_rate = rate;
+      require(save_settings(saved), "Save lower camera budget");
+      require(load_settings(loaded, install) && loaded.camera_rate == rate && loaded.mounts == saved.mounts &&
+                  loaded.nose_dot == saved.nose_dot && loaded.exposure == saved.exposure,
+              "Low-rate persistence must retain calibration and display settings");
+    }
+    saved.camera_rate = 15;
+    require(save_settings(saved), "Save established 15 fps preference");
+    require(load_settings(loaded, install) && loaded.camera_rate == 15, "Saved 15 fps is not rewritten to the new shipped default");
+    const auto profile_path = settings_path(saved);
+    require(WritePrivateProfileStringW(L"display", L"camera_rate", nullptr, profile_path.c_str()) != FALSE,
+            "Remove camera_rate key from isolated profile");
+    WritePrivateProfileStringW(nullptr, nullptr, nullptr, profile_path.c_str());
+    require(load_settings(loaded, install) && loaded.camera_rate == kDefaultCameraRate && loaded.mounts == saved.mounts,
+            "Missing camera_rate key uses the shipped default without dropping calibration");
     // Exercise the actual rename migration with process-local environment paths.
     const auto migration = settings_override + L"\\migration";
     require(CreateDirectoryW(migration.c_str(), nullptr) != FALSE, "Create isolated migration directory");

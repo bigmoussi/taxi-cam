@@ -4,7 +4,9 @@
 #include <memory>
 #include <mutex>
 #include <tuple>
+#include <type_traits>
 #include <unordered_map>
+#include <utility>
 #include "../graphics/calibration_d3d12.hpp"
 #include "../graphics/d3d12_command_list9.hpp"
 #include "../graphics/metadata_batch_cache.hpp"
@@ -52,7 +54,8 @@ struct View {
 };
 struct List : Metadata {
   ID3D12GraphicsCommandList* native{};
-  std::uint64_t recording = 1;
+  std::atomic<std::uint64_t> recording{1};
+  std::atomic<std::uint64_t> observation_epoch{};
   PfdGraphicsState graphics;
   std::array<View, 8> targets{};
   std::array<View, 2> pending_pfds{};
@@ -112,6 +115,13 @@ class Lifetime final : public IUnknown {
 };
 struct Registry {
   std::recursive_mutex mutex;
+  // Only demand transitions and publication of a real Reset/new-list proof
+  // take this lock. Ordinary setters and metadata callbacks never take it.
+  std::mutex observation_mutex;
+  std::atomic<std::uint64_t> observation_epoch{1};  // Odd: observing; even: idle.
+  std::atomic<bool> diagnostics_enabled{};
+  std::atomic<std::uint64_t> list_lookup_calls{}, list_cache_hits{}, list_registry_lookups{};
+  std::atomic<std::uint64_t> idle_state_bypasses{}, idle_callback_bypasses{}, observation_invalidations{};
   ID3D12Device* device{};
   std::uint64_t key{}, next_id = 0;
   UINT rtv_stride{}, dsv_stride{};
@@ -152,6 +162,21 @@ struct Registry {
 Registry& registry() {
   static auto* r = new Registry;
   return *r;
+}
+bool observation_enabled() noexcept {
+  return (registry().observation_epoch.load(std::memory_order_acquire) & 1u) != 0;
+}
+bool recording_observed(const List& list) noexcept {
+  const auto epoch = registry().observation_epoch.load(std::memory_order_acquire);
+  return (epoch & 1u) && list.observation_epoch.load(std::memory_order_acquire) == epoch;
+}
+bool idle_callback() noexcept {
+  auto& r = registry();
+  if (observation_enabled())
+    return false;
+  if (r.diagnostics_enabled.load(std::memory_order_relaxed))
+    r.idle_callback_bypasses.fetch_add(1, std::memory_order_relaxed);
+  return true;
 }
 constexpr std::array<DXGI_FORMAT, 4> TypedFormats{DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, DXGI_FORMAT_B8G8R8A8_UNORM,
                                                   DXGI_FORMAT_B8G8R8A8_UNORM_SRGB};
@@ -328,21 +353,74 @@ std::shared_ptr<Resource> resource(ID3D12Resource* p) {
 }
 #ifdef TAXI_METADATA_BATCH_VALIDATION
 thread_local std::uint64_t metadata_lookup_calls{};
+thread_local std::uint64_t registry_lookup_calls{};
+thread_local bool bypass_known_list_cache{};
 #endif
+// A bounded weak cache avoids keeping metadata, descriptor heaps or resources
+// alive after registry cleanup. The retained object identity and recording
+// must still match; retirement and address reuse never borrow another list's
+// proof. Recording calls on one D3D12 list remain caller-serialized as before.
+struct KnownListCache {
+  struct Entry {
+    ID3D12GraphicsCommandList* native{};
+    std::uint64_t id{}, recording{};
+    std::weak_ptr<List> item;
+  };
+  std::array<Entry, 8> entries{};
+  unsigned next{};
+  std::shared_ptr<List> find(ID3D12GraphicsCommandList* native) noexcept {
+    for (auto& entry : entries)
+      if (entry.native == native) {
+        auto item = entry.item.lock();
+        if (item && item->alive.load(std::memory_order_acquire) && item->native == native && item->id == entry.id &&
+            item->recording.load(std::memory_order_acquire) == entry.recording)
+          return item;
+        entry = {};
+      }
+    return {};
+  }
+  void remember(const std::shared_ptr<List>& item) noexcept {
+    if (item)
+      entries[next++ % entries.size()] = {item->native, item->id, item->recording.load(std::memory_order_acquire), item};
+  }
+};
+thread_local KnownListCache known_lists;
 std::shared_ptr<List> find_list(ID3D12GraphicsCommandList* p) {
 #ifdef TAXI_METADATA_BATCH_VALIDATION
   ++metadata_lookup_calls;
 #endif
   auto& r = registry();
+  const bool diagnostics = r.diagnostics_enabled.load(std::memory_order_relaxed);
+  if (diagnostics)
+    r.list_lookup_calls.fetch_add(1, std::memory_order_relaxed);
+#ifdef TAXI_METADATA_BATCH_VALIDATION
+  if (!bypass_known_list_cache)
+#endif
+    if (auto item = known_lists.find(p)) {
+      if (diagnostics)
+        r.list_cache_hits.fetch_add(1, std::memory_order_relaxed);
+      return item;
+    }
+#ifdef TAXI_METADATA_BATCH_VALIDATION
+  ++registry_lookup_calls;
+#endif
+  if (diagnostics)
+    r.list_registry_lookups.fetch_add(1, std::memory_order_relaxed);
   const std::lock_guard lock(r.mutex);
   const auto it = r.lists.find(p);
-  return it != r.lists.end() && it->second->alive ? it->second : nullptr;
+  auto item = it != r.lists.end() && it->second->alive ? it->second : nullptr;
+#ifdef TAXI_METADATA_BATCH_VALIDATION
+  if (!bypass_known_list_cache)
+#endif
+    known_lists.remember(item);
+  return item;
 }
 thread_local MetadataBatchCache<List, ID3D12GraphicsCommandList*> metadata_batches;
 void metadata_begin(void*, ID3D12GraphicsCommandList* native, std::uint64_t id) noexcept {
   const OwnedWork guard;
   std::shared_ptr<List> item;
-  observe_safely([&] { item = find_list(native); });
+  if (observation_enabled())
+    observe_safely([&] { item = find_list(native); });
   metadata_batches.begin(native, id, std::move(item));
 }
 void metadata_end(void*, ID3D12GraphicsCommandList*, std::uint64_t) noexcept {
@@ -359,11 +437,15 @@ List* metadata_list(ID3D12GraphicsCommandList* native, std::uint64_t id, std::sh
 void flush_pfd(ID3D12GraphicsCommandList*, std::uint64_t, bool = true) noexcept;
 void copy_pending_pfd(ID3D12GraphicsCommandList*, std::uint64_t, ID3D12Resource*, ID3D12GraphicsCommandList7* = nullptr) noexcept;
 void before_legacy(void*, ID3D12GraphicsCommandList* list, std::uint64_t id, const D3D12_RESOURCE_TRANSITION_BARRIER& b) noexcept {
+  if (idle_callback())
+    return;
   const OwnedWork guard;
   copy_pending_pfd(list, id, b.pResource);
   runtime::manager().record_render_target_before_transition(list, b.pResource, true, id);
 }
 void before_enhanced(void*, ID3D12GraphicsCommandList7* list, std::uint64_t id, const D3D12_TEXTURE_BARRIER& b) noexcept {
+  if (idle_callback())
+    return;
   const OwnedWork guard;
   copy_pending_pfd(list, id, b.pResource, list);
   runtime::manager().record_render_target_before_enhanced_transition(list, b.pResource, true, id);
@@ -393,6 +475,12 @@ void observe_legacy(void*,
                     std::uint64_t id,
                     const D3D12_RESOURCE_BARRIER& b,
                     std::uint32_t scope) noexcept {
+  if (idle_callback()) {
+    // The source layout model must remain continuous even when no capture is
+    // requested: persistent born-RT sources may never emit another RT entry.
+    runtime::manager().observe_source_legacy(list, id, b);
+    return;
+  }
   const OwnedWork guard;
   std::shared_ptr<List> fallback;
   auto* item = b.Type == D3D12_RESOURCE_BARRIER_TYPE_TRANSITION ? metadata_list(list, id, fallback) : nullptr;
@@ -430,6 +518,10 @@ void observe_enhanced(void*,
                       std::uint64_t id,
                       const D3D12_TEXTURE_BARRIER& b,
                       std::uint32_t scope) noexcept {
+  if (idle_callback()) {
+    runtime::manager().observe_source_enhanced(list, id, b);
+    return;
+  }
   const OwnedWork guard;
   std::shared_ptr<List> fallback;
   auto* item = metadata_list(list, id, fallback);
@@ -468,6 +560,8 @@ void copy_resource(void*,
                    ID3D12Resource* dest,
                    ID3D12Resource* src,
                    bool allowed) noexcept {
+  if (idle_callback())
+    return;
   const OwnedWork guard;
   runtime::manager().record_copy_after_forward(list, src, dest, allowed, id);
 }
@@ -481,6 +575,8 @@ void copy_texture(void*,
                   const D3D12_TEXTURE_COPY_LOCATION* src,
                   const D3D12_BOX* box,
                   bool allowed) noexcept {
+  if (idle_callback())
+    return;
   const OwnedWork guard;
   runtime::manager().record_texture_copy_after_forward(list, dest, x, y, z, src, box, allowed, id);
 }
@@ -489,14 +585,16 @@ void invalidate(void*, ID3D12GraphicsCommandList* native, std::uint64_t id, std:
   auto list = find_list(native);
   if (!list || list->id != id)
     return;
-  if (reasons & ~boundary::InvalidationSplitBarrier)
-    list->copy_proof.invalidate();
-  if (reasons == boundary::InvalidationPassBegin)
-    flush_pfd(native, id);
-  else
-    list->pending_pfds = {};
-  list->pending_rt = {};
-  list->pfd_dirty = false;
+  if (recording_observed(*list)) {
+    if (reasons & ~boundary::InvalidationSplitBarrier)
+      list->copy_proof.invalidate();
+    if (reasons == boundary::InvalidationPassBegin)
+      flush_pfd(native, id);
+    else
+      list->pending_pfds = {};
+    list->pending_rt = {};
+    list->pfd_dirty = false;
+  }
   const bool scoped =
       (reasons & ~(boundary::InvalidationPassBegin | boundary::InvalidationSplitBarrier | boundary::InvalidationAliasOrDiscard)) == 0;
   if (scoped && list->count) {
@@ -523,28 +621,37 @@ void after_draw(void*, ID3D12GraphicsCommandList* native, std::uint64_t id, bool
   if (!registry().ready || !list || list->id != id || !list->ready)
     return;
   auto& r = registry();
-  ++r.draws;
-  std::array<ID3D12Resource*, 8> sources{};
-  std::array<std::uint64_t, 8> ids{};
+  const bool observed = recording_observed(*list);
+  // Idle keeps only candidate activity/source proof. In particular ordinary
+  // draws without any tracked RTV avoid even the global diagnostic counter.
+  if (!observed && !list->count)
+    return;
+  if (observed)
+    ++r.draws;
+  std::array<ID3D12Resource*, 8> sources;
+  std::array<std::uint64_t, 8> ids;
   UINT count = 0;
   for (UINT i = 0; i < list->count; ++i) {
     const auto& target = list->targets[i];
     if (target.resource && target.resource->alive && !target.mip) {
-      if (allowed)
-        list->copy_proof.after_draw({reinterpret_cast<std::uint64_t>(target.resource->native), target.resource->id});
-      else
-        list->copy_proof.invalidate();
-      ++target.resource->draws;
-      const auto selected_mask = r.selected_mask.load(std::memory_order_relaxed);
-      if (((selected_mask & 1) && target.resource->id == r.selected_ids[0].load(std::memory_order_relaxed)) ||
-          ((selected_mask & 2) && target.resource->id == r.selected_ids[1].load(std::memory_order_relaxed)))
-        ++r.selected_draws;
+      target.resource->draws.fetch_add(1, std::memory_order_relaxed);
+      if (observed) {
+        if (allowed)
+          list->copy_proof.after_draw({reinterpret_cast<std::uint64_t>(target.resource->native), target.resource->id});
+        else
+          list->copy_proof.invalidate();
+        const auto selected_mask = r.selected_mask.load(std::memory_order_relaxed);
+        if (((selected_mask & 1) && target.resource->id == r.selected_ids[0].load(std::memory_order_relaxed)) ||
+            ((selected_mask & 2) && target.resource->id == r.selected_ids[1].load(std::memory_order_relaxed)))
+          ++r.selected_draws;
+      }
       sources[count] = target.resource->native;
       ids[count++] = target.resource->id;
     }
   }
-  runtime::manager().stage_source_draw(native, id, count, sources.data(), ids.data());
-  runtime::manager().after_source_draw(native, id, allowed);
+  runtime::manager().observe_source_draw_after(native, id, count, sources.data(), ids.data(), allowed);
+  if (!observed)
+    return;
   // Mark damage only. Compositing between individual HTML/glyph draws both
   // multiplies fill cost and unnecessarily disturbs the application's state.
   list->pfd_dirty = allowed && list->count == 1 && list->depth_known;
@@ -552,8 +659,10 @@ void after_draw(void*, ID3D12GraphicsCommandList* native, std::uint64_t id, bool
 }
 // Stage only actual typed RTVs established by a nonzero native draw.
 void stage_pfd(ID3D12GraphicsCommandList* native, std::uint64_t id) noexcept {
+  if (!observation_enabled())
+    return;
   auto list = find_list(native);
-  if (!registry().ready || !list || list->id != id || !list->ready || !list->pfd_dirty)
+  if (!registry().ready || !list || list->id != id || !list->ready || !list->pfd_dirty || !recording_observed(*list))
     return;
   list->pfd_dirty = false;
   if (list->count != 1 || !list->depth_known)
@@ -591,8 +700,10 @@ void stage_pfd(ID3D12GraphicsCommandList* native, std::uint64_t id) noexcept {
     }
 }
 void drain_pfds(ID3D12GraphicsCommandList* native, std::uint64_t id, bool recording_end = false) noexcept {
+  if (!observation_enabled())
+    return;
   auto list = find_list(native);
-  if (!registry().ready || !list || list->id != id || !list->ready)
+  if (!registry().ready || !list || list->id != id || !list->ready || !recording_observed(*list))
     return;
   bool pending = false;
   for (unsigned side = 0; side < 2; ++side)
@@ -686,10 +797,10 @@ void flush_pfd(ID3D12GraphicsCommandList* native, std::uint64_t id, bool draw_fa
     drain_pfds(native, id);
 }
 UINT selected_legacy_targets(void*, ID3D12GraphicsCommandList* native, std::uint64_t id, ID3D12Resource** targets, UINT capacity) noexcept {
-  if (!targets || capacity < 2 || !registry().ready)
+  if (!targets || capacity < 2 || !registry().ready || !observation_enabled())
     return 0;
   const auto list = find_list(native);
-  if (!list || list->id != id || !list->ready)
+  if (!list || list->id != id || !list->ready || !recording_observed(*list))
     return 0;
   auto& r = registry();
   const std::lock_guard lock(r.mutex);
@@ -708,11 +819,12 @@ void copy_pending_pfd(ID3D12GraphicsCommandList* native,
                       std::uint64_t id,
                       ID3D12Resource* target,
                       ID3D12GraphicsCommandList7* enhanced) noexcept {
-  if (!maybe_selected(target))
+  if (!observation_enabled() || !maybe_selected(target))
     return;
   flush_pfd(native, id, false);
   auto list = find_list(native);
-  if (!registry().ready || !list || list->id != id || !list->ready || !boundary::recording_allows_injection(native, id))
+  if (!registry().ready || !list || list->id != id || !list->ready || !recording_observed(*list) ||
+      !boundary::recording_allows_injection(native, id))
     return;
   auto& r = registry();
   View pending;
@@ -805,6 +917,7 @@ std::shared_ptr<List> ensure_list(ID3D12GraphicsCommandList* native, bool observ
   if (auto existing = find_list(native))
     return existing;
   auto& r = registry();
+  const std::lock_guard observation_lock(r.observation_mutex);
   if (!r.ready || native->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT || !same_native_device(native, r.device))
     return {};
   std::shared_ptr<List> item;
@@ -818,6 +931,7 @@ std::shared_ptr<List> ensure_list(ID3D12GraphicsCommandList* native, bool observ
     item->native = native;
     item->id = ++r.next_id;
     item->ready = observed;
+    item->observation_epoch = observed ? r.observation_epoch.load(std::memory_order_acquire) : 0;
     item->graphics.reset(item->recording, observed);
     item->queries.reset(observed);
     item->copy_proof.reset(observed);
@@ -1129,10 +1243,15 @@ HRESULT STDMETHODCALLTYPE reset(ID3D12GraphicsCommandList* native, ID3D12Command
   if (owned_depth)
     return list_reset.forward<F>()(native, allocator, pso);
   const OwnedWork guard;
+  const auto observation_epoch = registry().observation_epoch.load(std::memory_order_acquire);
   std::shared_ptr<List> item;
   observe_safely([&] { item = ensure_list(native); });
   const auto hr = list_reset.forward<F>()(native, allocator, pso);
   if (item) {
+    // Demand cannot change between qualifying this native Reset and publishing
+    // its PFD-state proof. Source state remains continuously observed separately.
+    const std::lock_guard observation_lock(registry().observation_mutex);
+    item->observation_epoch = observation_epoch == registry().observation_epoch.load(std::memory_order_acquire) ? observation_epoch : 0;
     item->pfd_dirty = false;
     item->pending_pfds = {};
     item->pending_rt = {};
@@ -1287,7 +1406,7 @@ struct Targets {
           relevant = true;
       }
     }
-    if (!snapshots || !relevant)
+    if (!snapshots || !relevant || !recording_observed(l))
       return;
     // Non-shader-visible input descriptors may be reused immediately after the
     // native OM call. Snapshot their contents BEFORE forwarding, never retain
@@ -1415,6 +1534,20 @@ struct StateHook<Slot, void (STDMETHODCALLTYPE C::*)(Args...), Action> {
     if (owned_depth || !registry().ready) {
       forward(native, args...);
       return;
+    }
+    // Target bindings still feed aircraft autodetection, and ClearState must
+    // clear those bindings. Other state can be omitted only because an epoch
+    // mismatch forbids injection until a real, fully observed native Reset.
+    if constexpr (!std::is_same_v<Action, Targets> && !std::is_same_v<Action, ClearState> && !std::is_same_v<Action, Unsupported> &&
+                  !std::is_same_v<Action, Predication>) {
+      if (!observation_enabled()) {
+        auto& r = registry();
+        if (r.diagnostics_enabled.load(std::memory_order_relaxed))
+          r.idle_state_bypasses.fetch_add(1, std::memory_order_relaxed);
+        const OwnedWork guard;
+        forward(native, args...);
+        return;
+      }
     }
     // A runtime implementation can re-enter a patched setter while forwarding
     // the caller's operation. Keep one guard across forwarding and observation,
@@ -1626,6 +1759,28 @@ bool initialize_graphics() noexcept {
   reported->Release();
   return ok;
 }
+bool graphics_ready() noexcept {
+  return registry().ready.load(std::memory_order_acquire);
+}
+void set_graphics_observation_demand(bool enabled) noexcept {
+  auto& r = registry();
+  if (observation_enabled() == enabled)
+    return;
+  const std::lock_guard lock(r.observation_mutex);
+  const auto previous = r.observation_epoch.load(std::memory_order_acquire);
+  if (!previous || bool(previous & 1u) == enabled)
+    return;
+  // Suppress new capture insertion without discarding the continuous layout
+  // model or previously recorded replay/consumer obligations. The epoch below
+  // invalidates only PFD state omitted while idle, until a real native Reset.
+  runtime::manager().set_capture_enabled(enabled);
+  r.observation_epoch.store(previous == UINT64_MAX ? 0 : previous + 1, std::memory_order_release);
+  if (!enabled)
+    r.observation_invalidations.fetch_add(1, std::memory_order_relaxed);
+}
+void set_graphics_diagnostics_enabled(bool enabled) noexcept {
+  registry().diagnostics_enabled.store(enabled, std::memory_order_relaxed);
+}
 GraphicsStatus graphics_status() noexcept {
   auto& r = registry();
   const std::lock_guard lock(r.mutex);
@@ -1667,11 +1822,17 @@ GraphicsStatus graphics_status() noexcept {
   result.close_forward_refused = r.close_forward_refused.load();
   result.dynamic_depth_bias_calls = r.dynamic_depth_bias_calls.load();
   result.dynamic_strip_cut_calls = r.dynamic_strip_cut_calls.load();
+  result.observing = observation_enabled();
+  result.observation_epoch = r.observation_epoch.load(std::memory_order_relaxed);
+  result.observation_invalidations = r.observation_invalidations.load(std::memory_order_relaxed);
+  result.list_lookup_calls = r.list_lookup_calls.load(std::memory_order_relaxed);
+  result.list_cache_hits = r.list_cache_hits.load(std::memory_order_relaxed);
+  result.list_registry_lookups = r.list_registry_lookups.load(std::memory_order_relaxed);
+  result.idle_state_bypasses = r.idle_state_bypasses.load(std::memory_order_relaxed);
+  result.idle_callback_bypasses = r.idle_callback_bypasses.load(std::memory_order_relaxed);
   return result;
 }
-std::vector<PfdTargetObservation> pfd_inventory() {
-  auto& r = registry();
-  const std::lock_guard lock(r.mutex);
+static std::vector<PfdTargetObservation> pfd_inventory_locked(Registry& r) {
   std::vector<PfdTargetObservation> result;
   for (const auto& [p, item] : r.resources) {
     (void)p;
@@ -1680,6 +1841,17 @@ std::vector<PfdTargetObservation> pfd_inventory() {
       result.push_back({item->id, item->draws, static_cast<UINT>(item->desc.Width), item->desc.Height, item->desc.MipLevels,
                         static_cast<UINT>(item->desc.Format)});
   }
+  return result;
+}
+std::vector<PfdTargetObservation> pfd_inventory() {
+  std::vector<PfdTargetObservation> result;
+  {
+    auto& r = registry();
+    const std::lock_guard lock(r.mutex);
+    result = pfd_inventory_locked(r);
+  }
+  // The numeric snapshot owns no native references; UI ranking does not need
+  // the registry lock. Never truncate the inventory used by autodetection.
   std::sort(result.begin(), result.end(), [](const auto& a, const auto& b) { return a.draws > b.draws; });
   return result;
 }
@@ -1761,7 +1933,9 @@ void discover_pfds(std::uint64_t now) noexcept {
     if (now && (ranked_group || !r.routes.targets[0] || !r.routes.targets[1])) {
       // Take the full inventory after retirement cleanup, under the same
       // registry lock used for detector configuration and target assignment.
-      auto inventory = pfd_inventory();
+      // The detector sorts by incarnation itself. Avoid the unrelated UI
+      // draw-count sort while holding the registry lock.
+      auto inventory = pfd_inventory_locked(r);
       const auto& detection = r.detector.observe(inventory.data(), inventory.size(), now, r.pfd_inventory_complete.load());
       if (detection.valid)
         r.routes.adopt_detected(detection.targets);

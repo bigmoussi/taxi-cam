@@ -230,7 +230,15 @@ void SceneCaptureManager::stop_source_tracking() noexcept {
 }
 void SceneCaptureManager::set_source_rate(std::uint32_t rate) noexcept {
   const std::lock_guard lock(mutex_);
-  source_rate_ = rate < 15 ? 15 : rate > 60 ? 60 : rate;
+  source_rate_ = rate < kMinimumCameraRate ? kMinimumCameraRate : rate > kMaximumCameraRate ? kMaximumCameraRate : rate;
+}
+void SceneCaptureManager::set_gpu_timing_enabled(bool enabled) noexcept {
+  const std::lock_guard lock(mutex_);
+  gpu_timing_enabled_ = enabled;
+}
+void SceneCaptureManager::set_capture_enabled(bool enabled) noexcept {
+  const std::lock_guard lock(mutex_);
+  capture_enabled_ = enabled;
 }
 bool SceneCaptureManager::register_source_candidate(std::uint64_t key,
                                                     ID3D12Resource* resource,
@@ -317,26 +325,48 @@ void SceneCaptureManager::after_source_draw(ID3D12GraphicsCommandList* native, s
   auto* item = list(native);
   if (!item || item->object_generation != generation)
     return;
-  for (UINT n = 0; n < stage.count; ++n) {
-    const auto& key = stage.keys[n];
-    const auto* source = source_candidate(reinterpret_cast<ID3D12Resource*>(key.handle));
-    if (!source || source->generation != key.generation || source->device_key != item->device_key)
-      continue;
-    item->source_touched = true;
-    if (!allowed) {
-      ++stats_.invalid_draws;
-      item->source_effects.invalidate();
-    } else {
-      item->source_effects.append({key, source_state::Effect::Kind::draw});
-      // The exact application Draw has completed but has not returned to its
-      // caller: its actual bound RTV source is still a live resource argument.
-      // Keep one reference per recording, never a registry-lifetime reference.
-      if (source_tracking_ && !retain_source_lease(item->source_leases, item->source_lease_count, key, source->native)) {
-        ++stats_.source_lease_failures;
-        item->source_effects.invalidate();
-      }
-      ++stats_.source_draws;
+  for (UINT n = 0; n < stage.count; ++n)
+    apply_source_draw(*item, stage.keys[n], allowed);
+}
+void SceneCaptureManager::observe_source_draw_after(ID3D12GraphicsCommandList* native,
+                                                    std::uint64_t generation,
+                                                    UINT count,
+                                                    ID3D12Resource* const* targets,
+                                                    const std::uint64_t* generations,
+                                                    bool allowed) noexcept {
+  source_stage = {};
+  if (!native || !generation || !count || count > 8 || !targets || !generations)
+    return;
+  bool candidate_present = false;
+  for (UINT n = 0; n < count; ++n)
+    candidate_present |= may_be_source(targets[n]);
+  if (!candidate_present)
+    return;
+  const std::lock_guard lock(mutex_);
+  auto* item = list(native);
+  if (!item || item->object_generation != generation)
+    return;
+  for (UINT n = 0; n < count; ++n)
+    apply_source_draw(*item, {reinterpret_cast<std::uint64_t>(targets[n]), generations[n]}, allowed);
+}
+void SceneCaptureManager::apply_source_draw(List& item, source_state::Key key, bool allowed) noexcept {
+  const auto* source = source_candidate(reinterpret_cast<ID3D12Resource*>(key.handle));
+  if (!source || source->generation != key.generation || source->device_key != item.device_key)
+    return;
+  item.source_touched = true;
+  if (!allowed) {
+    ++stats_.invalid_draws;
+    item.source_effects.invalidate();
+  } else {
+    item.source_effects.append({key, source_state::Effect::Kind::draw});
+    // The exact application Draw has completed but has not returned to its
+    // caller: its actual bound RTV source is still a live resource argument.
+    // Keep one reference per recording, never a registry-lifetime reference.
+    if (source_tracking_ && !retain_source_lease(item.source_leases, item.source_lease_count, key, source->native)) {
+      ++stats_.source_lease_failures;
+      item.source_effects.invalidate();
     }
+    ++stats_.source_draws;
   }
 }
 void SceneCaptureManager::invalidate_source_recording(ID3D12GraphicsCommandList* native,
@@ -593,6 +623,10 @@ bool SceneCaptureManager::capture_source(List& item,
     if (copy_refusal)
       *copy_refusal = reason;
   };
+  if (!capture_enabled_) {
+    refusal("capture_disabled");
+    return false;
+  }
   refusal("packet_pool_or_memory_budget");
   const auto source_desc = source->GetDesc();
   if (diagnostic) {
@@ -745,7 +779,10 @@ bool SceneCaptureManager::prepare_tail(Packet& packet, Device& owner) noexcept {
   }
   // An unassigned packet has completed its prior producer and all consumers,
   // or its closed private recording was discarded without submission.
-  return SUCCEEDED(packet.tail_allocator->Reset()) && SUCCEEDED(packet.tail_list->Reset(packet.tail_allocator, nullptr));
+  if (FAILED(packet.tail_allocator->Reset()) || FAILED(packet.tail_list->Reset(packet.tail_allocator, nullptr)))
+    return false;
+  packet.tail_timing.discard_unsubmitted();
+  return true;
 }
 void SceneCaptureManager::record_queue_tail(Transaction& pending) noexcept {
   auto& owner = *pending.device;
@@ -807,15 +844,26 @@ void SceneCaptureManager::record_queue_tail(Transaction& pending) noexcept {
       List private_recording;
       private_recording.native = packet.tail_list;
       private_recording.device_key = owner.key;
+      const bool timed = gpu_timing_enabled_ && packet.tail_timing.begin(owner.native, pending.queue, packet.tail_list);
+      if (timed)
+        packet.tail_timing.start(0);
       const bool enhanced = state.model == source_state::Model::enhanced_rt;
       const bool recorded =
           (!enhanced || packet.tail_list7) && capture_source(private_recording, owner, match, leased_source, true,
                                                              enhanced ? packet.tail_list7 : nullptr, false, nullptr, &packet);
+      if (timed) {
+        packet.tail_timing.end(0);
+        packet.tail_timing.resolve();
+      }
       const auto closed = packet.tail_list->Close();
-      if (!recorded)
+      if (!recorded) {
+        // No Execute can see this private list. prepare_tail resets it before
+        // reuse; retain query objects until that successful Reset.
         continue;
+      }
       packet.retired = true;  // Private list is submitted once and never replayed.
       if (FAILED(closed)) {
+        packet.tail_timing.abandon();
         quarantine(packet);
         stats_.tail_status = "tail_close_failed";
         break;
@@ -827,6 +875,8 @@ void SceneCaptureManager::record_queue_tail(Transaction& pending) noexcept {
       // native queue wrapper bypasses nested observation from its after phase.
       ID3D12CommandList* executable = packet.tail_list;
       pending.queue->ExecuteCommandLists(1, &executable);
+      if (timed)
+        pending.timed_tail_packets |= private_recording.packets;
       ++stats_.tail_submissions;
       ++stats_.tail_captures;
       last_tail_us_[match.feed] = now;
@@ -991,7 +1041,7 @@ bool SceneCaptureManager::finish_transaction(std::uint64_t receipt, bool refused
     const std::lock_guard lock(mutex_);
     auto& pending = transaction_;
     if (pending.id == receipt && pending.device) {
-      if (!refused && pending.source_work && source_tracking_)
+      if (!refused && pending.source_work && source_tracking_ && capture_enabled_)
         record_queue_tail(pending);
       // Signal even a refused/aborted receipt to retire already forwarded work;
       // this is ordering evidence, never publication of its capture contents.
@@ -1006,10 +1056,14 @@ bool SceneCaptureManager::finish_transaction(std::uint64_t receipt, bool refused
         auto& packet = packets_[index];
         --packet.in_flight;
         if (success && !refused) {
+          if (pending.timed_tail_packets & (1u << index))
+            packet.tail_timing.submitted(pending.device->timeline, pending.value);
           packet.producer = pending.queue;
           packet.order = {pending.value, pending.packet_positions[index]};
           ++packet.submitted;
         } else {
+          if (pending.timed_tail_packets & (1u << index))
+            packet.tail_timing.abandon();
           quarantine(packet);
         }
       }
@@ -1074,6 +1128,7 @@ void SceneCaptureManager::collect() noexcept {
     --stats_.source_candidates;
   }
   for (auto& packet : packets_) {
+    packet.tail_timing.poll();
     if (!packet.assigned || packet.quarantined)
       continue;
     if (packet.gpu.state() == SceneCaptureD3D12::State::consuming && packet.gpu.recycle()) {
@@ -1151,7 +1206,10 @@ bool SceneCaptureManager::discard_frame(std::uint64_t token) noexcept {
 
 SceneCaptureManager::Statistics SceneCaptureManager::statistics() const noexcept {
   const std::lock_guard lock(mutex_);
-  return stats_;
+  auto result = stats_;
+  for (const auto& packet : packets_)
+    result.capture_copy_gpu.merge(packet.tail_timing.statistics()[0]);
+  return result;
 }
 engine_hook::queue_submit::Callbacks SceneCaptureManager::callbacks() noexcept {
   return {this,

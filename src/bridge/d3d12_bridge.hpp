@@ -5,6 +5,8 @@
 namespace taxi_camera::standalone {
 struct GraphicsStatus {
   bool ready{};
+  // draws counts fully observed recordings; idle retains only per-resource
+  // activity required by the complete PFD detector inventory.
   std::uint64_t device{}, resources{}, lists{}, draws{}, hook_failures{}, clear_states{};
   const char* error = "not_started";
   std::uint64_t selected_draws{}, selected_rt_metadata{}, selected_rt_callbacks{}, selected_pending_matches{};
@@ -19,12 +21,24 @@ struct GraphicsStatus {
   std::uint64_t dynamic_depth_bias_calls{}, dynamic_strip_cut_calls{}, sample_position_calls{};
   std::uint64_t recording_end_draws{}, shader_deferred{}, close_forward_refused{};
   const char* target_detection = "warming_up";
+  bool observing{};
+  std::uint64_t observation_epoch{}, observation_invalidations{};
+  // Opt-in hot-path diagnostics: misses equal actual registry acquisitions.
+  std::uint64_t list_lookup_calls{}, list_cache_hits{}, list_registry_lookups{};
+  std::uint64_t idle_state_bypasses{}, idle_callback_bypasses{};
 };
 bool initialize_graphics() noexcept;
 // Resolve a reported device's optional COM proxy chain before native hooks or
 // owned GPU work. Isolated validation supplies a hardware/WARP device; this
 // never calls the simulator or telemetry.
 bool initialize_graphics(IUnknown*) noexcept;
+bool graphics_ready() noexcept;
+// Include bounded warmup, rendering and calibration demand. Idle keeps native
+// resource/descriptor lifetime and display activity discovery, plus retirement
+// of previously recorded/submitted work. Source models stay continuously
+// observed. PFD state omitted while idle needs real successful Reset to resume.
+void set_graphics_observation_demand(bool enabled) noexcept;
+void set_graphics_diagnostics_enabled(bool enabled) noexcept;
 GraphicsStatus graphics_status() noexcept;
 std::vector<PfdTargetObservation> pfd_inventory();
 bool assign_targets(std::uint64_t left, std::uint64_t right) noexcept;

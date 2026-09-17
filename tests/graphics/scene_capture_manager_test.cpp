@@ -138,8 +138,12 @@ float4 ps_main() : SV_Target { return Color; }
     state.RTVFormats[0] = format;
     check(device->CreateGraphicsPipelineState(&state, IID_PPV_ARGS(pipeline.put())), "Create draw fixture pipeline");
   }
-  void record(ID3D12GraphicsCommandList7* list, D3D12_CPU_DESCRIPTOR_HANDLE rtv, const float* color, bool completed_pass,
-              UINT width = Width, UINT height = Height) {
+  void record(ID3D12GraphicsCommandList7* list,
+              D3D12_CPU_DESCRIPTOR_HANDLE rtv,
+              const float* color,
+              bool completed_pass,
+              UINT width = Width,
+              UINT height = Height) {
     list->SetPipelineState(pipeline.p);
     list->SetGraphicsRootSignature(root.p);
     list->SetGraphicsRoot32BitConstants(0, 4, color, 0);
@@ -449,6 +453,10 @@ void run(bool warp, bool render_target, bool enhanced, bool native_boundary, boo
     barrier(application.list.p, sources[index].p, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
     application.list->CopyResource(scenes[index].p, sources[index].p);
     require(!manager->record_copy_after_forward(application.list.p, sources[index].p, scenes[index].p, false), "Partial copy accepted");
+    manager->set_capture_enabled(false);
+    require(!manager->record_copy_after_forward(application.list.p, sources[index].p, scenes[index].p, true),
+            "Idle admitted a new copy capture");
+    manager->set_capture_enabled(true);
     require(manager->record_copy_after_forward(application.list.p, sources[index].p, scenes[index].p, true), "Capture whole destination");
     require(!manager->record_copy_after_forward(application.list.p, sources[index].p, scenes[index].p, true), "Duplicate feed capture");
   }

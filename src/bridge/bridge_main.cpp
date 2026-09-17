@@ -91,6 +91,14 @@ DWORD run_impl() {
   }
   log_status(status, fault_evidence_ready ? "Renderer fault evidence armed." : "Renderer fault evidence unavailable.");
   const auto key = win::graphics_status().device;
+  wchar_t gpu_timing_option[2]{};
+  const bool gpu_timing = GetEnvironmentVariableW(L"TAXI_CAM_GPU_TIMING", gpu_timing_option, 2) == 1 && gpu_timing_option[0] == L'1';
+  scene_runtime::set_gpu_timing_enabled(gpu_timing);
+  wchar_t graphics_diagnostics_option[2]{};
+  const bool graphics_diagnostics = GetEnvironmentVariableW(L"TAXI_CAM_GRAPHICS_DIAGNOSTICS", graphics_diagnostics_option, 2) == 1 &&
+                                    graphics_diagnostics_option[0] == L'1';
+  win::set_graphics_diagnostics_enabled(graphics_diagnostics);
+  win::set_graphics_observation_demand(false);
   // The Windows companion owns mount settings for native sessions.
   TaxiButtonIntent intent;
   DisplayExposureController exposure;
@@ -100,6 +108,8 @@ DWORD run_impl() {
   bool requested = false, failed = false, last_output = false;
   std::uint64_t last_view_wait_count = 0;
   std::uint64_t next_telemetry{}, next_discovery{}, next_recovery{}, next_log{}, route_request{}, last_frames{};
+  std::uint64_t next_inventory{};
+  std::vector<PfdTargetObservation> inventory;
   unsigned rate{}, feeds{}, applied_profile{};
   std::uint64_t applied_profile_request{}, applied_session_epoch{};
   std::uint64_t pending_profile_request{}, pending_session_epoch{}, transition_token{};
@@ -129,6 +139,7 @@ DWORD run_impl() {
           session_epoch != pending_session_epoch) {
         win::set_target_mask(0);
         win::set_calibration(0, settings.calibration_budget);
+        win::set_graphics_observation_demand(false);
         native_camera::suspend_scene_rendering(true);
         scene_runtime::manager().stop_source_tracking();
         scene_handoff().stop_scene();
@@ -214,6 +225,8 @@ DWORD run_impl() {
       startup = {};
       exposure = {};
       next_telemetry = next_discovery = 0;
+      next_inventory = 0;
+      inventory.clear();
       changing_profile = false;
     }
     if (now >= next_telemetry) {
@@ -237,7 +250,7 @@ DWORD run_impl() {
     const auto cutoff = native_camera::get_taxi_cutoff();
     const auto desired = intent.observe(now, buttons.valid, buttons.left_on, buttons.right_on);
     const unsigned mask =
-        connected && session_settings && settings.enabled && aircraft_matches && win::graphics_status().ready && !cutoff.inhibited
+        connected && session_settings && settings.enabled && aircraft_matches && win::graphics_ready() && !cutoff.inhibited
             ? (settings.follow_taxi && !manual_only ? desired.buttons
                : session_settings                   ? settings.manual_mask
                                                     : 0)
@@ -263,7 +276,7 @@ DWORD run_impl() {
               settings.profile == applied_profile && settings.profile_request == applied_profile_request,
           settings.enabled != 0,
           native_camera::aircraft_matches_profile() && aircraft.fresh && aircraft.detected_profile == settings.profile,
-          win::graphics_status().ready,
+          win::graphics_ready(),
           native_camera::get_taxi_cutoff().inhibited,
           manual_only || native_camera::get_taxi_buttons().valid,
           pose.valid || pose.calibration_required,
@@ -299,10 +312,13 @@ DWORD run_impl() {
     }
     const auto demand = win::scene_demand(mask, test_scene, assigned, requested, failed, background_warmup);
     unsigned active = demand.stamp_mask;
+    const unsigned calibration =
+        connected && session_settings && settings.enabled && aircraft_matches && !cutoff.inhibited ? settings.calibration_mask : 0;
+    // Warmup and scene-only diagnostics need capture observation without PFD
+    // writes. Settled OFF may bypass PFD state while lifetime tracking remains.
+    win::set_graphics_observation_demand(!demand.suspend || calibration != 0);
     win::set_target_mask(active);
-    win::set_calibration(
-        connected && session_settings && settings.enabled && aircraft_matches && !cutoff.inhibited ? settings.calibration_mask : 0,
-        settings.calibration_budget);
+    win::set_calibration(calibration, settings.calibration_budget);
     const win::OwnedWork owned;
     if (connected && (rate != settings.camera_rate || feeds != (settings.single_camera ? 1u : 2u))) {
       rate = settings.camera_rate;
@@ -382,6 +398,7 @@ DWORD run_impl() {
         active = 0;
         win::set_target_mask(0);
         native_camera::suspend_scene_rendering(true);
+        win::set_graphics_observation_demand(calibration != 0);
       }
     }
     // Normal button changes never call request_scene_stop/reset_feed or release
@@ -461,7 +478,12 @@ DWORD run_impl() {
       startup.stamp_ms = GetTickCount64();
       log_startup(status, startup, "first_stamp");
     }
-    const auto inventory = win::pfd_inventory();
+    // Candidate rows are UI diagnostics, not the authoritative assignment or
+    // discovery state. Avoid rebuilding the full inventory on every 25 ms tick.
+    if (now >= next_inventory) {
+      inventory = win::pfd_inventory();
+      next_inventory = now + 1000;
+    }
     status.candidate_count = static_cast<UINT>(std::min<size_t>(inventory.size(), 16));
     for (UINT i = 0; i < status.candidate_count; ++i)
       status.candidates[i] = {inventory[i].id,     inventory[i].draws,  inventory[i].width,
@@ -626,6 +648,32 @@ DWORD run_impl() {
           static_cast<unsigned long long>(output.capture.quarantined), prewarm.name(), output.patch_requests,
           static_cast<unsigned long long>(output.patch_draws));
       log_status(status, retention_detail);
+      if (graphics_diagnostics) {
+        char graphics_detail[512];
+        std::snprintf(
+            graphics_detail, sizeof(graphics_detail),
+            "Graphics work: observing=%u epoch=%llu invalidations=%llu lookups=%llu cache_hits=%llu registry_lookups=%llu "
+            "idle_setters=%llu idle_callbacks=%llu",
+            graphics.observing, static_cast<unsigned long long>(graphics.observation_epoch),
+            static_cast<unsigned long long>(graphics.observation_invalidations),
+            static_cast<unsigned long long>(graphics.list_lookup_calls), static_cast<unsigned long long>(graphics.list_cache_hits),
+            static_cast<unsigned long long>(graphics.list_registry_lookups), static_cast<unsigned long long>(graphics.idle_state_bypasses),
+            static_cast<unsigned long long>(graphics.idle_callback_bypasses));
+        log_status(status, graphics_detail);
+      }
+      if (output.gpu_timing_enabled) {
+        const auto log_gpu_span = [&](const char* name, const GpuTimingStatistics& timing) {
+          char gpu_detail[256];
+          std::snprintf(gpu_detail, sizeof(gpu_detail), "GPU timing: stage=%s samples=%llu rejected=%llu total_ms=%.6f max_ms=%.6f", name,
+                        static_cast<unsigned long long>(timing.samples), static_cast<unsigned long long>(timing.rejected), timing.total_ms,
+                        timing.maximum_ms);
+          log_status(status, gpu_detail);
+        };
+        log_gpu_span("private_capture_copy", output.capture.capture_copy_gpu);
+        log_gpu_span("composition", output.composition_gpu);
+        log_gpu_span("output_copy", output.output_copy_gpu);
+        log_gpu_span("patches", output.patch_gpu);
+      }
       char copy_detail[512];
       std::snprintf(copy_detail, sizeof(copy_detail),
                     "PFD boundary copy: attempts=%llu copies=%llu no_proof=%llu reason=%s | "
@@ -662,6 +710,7 @@ DWORD WINAPI run(void*) noexcept {
   } catch (...) {
     win::set_target_mask(0);
     win::set_calibration(0, 4096);
+    win::set_graphics_observation_demand(false);
     scene_runtime::manager().stop_source_tracking();
     native_camera::request_scene_stop(true);
     return ERROR_NOT_ENOUGH_MEMORY;

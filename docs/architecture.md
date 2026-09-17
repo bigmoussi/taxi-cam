@@ -124,7 +124,7 @@ Changing graphics settings can overwrite an established camera's size fields. Th
 
 Recovery accepts independently bounded primary render and display-size pairs when the existing output proves the exact original pane size. A regression test uses a 1695×901 primary render size, 2542×1351 display-size pairs and unchanged 774×251 and 774×496 A350 camera bitmaps. It verifies restoration without allocation or changes outside the size fields. Live simulator recovery remains unverified.
 
-The rate setting limits activation opportunities to **15–60 per camera per second**. Activations alternate between views, with a closed interval after each pulse. Actual image delivery also depends on simulator update cadence, GPU completion and the availability of both images.
+The rate setting limits activation opportunities to **5–60 per camera per second** (minimum **5**). Install sets **5**. Activations alternate between views, with a closed interval after each pulse. Actual image delivery also depends on simulator update cadence, GPU completion and the availability of both images. At lower simulator update rates, two settings can reach the same scheduling limit; 5 and 10 remain available as lower budgets while retaining mandatory closing intervals and avoiding catch-up bursts.
 
 Source: [camera integration](../src/camera/probe.cpp), [pose conversion](../src/camera/body_pose_math.hpp), [mounts](../src/camera/aircraft_mounts.hpp), [schedule](../src/camera/render_schedule.hpp).
 
@@ -197,6 +197,8 @@ This is why the camera appears on the cockpit's physical screen: the cockpit mod
 
 Barrier metadata uses one command-list lookup per native batch. A thread-local scope retains the tracking record during the batch; each item still checks its identity and recording generation. Nested batches have separate scopes. A changed or retired recording, a mismatched identity or exhausted scope capacity uses the ordinary lookup path. The scope does not hold the registry lock while processing callbacks.
 
+A bounded thread-local weak cache also reuses known command-list metadata across callbacks. Each hit verifies object identity, liveness and recording generation; misses use the registry lock. Weak references do not prolong the lifetime of the tracking record or its graphics resources. Source-draw completion uses one manager operation to validate the targets and record their effects instead of staging and looking them up again.
+
 The native adapter continues tracking command-list lifetimes, target bindings and render boundaries. Hooks forward the exact captured original for their table. A native `ClearState` discards pending overlay work and clears tracked bindings. It does not reset command-list lifetime or revive a recording that was unsafe for injection.
 
 ### Keeping readers and writers in order
@@ -208,6 +210,10 @@ A shared per-device fence timeline orders output writes and PFD reads, including
 Command-list discovery runs before submission serialization so it cannot acquire the bridge registry while holding the submission lock. Fully observed recordings with no camera packets, PFD reads or camera-source state changes bypass that lock. Unknown and participating recordings still revalidate their metadata under both locks, retain their resource leases and use the shared fence timeline.
 
 Turning off one TAXI side stops recording further camera copies or draws to that PFD. Normal aircraft drawing restores its display. The other side can continue using the same camera pair. When neither side, the scene test nor the bounded startup warmup requires a view, the bridge closes their render gates and retains the camera pair for the next activation. Once the healthy pair is fully idle, it skips periodic private-memory inspection. Resuming or handling pending camera work requires fresh validation before any native camera call.
+
+After warmup, with no scene or calibration demand, graphics callbacks bypass PFD-only state tracking and new capture/PFD work. An observation generation invalidates incomplete PFD recording proofs; reactivation needs an actual successful native Reset before those recordings can supply a new PFD draw. Camera source-state changes and safety invalidations remain observed, so a texture that stays in render-target state can resume without requiring a new transition that MSFS might never emit. Resource/descriptor lifetimes, target bindings and display draw activity also remain observed for discovery, and previously recorded GPU work retains its submission and retirement guards. OFF therefore removes optional per-command work without claiming that a loaded bridge has zero overhead. Startup warmup is unchanged and deliberately counts as active demand.
+
+Companion candidate rows refresh once per second. Their draw-count sorting happens after releasing the registry lock; automatic target detection retains its separate complete-inventory and lifetime checks. Candidate rows are informational, and assignments still validate current resource identity.
 
 The retained pair is shared by both displays; toggling TAXI does not allocate another pair. Owned capture storage has a maximum of 16 snapshot packets and a 256 MiB aggregate budget. Up to eight private PFD patch slots reuse matching allocations. Output buffers, pipelines and resources that recorded GPU work may still reference remain allocated until safe release or simulator exit. These bounds cover Taxi Cam storage, not all memory allocated internally by the simulator or driver.
 

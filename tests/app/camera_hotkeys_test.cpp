@@ -282,6 +282,18 @@ void ui_checks() {
   require(GetDlgItem(window, 645) && !GetDlgItem(window, 106),
           "Shortcut editor opens from Flight-deck control without adding another navigation page");
   const auto rate = GetDlgItem(window, 200);
+  for (const auto value : {5u, 10u, 15u, 60u}) {
+    const auto text = std::to_wstring(value);
+    SetWindowTextW(rate, text.c_str());
+    auto settings = current;
+    require(read_fields(settings) && settings.camera_rate == value, "Camera settings UI accepts lower and existing rate choices");
+  }
+  for (const auto text : {L"4", L"61", L"5.5"}) {
+    SetWindowTextW(rate, text);
+    auto settings = current;
+    require(!read_fields(settings) && settings.camera_rate == current.camera_rate,
+            "Camera settings UI rejects invalid rates without changing the current budget");
+  }
   SetWindowTextW(rate, L"-");
   const auto original_rate = current.camera_rate;
   const auto editor = shortcut_fixture();

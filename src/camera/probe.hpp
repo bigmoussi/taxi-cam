@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../shared/camera_rate.hpp"
 #include "aircraft_mounts.hpp"
 #include "entry_pair.hpp"
 #include "scene_recovery.hpp"
@@ -66,7 +67,7 @@ struct ProbeSnapshot {
   ProbePerformance performance;
   // Cumulative nonzero IDs returned by creation, including later rollbacks.
   std::uint64_t created_total = 0;
-  std::uint32_t requested_rate = 15;
+  std::uint32_t requested_rate = kDefaultCameraRate;
   std::uint32_t requested_feeds = 2;
   // Last native activation requests, not a measured rendered-frame rate.
   std::array<bool, 2> gates{};
@@ -104,7 +105,7 @@ std::uint64_t request_scene_profile_transition(std::uint32_t id) noexcept;
 void request_scene_stop(bool keep_telemetry = false) noexcept;
 void note_scene_capture_progress(std::uint64_t now_ms) noexcept;
 // Atomic configuration only; consumed by the observer, never calls the engine.
-// Limits activation opportunities to 15..60 per second per selected feed.
+// Limits activation opportunities to 5..60 per second per selected feed.
 // Close activation gates while retaining owned views; no ownership changes.
 void suspend_scene_rendering(bool suspended) noexcept;
 void request_scene_rate(unsigned rate, unsigned feeds = 2) noexcept;

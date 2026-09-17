@@ -43,9 +43,9 @@ void cadence(unsigned rate, unsigned feeds, std::uint64_t step) {
 
 void changes_and_stalls() {
   RenderSchedule schedule;
-  require(schedule.rate() == 15 && schedule.feeds() == 2, "Defaults changed");
+  require(schedule.rate() == taxi_camera::kDefaultCameraRate && schedule.feeds() == 2, "Defaults changed");
   schedule.configure(0, 0);
-  require(schedule.rate() == 15 && schedule.feeds() == 1, "Lower bounds were not applied");
+  require(schedule.rate() == 5 && schedule.feeds() == 1, "Lower bounds were not applied");
   schedule.configure(999, 999);
   require(schedule.rate() == 60 && schedule.feeds() == 2, "Upper bounds were not applied");
   require(schedule.tick(100)[0], "Initial pulse missing");
@@ -80,7 +80,7 @@ void live_rate_changes() {
   require(schedule.tick(76)[1], "Lowered rate resumes without resetting history");
 }
 void suspend_and_resume() {
-  for (unsigned rate : {15u, 60u}) {
+  for (unsigned rate : {5u, 10u, 15u, 60u}) {
     RenderSchedule schedule;
     schedule.configure(rate);
     require(schedule.tick(1000)[0], "Initial pulse before telemetry gap");
@@ -91,17 +91,92 @@ void suspend_and_resume() {
     require(schedule.tick(7002) == std::array<bool, 2>{}, "Resume must respect the aggregate rate limit");
   }
 }
+
+std::array<unsigned, 2> opportunities(unsigned rate, unsigned feeds, const std::array<unsigned, 6>& intervals) {
+  RenderSchedule schedule;
+  schedule.configure(rate, feeds);
+  std::array<unsigned, 2> count{};
+  std::array<std::uint64_t, 2> last{};
+  bool previous_on = false;
+  unsigned next = 0, tick = 0;
+  for (std::uint64_t now = 0; now < 10000; now += intervals[tick++ % intervals.size()]) {
+    const auto active = schedule.tick(now);
+    const bool on = active[0] || active[1];
+    require(!(on && previous_on) && !(active[0] && active[1]), "Jitter skipped a mandatory closed interval");
+    previous_on = on;
+    for (unsigned feed = 0; feed < 2; ++feed) {
+      if (!active[feed])
+        continue;
+      require(feed == next, "Jitter starved or reordered feeds");
+      next = (next + 1) % feeds;
+      if (count[feed])
+        require(now - last[feed] >= (1000 + rate - 1) / rate, "Jitter exceeded the requested per-feed budget");
+      last[feed] = now;
+      ++count[feed];
+    }
+  }
+  require(count[0] <= rate * 10 && count[1] <= rate * 10, "Jitter exceeded the ten-second budget");
+  return count;
+}
+
+void effective_lower_budgets() {
+  // At 50 manager updates/s the old 15 and 30 settings both service a gate
+  // transition on every update. Lower rates must add real closed idle updates.
+  const std::array<unsigned, 6> fifty_hz{20, 20, 20, 20, 20, 20};
+  const auto five = opportunities(5, 2, fifty_hz);
+  const auto ten = opportunities(10, 2, fifty_hz);
+  const auto fifteen = opportunities(15, 2, fifty_hz);
+  require(five == std::array<unsigned, 2>{50, 50}, "5fps did not reduce the 50Hz manager workload");
+  require(ten == std::array<unsigned, 2>{84, 83}, "10fps did not reduce the 50Hz manager workload");
+  require(fifteen == std::array<unsigned, 2>{125, 125}, "Established 15fps cadence changed");
+  require(opportunities(30, 2, fifty_hz) == fifteen, "50Hz manager saturation example changed");
+  for (const auto& intervals : {std::array<unsigned, 6>{10, 10, 10, 10, 10, 10}, fifty_hz, std::array<unsigned, 6>{33, 33, 33, 33, 33, 33},
+                                std::array<unsigned, 6>{8, 12, 17, 23, 10, 30}}) {
+    for (unsigned feeds : {1u, 2u}) {
+      const auto low = opportunities(5, feeds, intervals);
+      const auto medium = opportunities(10, feeds, intervals);
+      const auto original = opportunities(15, feeds, intervals);
+      const auto total = [](const auto& count) { return count[0] + count[1]; };
+      require(total(low) < total(medium) && total(medium) <= total(original), "Lower budgets did not reduce activation work");
+      if (feeds == 1)
+        require(!low[1] && !medium[1] && !original[1], "Single-feed mode activated the tail camera");
+    }
+  }
+}
+
+void lower_budget_changes() {
+  RenderSchedule schedule;
+  require(schedule.tick(1000)[0], "Initial opening before low-rate change");
+  schedule.configure(5);
+  require(schedule.tick(1001) == std::array<bool, 2>{}, "Lowering rate left the previous gate open");
+  require(schedule.tick(1099) == std::array<bool, 2>{}, "Lowering rate erased aggregate history");
+  require(schedule.tick(1100)[1], "5fps did not continue with the other feed");
+  schedule.configure(10, 1);
+  require(schedule.tick(1101) == std::array<bool, 2>{}, "Changing feeds left the tail open");
+  require(schedule.tick(1199) == std::array<bool, 2>{}, "Feed-count change erased aggregate history");
+  require(schedule.tick(1200)[0], "10fps single-feed schedule did not resume");
+  schedule.configure(5, 2);
+  require(schedule.tick(1201) == std::array<bool, 2>{}, "Restoring two feeds skipped closure");
+  require(schedule.tick(1399) == std::array<bool, 2>{}, "Lowering rate erased the selected feed deadline");
+  require(schedule.tick(1400)[0], "5fps pair did not preserve its pending feed");
+  require(schedule.tick(20000) == std::array<bool, 2>{}, "Low-rate long stall did not close the active pulse");
+  require(schedule.tick(20000)[1], "Low-rate stalled pair did not resume fairly");
+  require(schedule.tick(20000) == std::array<bool, 2>{}, "Low-rate duplicate timestamp left a gate open");
+  require(schedule.tick(20000) == std::array<bool, 2>{}, "Low-rate stall caused a catch-up burst");
+}
 }  // namespace
 
 int main() {
   try {
-    for (unsigned rate = 15; rate <= 60; ++rate)
+    for (unsigned rate = 5; rate <= 60; ++rate)
       for (unsigned feeds : {1u, 2u})
-        for (std::uint64_t step : {1, 5, 9, 16, 33, 50, 91, 250, 1000})
+        for (std::uint64_t step : {1, 5, 9, 10, 16, 20, 33, 50, 91, 250, 1000})
           cadence(rate, feeds, step);
     changes_and_stalls();
     live_rate_changes();
     suspend_and_resume();
+    effective_lower_budgets();
+    lower_budget_changes();
     std::printf("PASS: %u render-schedule checks; rate limits, alternating feeds, mandatory off intervals and no catch-up bursts.\n",
                 checks);
     return 0;
