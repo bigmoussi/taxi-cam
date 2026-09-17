@@ -357,17 +357,40 @@ struct LaunchDiagnostics {
 };
 class LaunchRetry {
  public:
+  static constexpr unsigned MaxPreflightRetries = 59;
+  static constexpr unsigned MaxRecoveryWaves = 20;
+  static constexpr std::uint64_t PreflightDelayMs = 1000;
+  static constexpr std::uint64_t RecoveryDelayMs = 15000;
+
   bool ready(std::uint64_t now) const noexcept { return now >= next_; }
   bool schedule(const LaunchResult& result, std::uint64_t now) noexcept {
-    if (result.ok || !result.retry_before_load || retries_ >= 59 || now > UINT64_MAX - 1000)
+    if (result.ok || !result.retry_before_load || retries_ >= MaxPreflightRetries || now > UINT64_MAX - PreflightDelayMs)
       return false;
     ++retries_;
-    next_ = now + 1000;
+    next_ = now + PreflightDelayMs;
     return true;
   }
+  // After a preflight wave is exhausted, wait before starting another wave so a
+  // stuck early MSFS session can recover without restarting the companion.
+  bool schedule_recovery(std::uint64_t now) noexcept {
+    if (recoveries_ >= MaxRecoveryWaves || now > UINT64_MAX - RecoveryDelayMs)
+      return false;
+    ++recoveries_;
+    retries_ = 0;
+    next_ = now + RecoveryDelayMs;
+    return true;
+  }
+  void reset() noexcept {
+    retries_ = 0;
+    recoveries_ = 0;
+    next_ = 0;
+  }
+  unsigned retries() const noexcept { return retries_; }
+  unsigned recoveries() const noexcept { return recoveries_; }
 
  private:
   unsigned retries_{};
+  unsigned recoveries_{};
   std::uint64_t next_{};
 };
 inline DWORD wait_for_loader(HANDLE thread, const std::atomic<bool>* running) {
@@ -383,7 +406,8 @@ inline LaunchResult load_bridge(DWORD pid,
                                 const std::wstring& expected_exe,
                                 const std::wstring& dll,
                                 const std::atomic<bool>* running = nullptr,
-                                LaunchDiagnostics* diagnostics = nullptr) {
+                                LaunchDiagnostics* diagnostics = nullptr,
+                                bool allow_fresh_load = true) {
   LaunchDiagnostics local_diagnostics;
   auto& trace = diagnostics ? *diagnostics : local_diagnostics;
   trace = {};
@@ -419,6 +443,8 @@ inline LaunchResult load_bridge(DWORD pid,
   if (!main.base || !amd64_image(process, main))
     return {false, ERROR_BAD_EXE_FORMAT, L"Waiting for readable, valid MSFS executable headers.", true};
   if (!bridge.base) {
+    if (!allow_fresh_load)
+      return {false, ERROR_MOD_NOT_FOUND, L"Waiting for the previous bridge load to finish; no second Windows load will be started.", true};
     const auto loader = remote_export(process, pid, GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "LoadLibraryW"));
     if (!loader)
       return {false, ERROR_INVALID_ADDRESS, L"Waiting for the verified Windows DLL loader in MSFS.", true};

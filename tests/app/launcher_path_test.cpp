@@ -209,9 +209,18 @@ int main() {
     LaunchRetry retry;
     require(retry.ready(1000), "First startup attempt immediate");
     require(retry.schedule(pending, 1000) && !retry.ready(1999) && retry.ready(2000), "Preflight retry waits one second");
-    for (unsigned i = 1; i < 59; ++i)
+    for (unsigned i = 1; i < LaunchRetry::MaxPreflightRetries; ++i)
       require(retry.schedule(pending, 1000 + i * 1000), "Bounded preflight retry available");
     require(!retry.schedule(pending, 61000), "No more than 60 total load attempts");
+    require(retry.schedule_recovery(61000) && !retry.ready(61000 + LaunchRetry::RecoveryDelayMs - 1) &&
+                retry.ready(61000 + LaunchRetry::RecoveryDelayMs),
+            "Exhausted preflight schedules a recovery wave");
+    require(retry.retries() == 0 && retry.recoveries() == 1, "Recovery clears the preflight counter");
+    for (unsigned i = 1; i < LaunchRetry::MaxRecoveryWaves; ++i)
+      require(retry.schedule_recovery(100000 + i * LaunchRetry::RecoveryDelayMs), "Bounded recovery waves available");
+    require(!retry.schedule_recovery(UINT64_MAX / 2), "Recovery wave budget is finite");
+    retry.reset();
+    require(retry.ready(0) && retry.retries() == 0 && retry.recoveries() == 0, "Reset clears retry state for Reconnect");
     for (const auto error : {WAIT_TIMEOUT, ERROR_ACCESS_DENIED, ERROR_MOD_NOT_FOUND, ERROR_INVALID_ADDRESS}) {
       LaunchRetry terminal;
       require(!terminal.schedule({false, static_cast<DWORD>(error), L"Load or start may have begun"}, 1000),
@@ -221,7 +230,7 @@ int main() {
     require(!complete.schedule({true, 0, L"Loaded"}, 1000), "Successful load never retried");
     LaunchRetry overflow;
     require(!overflow.schedule(pending, UINT64_MAX), "Retry deadline cannot overflow");
-    std::puts("PASS launcher paths and startup: aliases, dual-install attach, bounded preflight retries and terminal remote-load failures.");
+    std::puts("PASS launcher paths and startup: aliases, dual-install attach, bounded preflight retries, recovery waves and terminal remote-load failures.");
     return 0;
   } catch (const std::exception& error) {
     std::fprintf(stderr, "FAIL launcher paths: %s\n", error.what());

@@ -6,7 +6,7 @@ Run `build.ps1 -Validate` from the repository root with the pinned toolchain. It
 
 The native validation run includes `tests/app/camera_hotkeys_test.cpp`: Ctrl + Shift + L / R / B defaults, saved combinations, editor reset and conflict handling, hidden-window dispatch, and synchronization with supported aircraft TAXI controls. Profile checks cover the iniBuilds A380's manual-only controls and separate saved calibration. These fixtures do not operate a live aircraft's buttons.
 
-`tests/app/startup_state_test.cpp` checks first-launch Settings visibility, later tray starts, explicit manual opens, failed state writes and preview isolation using a private fixture directory. `tests/app/camera_status_test.cpp` verifies distinct status reporting for stopped cameras, pending recovery and successfully recovered cameras.
+`tests/app/startup_state_test.cpp` checks first-launch Settings visibility, later tray starts, explicit manual opens, failed state writes and preview isolation using a private fixture directory. `tests/app/connection_recoverability_test.cpp` checks the Auto-connect preference, Connect/Reset command queue and attach gating. `tests/app/camera_status_test.cpp` verifies distinct status reporting for stopped cameras, pending recovery and successfully recovered cameras.
 
 `tests/app/night_boost_migration_test.cpp` checks the one-time 8 EV preference migration in isolated profile files: all supported aircraft, preservation of calibration and unrelated preferences, legacy import, later user edits, migration revisions and failed-write retry. These CPU-only checks do not validate night rendering in MSFS.
 

@@ -22,6 +22,9 @@ When startup cannot be configured and the original file is verified unchanged, i
 
 | Control | Location and behaviour |
 | --- | --- |
+| **Auto-connect** | **Overview**; when on (default), Taxi Cam attaches as soon as MSFS is detected. When off, wait until MSFS is up, then use **Connect**. Preference is saved in `%LOCALAPPDATA%\Taxi Cam\settings.ini`. |
+| **Connect** | **Overview** or tray menu; starts bridge attach for the live MSFS process. Required when Auto-connect is off. |
+| **Reconnect / Reset** | **Overview** or tray menu; clears a stuck attach attempt and retries. Does not stop MSFS or overwrite calibration. |
 | **Keyboard shortcuts…** | **Overview → Flight-deck control**; configure left, right and both-display toggles. Defaults are Ctrl + Shift + L / R / B. |
 | **TAXI buttons** | Beside the shortcut editor button; follow cockpit TAXI controls where supported. Disabled for the iniBuilds A380, whose buttons are INOP. Shortcuts work with this setting on or off. |
 | **Donate** | Sidebar, above the bug-report icon; opens the PayPal donation page in the default browser. |
@@ -200,7 +203,7 @@ The mapping carries values, IDs and bounded text. It carries no camera pixels or
 | Operation | Interval or bound |
 | --- | --- |
 | Companion connection/settings loop | 200 ms delay |
-| Startup header/Windows-loader preflight retry | 1 second; at most 60 attempts; no retry after a remote load/start may have begun |
+| Startup header/Windows-loader preflight retry | 1 second; at most 60 attempts per wave; recovery waves every 15 seconds (capped); no second LoadLibrary after a remote load may have begun; Reconnect / Reset clears companion attempt state |
 | Bridge control/output-service loop | 25 ms delay |
 | Companion heartbeat acceptance | At most 5000 ms old |
 | Aircraft identity sampling / freshness | 1000 ms / 3000 ms |
