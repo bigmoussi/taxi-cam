@@ -1557,7 +1557,7 @@ void plan_display_submission(void*,
   for (unsigned side = 0; side < 2; ++side) {
     if (!(patches.ready_mask & (1u << side)))
       continue;
-    const auto* target = r.selected_resources[side];
+    const auto& target = r.selected_resources[side];
     if (!target || !target->alive || !display_item(r, *target))
       continue;
     const PfdSubmissionProof::Key key{reinterpret_cast<std::uint64_t>(target->native), target->id};
