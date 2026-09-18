@@ -16,8 +16,9 @@ namespace taxi_camera::standalone {
 // A prefix is revoked if the same display later becomes writable again: the
 // overlay would run first and the native instrument (or TAA/DLSS history) would
 // show through for that stamp frame. A later list in the same Execute that
-// writes the display (UAV TAA, a second instrument pass) moves the copy after
-// that last insertable write instead of stamping first.
+// writes the display (UAV TAA, a second instrument pass, or a draw/clear that
+// keeps the previous list's RT or UAV state) moves the copy after that last
+// insertable write instead of stamping first.
 //
 // The caller observes every recording from a real successful Reset through
 // successful Close, reports every GPU command and pass, and invalidates omitted
@@ -337,6 +338,22 @@ class PfdSubmissionProof {
         prefix_blocker_ = operation;
     }
   }
+  // A draw or clear can keep using RT established by an earlier list. That
+  // list has no new barrier, so it is not a suffix, and it runs after the
+  // queue copy. The frame is then the clear colour instead of the taxi image
+  // or the instrument. Record the write and copy after it, restoring RT.
+  // Do not invent RT over an explicit other state.
+  void note_render_target_write(Key key, UINT operation = 12) noexcept {
+    gpu_work(operation);
+    note_carried_write(key, D3D12_RESOURCE_STATE_RENDER_TARGET, operation);
+  }
+  // Same gap for a UAV clear whose transition was in an earlier list. The
+  // caller must already know the resource allows unordered access; this ledger
+  // does not see resource flags.
+  void note_unordered_access_write(Key key, UINT operation = 50) noexcept {
+    compute_work(operation);
+    note_carried_write(key, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, operation);
+  }
   // A later writable return revokes prefix insertion, but the leading RT exit
   // still proves this display completed. Autodetect activity uses that evidence
   // without stamping before TAA/DLSS or a second instrument pass.
@@ -439,6 +456,44 @@ class PfdSubmissionProof {
   // is a finished overwrite we can copy after.
   bool suffix_site(const Slot& slot) const noexcept {
     return slot.seen && slot.wrote && insertable_after(slot.after) && (slot.after != D3D12_RESOURCE_STATE_RENDER_TARGET || !barrier_only_);
+  }
+  void note_carried_write(Key key, D3D12_RESOURCE_STATES state, UINT operation) noexcept {
+    if (!open() || !key.resource || !key.generation)
+      return;
+    Slot* slot = nullptr;
+    for (auto& item : slots_) {
+      if (item.key == key) {
+        slot = &item;
+        break;
+      }
+      if (item.key.resource == key.resource) {
+        invalidate(Refusal::resource_reuse);
+        return;
+      }
+    }
+    if (slot && slot->seen && slot->after != state)
+      return;
+    if (!slot) {
+      for (auto& item : slots_)
+        if (!item.key.resource) {
+          slot = &item;
+          break;
+        }
+      if (!slot) {
+        invalidate(Refusal::capacity);
+        return;
+      }
+      slot->key = key;
+    }
+    if (!slot->seen) {
+      slot->first_before = state;
+      slot->after = state;
+      slot->seen = true;
+    }
+    slot->wrote = true;
+    if (slot->prefix_exit && slot->prefix_blocker == UINT_MAX)
+      slot->prefix_blocker = operation;
+    slot->prefix_exit = false;
   }
   bool open() noexcept {
     if (!known_ || closed_) {

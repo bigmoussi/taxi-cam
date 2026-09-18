@@ -1063,6 +1063,9 @@ void after_draw(void*, ID3D12GraphicsCommandList* native, std::uint64_t id, bool
     const auto& target = list->targets[i];
     if (target.resource && target.resource->alive && !target.mip) {
       target.resource->draws.fetch_add(1, std::memory_order_relaxed);
+      if (maybe_selected(target.resource->native))
+        list->submission_proof.note_render_target_write({reinterpret_cast<std::uint64_t>(target.resource->native), target.resource->id},
+                                                        12);
       if (observed) {
         if (allowed)
           list->copy_proof.after_draw({reinterpret_cast<std::uint64_t>(target.resource->native), target.resource->id});
@@ -2186,6 +2189,32 @@ struct GpuWork {
     l.submission_proof.gpu_work();
   }
 };
+struct ClearRenderTarget {
+  static void apply(List& l, D3D12_CPU_DESCRIPTOR_HANDLE handle, const FLOAT*, UINT, const D3D12_RECT*) {
+    l.submission_proof.gpu_work(48);
+    for (UINT i = 0; i < l.count; ++i) {
+      const auto& view = l.targets[i];
+      if (view.rtv != handle.ptr || view.mip || !view.resource || !view.resource->alive || !maybe_selected(view.resource->native))
+        continue;
+      l.submission_proof.note_render_target_write({reinterpret_cast<std::uint64_t>(view.resource->native), view.resource->id}, 48);
+    }
+  }
+};
+// ClearUAV names the resource. A clear that keeps UAV from an earlier list
+// has no barrier here; without this the queue copy stays in front of it.
+template <UINT Operation>
+struct ClearUnorderedAccess {
+  static void
+  apply(List& l, D3D12_GPU_DESCRIPTOR_HANDLE, D3D12_CPU_DESCRIPTOR_HANDLE, ID3D12Resource* target, const void*, UINT, const D3D12_RECT*) {
+    l.submission_proof.compute_work(Operation);
+    if (!target || !maybe_selected(target))
+      return;
+    const auto item = resource(target);
+    if (!item || !(item->desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS))
+      return;
+    l.submission_proof.note_unordered_access_write({reinterpret_cast<std::uint64_t>(item->native), item->id}, Operation);
+  }
+};
 struct StateDisjointGpuWork {};
 struct ComputeGpuWork {};
 struct Unsupported {
@@ -2228,7 +2257,8 @@ struct StateHook<Slot, void (STDMETHODCALLTYPE C::*)(Args...), Action> {
     // clear those bindings. Other state can be omitted only because an epoch
     // mismatch forbids injection until a real, fully observed native Reset.
     if constexpr (!std::is_same_v<Action, Targets> && !std::is_same_v<Action, ClearState> && !std::is_same_v<Action, Unsupported> &&
-                  !std::is_same_v<Action, Predication> && !std::is_same_v<Action, GpuWork> &&
+                  !std::is_same_v<Action, Predication> && !std::is_same_v<Action, GpuWork> && !std::is_same_v<Action, ClearRenderTarget> &&
+                  !std::is_same_v<Action, ClearUnorderedAccess<49>> && !std::is_same_v<Action, ClearUnorderedAccess<50>> &&
                   !std::is_same_v<Action, StateDisjointGpuWork> && !std::is_same_v<Action, ComputeGpuWork> &&
                   !std::is_same_v<Action, QueryBegin> && !std::is_same_v<Action, QueryEnd>) {
       if (!observation_enabled()) {
@@ -2323,9 +2353,9 @@ bool hook_state(ID3D12GraphicsCommandList* list, bool active = false) {
   ok &= STATE(18, CopyTiles, StateDisjointGpuWork)::install(list);
   ok &= STATE(19, ResolveSubresource, StateDisjointGpuWork)::install(list);
   ok &= STATE(47, ClearDepthStencilView, StateDisjointGpuWork)::install(list);
-  ok &= STATE(48, ClearRenderTargetView, GpuWork)::install(list);
-  ok &= STATE(49, ClearUnorderedAccessViewUint, ComputeGpuWork)::install(list);
-  ok &= STATE(50, ClearUnorderedAccessViewFloat, ComputeGpuWork)::install(list);
+  ok &= STATE(48, ClearRenderTargetView, ClearRenderTarget)::install(list);
+  ok &= STATE(49, ClearUnorderedAccessViewUint, ClearUnorderedAccess<49>)::install(list);
+  ok &= STATE(50, ClearUnorderedAccessViewFloat, ClearUnorderedAccess<50>)::install(list);
   ok &= STATE(54, ResolveQueryData, StateDisjointGpuWork)::install(list);
   ID3D12GraphicsCommandList1* sample_list{};
   const auto sample_interface = list->QueryInterface(IID_PPV_ARGS(&sample_list));

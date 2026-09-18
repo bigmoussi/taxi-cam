@@ -290,9 +290,9 @@ void submission_gpu_classification_checks() {
   WORK_CASE(18, ID3D12GraphicsCommandList, CopyTiles, StateDisjointGpuWork, true);
   WORK_CASE(19, ID3D12GraphicsCommandList, ResolveSubresource, StateDisjointGpuWork, true);
   WORK_CASE(47, ID3D12GraphicsCommandList, ClearDepthStencilView, StateDisjointGpuWork, true);
-  WORK_CASE(48, ID3D12GraphicsCommandList, ClearRenderTargetView, GpuWork, false);
-  WORK_CASE(49, ID3D12GraphicsCommandList, ClearUnorderedAccessViewUint, ComputeGpuWork, true);
-  WORK_CASE(50, ID3D12GraphicsCommandList, ClearUnorderedAccessViewFloat, ComputeGpuWork, true);
+  WORK_CASE(48, ID3D12GraphicsCommandList, ClearRenderTargetView, ClearRenderTarget, false);
+  WORK_CASE(49, ID3D12GraphicsCommandList, ClearUnorderedAccessViewUint, ClearUnorderedAccess<49>, true);
+  WORK_CASE(50, ID3D12GraphicsCommandList, ClearUnorderedAccessViewFloat, ClearUnorderedAccess<50>, true);
   WORK_CASE(54, ID3D12GraphicsCommandList, ResolveQueryData, StateDisjointGpuWork, true);
   WORK_CASE(60, ID3D12GraphicsCommandList1, AtomicCopyBufferUINT, GpuWork, false);
   WORK_CASE(61, ID3D12GraphicsCommandList1, AtomicCopyBufferUINT64, GpuWork, false);

@@ -549,6 +549,32 @@ void later_list_overwrite() {
   const auto tail = Proof::batch_overlay(split, 2, left);
   require(tail && !tail.before && tail.list == 1 && tail.candidate.state_after == psr,
           "Split RT entry/exit placed the overlay on the entry list instead of after the exit");
+  Proof carried;
+  carried.reset(1, true);
+  carried.note_render_target_write(left, 48);
+  carried.close(1, true);
+  require(carried.suffix_candidate(left, 1).state_after == rt && !carried.prefix_candidate(left, 1),
+          "Carried RT clear or draw did not become a suffix after that write");
+  const Proof::Recording flashed_white[]{{&prefix, 1}, {&carried, 1}};
+  const auto after_clear = Proof::batch_overlay(flashed_white, 2, left);
+  require(after_clear && !after_clear.before && after_clear.list == 1 && after_clear.candidate.state_after == rt,
+          "Queue copy stayed in front of a later RT clear that has no new barrier");
+  const Proof::Recording after_uav[]{{&compute, 1}, {&carried, 1}};
+  const auto cover_clear = Proof::batch_overlay(after_uav, 2, left);
+  require(cover_clear && !cover_clear.before && cover_clear.list == 1, "UAV suffix stayed in front of a later carried RT write");
+  Proof contradicted;
+  contradicted.reset(1, true);
+  contradicted.observe_legacy(left, rt, psr, 0);
+  contradicted.note_render_target_write(left, 12);
+  contradicted.close(1, true);
+  require(contradicted.prefix_candidate(left, 1) && !contradicted.suffix_candidate(left, 1),
+          "A draw after an RT exit invented an RT suffix or dropped the leading prefix");
+  Proof uav_clear;
+  uav_clear.reset(1, true);
+  uav_clear.note_unordered_access_write(left, 50);
+  uav_clear.close(1, true);
+  require(uav_clear.suffix_candidate(left, 1).state_after == uav && !uav_clear.prefix_candidate(left, 1),
+          "Carried UAV clear did not become a suffix");
 }
 }  // namespace
 
