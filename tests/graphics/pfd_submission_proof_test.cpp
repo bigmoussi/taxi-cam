@@ -535,6 +535,20 @@ void later_list_overwrite() {
           "COMMON plus later GPU work invented an after-state copy");
   const Proof::Recording flashed[]{{&prefix, 1}, {&common_write, 1}};
   require(!Proof::batch_overlay(flashed, 2, left), "Prefix overlay was kept when a later list overwrote without an insertable after-state");
+  Proof enter;
+  enter.reset(1, true);
+  enter.observe_legacy(left, psr, rt, 0);
+  enter.close(1, true);
+  Proof leave;
+  leave.reset(1, true);
+  leave.observe_legacy(left, rt, psr, 0);
+  leave.close(1, true);
+  require(enter.overwrote(left, 1) && !enter.suffix_candidate(left, 1) && leave.candidate(left, 1),
+          "Barrier-only RT entry became a suffix site or lost the later tail exit");
+  const Proof::Recording split[]{{&enter, 1}, {&leave, 1}};
+  const auto tail = Proof::batch_overlay(split, 2, left);
+  require(tail && !tail.before && tail.list == 1 && tail.candidate.state_after == psr,
+          "Split RT entry/exit placed the overlay on the entry list instead of after the exit");
 }
 }  // namespace
 

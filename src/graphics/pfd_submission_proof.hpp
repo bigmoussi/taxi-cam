@@ -297,14 +297,15 @@ class PfdSubmissionProof {
   Candidate suffix_candidate(Key key, std::uint64_t generation) const noexcept {
     if (complete(generation))
       for (const auto& slot : slots_)
-        if (slot.key == key && slot.seen && slot.wrote && insertable_after(slot.after))
-          return {slot.key, generation, slot.first_before, slot.after, slot.subresource};
+        if (suffix_site(slot))
+          if (slot.key == key)
+            return {slot.key, generation, slot.first_before, slot.after, slot.subresource};
     return {};
   }
   Candidate suffix_candidate(std::size_t index, std::uint64_t generation) const noexcept {
     if (index < slots_.size() && complete(generation)) {
       const auto& slot = slots_[index];
-      if (slot.seen && slot.wrote && insertable_after(slot.after))
+      if (suffix_site(slot))
         return {slot.key, generation, slot.first_before, slot.after, slot.subresource};
     }
     return {};
@@ -432,6 +433,12 @@ class PfdSubmissionProof {
       return true;
     constexpr UINT mask = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     return state != D3D12_RESOURCE_STATE_COMMON && (static_cast<UINT>(state) & ~mask) == 0;
+  }
+  // A barrier-only PSR→RT entry is a write, but the instrument draw is still
+  // ahead. Only GPU work on this list, or an insertable non-RT after-state,
+  // is a finished overwrite we can copy after.
+  bool suffix_site(const Slot& slot) const noexcept {
+    return slot.seen && slot.wrote && insertable_after(slot.after) && (slot.after != D3D12_RESOURCE_STATE_RENDER_TARGET || !barrier_only_);
   }
   bool open() noexcept {
     if (!known_ || closed_) {
