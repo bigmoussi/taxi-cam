@@ -3,6 +3,7 @@
 #include "../hooks/queue_submit_observer.hpp"
 #include "../shared/camera_rate.hpp"
 #include "owned_gpu_timing.hpp"
+#include "pfd_submission_pool.hpp"
 #include "scene_capture_d3d12.hpp"
 #include "scene_handoff.hpp"
 #include "scene_source_state.hpp"
@@ -41,11 +42,13 @@ class SceneCaptureManager {
     SceneCopyMatch match;
     ID3D12Resource* resource = nullptr;  // Borrowed owned snapshot, COPY_DEST.
     FrameOrder order;
+    std::uint64_t session_generation = 0;
   };
   struct Submission {
     std::uint64_t receipt = 0;
     ID3D12Fence* fence = nullptr;  // Process-lifetime borrowed timeline.
     std::uint64_t value = 0;       // Queued only by successful end.
+    bool deferred = false;         // No work queued; a private caller may retry.
   };
   struct RenderTargetDiagnostic {
     std::uint64_t matched_boundaries = 0, width = 0;
@@ -60,6 +63,7 @@ class SceneCaptureManager {
   struct Statistics {
     GpuTimingStatistics capture_copy_gpu;
     std::uint64_t captures = 0, submissions = 0, resets = 0;
+    std::uint64_t display_copies = 0;
     std::uint64_t completed = 0, skipped = 0, quarantined = 0, bytes = 0;
     std::uint64_t render_target_writes = 0, render_target_rewrites = 0;
     std::array<RenderTargetDiagnostic, 2> render_targets{};
@@ -79,6 +83,12 @@ class SceneCaptureManager {
 
   bool register_device(std::uint64_t device_key, ID3D12Device* native_device) noexcept;
   void destroy_device(std::uint64_t device_key) noexcept;
+  // Flight invalidation never retires executable application recordings. Their
+  // packet/consumer leases and timeline ordering survive until native Reset,
+  // destruction and covering GPU completion. New capture waits for resume and
+  // a recording belonging to the new session.
+  std::uint64_t reset_session(std::uint64_t device_key) noexcept;
+  bool resume_session(std::uint64_t device_key, std::uint64_t generation) noexcept;
   bool register_command_list(ID3D12GraphicsCommandList* native_list, std::uint64_t device_key, std::uint64_t object_generation) noexcept;
   // A list discovered at submission has an unobserved existing recording.
   // Only a subsequent, fully observed successful native Reset admits it.
@@ -181,14 +191,37 @@ class SceneCaptureManager {
   bool register_consumer_recording(ID3D12GraphicsCommandList* native_list) noexcept;
 
   engine_hook::queue_submit::Callbacks callbacks() noexcept;
+  struct DisplaySubmissionPlan {
+    struct Item {
+      UINT after_list = 0;
+      pfd_submission::Pool::Copy copy;
+      bool before = false;
+    };
+    std::uint64_t device_key = 0, generation = 0;
+    const std::atomic<std::uint64_t>* current_generation = nullptr;
+    std::array<Item, engine_hook::queue_submit::kMaximumInsertions> items{};
+    UINT count = 0;
+    // Planner transfers one reference per nonnull source/target. Releases
+    // happen after manager locks; the pool takes independent GPU leases.
+    ~DisplaySubmissionPlan();
+    bool current() const noexcept;
+  };
+  using DisplaySubmissionPlanner = void (*)(void*, ID3D12CommandQueue*, UINT, ID3D12CommandList* const*, DisplaySubmissionPlan&) noexcept;
+  bool set_display_submission_planner(DisplaySubmissionPlanner, void*) noexcept;
+  void service_display_submissions() noexcept;
+  UINT augment_submission(ID3D12CommandQueue*, std::uint64_t, engine_hook::queue_submit::Insertion*, UINT) noexcept;
+  void augmentation_result(ID3D12CommandQueue*, std::uint64_t, UINT) noexcept;
   // Discovery runs without submission serialization. Only fully observed,
   // unrelated recordings bypass it; all other batches revalidate under both
   // manager and submission locks before retaining leases or queuing a fence.
-  // Contended or same-thread re-entrant submits invalidate source state instead
-  // of failing the device, so Present/frame-generation helpers can forward.
+  // Source-only contention invalidates state after forwarding. Escaped capture
+  // packets are quarantined; lost stable-output reader ordering fails only that
+  // device. Proven unrelated helpers need neither lock nor invalidation.
   std::uint64_t before_submission(ID3D12CommandQueue*, UINT, ID3D12CommandList* const*) noexcept;
   void after_submission(ID3D12CommandQueue*, std::uint64_t receipt) noexcept;
   void submission_refused(ID3D12CommandQueue*, engine_hook::queue_submit::Refusal) noexcept;
+  std::uint64_t submission_refused_batch(ID3D12CommandQueue*, engine_hook::queue_submit::Refusal, UINT, ID3D12CommandList* const*) noexcept;
+  void submission_refused_completed(std::uint64_t token) noexcept;
 
   // begin/end MUST run on the same thread, with no intervening manager API that
   // begins another submission. The private DIRECT queue must not be registered
@@ -215,7 +248,10 @@ class SceneCaptureManager {
     ID3D12Fence* timeline = nullptr;
     std::uint64_t last_signal = 0;
     bool active = false, failed = false;
+    std::uint64_t session_generation = 1;
+    bool session_active = true;
     source_state::Tracker source_states;
+    pfd_submission::Pool display_copies;
   };
   struct SourceLease {
     source_state::Key key;
@@ -224,6 +260,7 @@ class SceneCaptureManager {
   struct List {
     ID3D12GraphicsCommandList* native = nullptr;
     std::uint64_t device_key = 0, object_generation = 0, recording = 1;
+    std::uint64_t session_generation = 0;
     std::uint16_t packets = 0;
     unsigned feeds = 0;
     bool consumer = false;
@@ -239,6 +276,7 @@ class SceneCaptureManager {
     D3D12_RESOURCE_DESC description{};
     SceneCopyMatch match;
     std::uint64_t token = 0, device_key = 0, submitted = 0;
+    std::uint64_t session_generation = 0;
     FrameOrder order;
     ID3D12CommandQueue* producer = nullptr;  // Registered queue retained by hook.
     unsigned in_flight = 0;
@@ -263,17 +301,38 @@ class SceneCaptureManager {
     std::size_t source_lease_count = 0;
     std::array<std::uint32_t, MaximumPackets> packet_positions{};
     std::uint32_t last_position = 0;
+    std::array<engine_hook::queue_submit::Insertion, engine_hook::queue_submit::kMaximumInsertions> display_insertions{};
+    std::array<unsigned, engine_hook::queue_submit::kMaximumInsertions> display_slots{};
+    UINT display_count = 0, display_accepted = 0;
+    std::uint64_t session_generation = 0;
   };
   struct SourceCandidate {
     ID3D12Resource* native = nullptr;  // Registry identity only; never a GPU lease.
     std::uint64_t device_key = 0, generation = 0;
     D3D12_RESOURCE_DESC description{};
   };
+  // Contended callbacks cannot acquire mutex_. Publish only the bounded
+  // classification of an actual native recording, never borrowed COM state.
+  struct PublishedList {
+    std::atomic<std::uint64_t> revision{};
+    std::atomic<ID3D12GraphicsCommandList*> native{};
+    std::atomic<std::uint64_t> effects{};
+  };
+  struct UnobservedBatch {
+    std::uint32_t sources = 0, uncertain = 0;
+    bool unrelated = true;
+  };
   Device* device(std::uint64_t) noexcept;
   List* list(ID3D12GraphicsCommandList*) noexcept;
   bool register_list(ID3D12GraphicsCommandList*, std::uint64_t, std::uint64_t, bool observed) noexcept;
-  void observe_unknown_lists(ID3D12CommandQueue*, UINT, ID3D12CommandList* const*) noexcept;
+  bool observe_unknown_lists(ID3D12CommandQueue*, UINT, ID3D12CommandList* const*) noexcept;
   void retire_list(List&) noexcept;
+  void publish_list(const List&) noexcept;
+  void touch_sources(List&) noexcept;
+  std::uint32_t queue_devices(ID3D12CommandQueue*) const noexcept;
+  UnobservedBatch classify_unobserved(ID3D12CommandQueue*, UINT, ID3D12CommandList* const*, bool mark_owned = false) noexcept;
+  void apply_recording_refusal(std::uint32_t effects) noexcept;
+  void apply_deferred() noexcept;
   void apply_source_draw(List&, source_state::Key, bool allowed) noexcept;
   static void release_source_leases(std::array<SourceLease, source_state::Tracker::capacity>&, std::size_t&) noexcept;
   static bool retain_source_lease(std::array<SourceLease, source_state::Tracker::capacity>&,
@@ -307,6 +366,10 @@ class SceneCaptureManager {
   std::mutex submission_mutex_;
   std::array<Device, MaximumDevices> devices_{};
   std::array<List, MaximumLists> lists_{};
+  std::array<PublishedList, MaximumLists> published_lists_{};
+  std::array<std::atomic<ID3D12Device*>, MaximumDevices> published_devices_{};
+  std::atomic<std::uint32_t> deferred_sources_{}, deferred_uncertain_{};
+  std::atomic<bool> deferred_recordings_{};
   std::unordered_map<ID3D12GraphicsCommandList*, std::size_t> list_indices_;
   std::array<Packet, MaximumPackets> packets_{};
   std::array<SourceCandidate, MaximumDevices * 128> sources_{};
@@ -322,6 +385,8 @@ class SceneCaptureManager {
   Statistics stats_;
   UnknownListObserver unknown_list_observer_ = nullptr;
   void* unknown_list_context_ = nullptr;
+  DisplaySubmissionPlanner display_planner_ = nullptr;
+  void* display_planner_context_ = nullptr;
 };
 
 }  // namespace taxi_camera

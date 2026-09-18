@@ -58,6 +58,8 @@ int main() {
     settings.tail_upper = {0.25f, 0.625f};
     settings.tail_corner = {0.1875f, 0.75f};
     settings.tail_inner = {0.375f, 0.875f};
+    settings.guide_color = {0.125f, 0.5f, 0.875f};
+    settings.speed_color = {0.25f, 0.75f, 0.375f};
     settings.route_request = 12;
     settings.taxi_request = 7;
     settings.taxi_selected_mask = 3;
@@ -67,12 +69,32 @@ int main() {
     publish(owner, 10000, settings);
     control.refresh(reader);
     require(control.connected(10000), "Fresh companion accepted");
-    require(ProtocolVersion == 8 && control.settings().nose_dot == settings.nose_dot &&
+    require(control.owner_pid() == GetCurrentProcessId(), "Complete message retains the current companion owner");
+    CompanionSetupSession setup;
+    auto change = setup.observe(control.connected(10000), control.settings().enabled, control.owner_pid(), 1);
+    require(change.started && !change.stopped && change.generation == 1, "First Connect starts bridge setup");
+    change = setup.observe(true, true, control.owner_pid(), 1);
+    require(!change.started && !change.stopped && change.generation == 1, "Same live request does not repeat setup");
+    change = setup.observe(true, true, control.owner_pid(), 2);
+    require(change.started && change.generation == 2, "Rapid Disconnect/Connect serial forces setup even between bridge polls");
+    change = setup.observe(false, false, control.owner_pid(), 2);
+    require(change.stopped && !change.started, "Disconnect closes the setup session");
+    change = setup.observe(false, false, control.owner_pid(), 2);
+    require(!change.stopped && !change.started, "Disconnected polling does not repeat shutdown");
+    change = setup.observe(true, true, control.owner_pid(), 2);
+    require(change.started && change.generation == 3, "Heartbeat reconnection restarts unchanged-profile setup");
+    change = setup.observe(true, true, control.owner_pid() + 1, 2);
+    require(change.started && change.generation == 4, "New companion owner restarts setup despite reused serial");
+    change = setup.observe(true, false, control.owner_pid() + 1, 2);
+    require(change.stopped, "Disabled connection closes output without waiting for heartbeat timeout");
+    require(ProtocolVersion == 9 && control.settings().nose_dot == settings.nose_dot &&
                 control.settings().tail_upper == settings.tail_upper && control.settings().tail_corner == settings.tail_corner &&
                 control.settings().tail_inner == settings.tail_inner,
-            "Protocol8 guide coordinates roundtrip");
+            "Protocol9 guide coordinates roundtrip");
+    require(control.settings().guide_color == settings.guide_color && control.settings().speed_color == settings.speed_color,
+            "Independent marking and ground-speed colours roundtrip");
     require(control.settings().taxi_request == 7 && control.settings().taxi_selected_mask == 3 && control.settings().taxi_desired_mask == 2,
-            "Protocol8 scoped aircraft TAXI request roundtrip");
+            "Protocol9 scoped aircraft TAXI request roundtrip");
     auto invalid_request = settings;
     invalid_request.taxi_selected_mask = 1;
     require(!valid_settings(invalid_request), "Aircraft request cannot change an unselected side");
@@ -91,6 +113,17 @@ int main() {
         }
       }
     }
+    for (auto member : {&Settings::guide_color, &Settings::speed_color}) {
+      for (unsigned channel = 0; channel < 3; ++channel) {
+        for (float value : {-0.001f, 1.001f, std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity()}) {
+          auto invalid = settings;
+          (invalid.*member)[channel] = value;
+          publish(owner, 10000, invalid);
+          control.refresh(reader);
+          require(!control.connected(10000) && !control.settings().enabled, "Invalid RGB IPC cannot enable cameras");
+        }
+      }
+    }
     publish(owner, 10000, settings);
     control.refresh(reader);
     require(control.connected(10000), "Valid guides restore IPC after malformed packets");
@@ -102,11 +135,13 @@ int main() {
       for (std::uint64_t now = 10025; now <= 15000; now += 25) {
         require(control.refresh(reader) == Mailbox::LockResult::busy, "Identify contention");
         require(control.connected(now), "Both PFDs stay requested during live heartbeat");
+        require(control.owner_pid() == GetCurrentProcessId(), "Contention does not invent an owner change");
         const auto& held = control.settings();
         require(held.manual_mask == 3 && held.camera_rate == 60 && held.exposure == settings.exposure && held.mounts == settings.mounts &&
                     held.route_request == 12 && held.left_id == 149 && held.right_id == 148 && held.nose_dot == settings.nose_dot &&
                     held.tail_upper == settings.tail_upper && held.tail_corner == settings.tail_corner &&
-                    held.tail_inner == settings.tail_inner,
+                    held.tail_inner == settings.tail_inner && held.guide_color == settings.guide_color &&
+                    held.speed_color == settings.speed_color,
                 "Preserve exact settings during contention");
       }
       require(!control.connected(15001), "Contention cannot extend heartbeat deadline");
@@ -141,10 +176,10 @@ int main() {
     control.refresh(reader);
     require(control.connected(17000), "Valid message restores connection");
     require(owner.lock(1000), "Protocol mutation lock");
-    owner.data()->version = 6;
+    owner.data()->version = 8;
     owner.unlock();
     control.refresh(reader);
-    require(!control.connected(17000), "Old protocol6 is rejected by the protocol7 settings layout");
+    require(!control.connected(17000), "Old protocol8 is rejected by the protocol9 settings layout");
     require(owner.lock(1000), "Restore protocol lock");
     owner.data()->version = ProtocolVersion;
     owner.unlock();

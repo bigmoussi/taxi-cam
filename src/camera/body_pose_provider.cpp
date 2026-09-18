@@ -21,6 +21,8 @@ using Request = HRESULT(WINAPI*)(HANDLE, DWORD, DWORD, DWORD, DWORD, DWORD, DWOR
 using Dispatch = HRESULT(WINAPI*)(HANDLE, void**, DWORD*);
 using SystemState = HRESULT(WINAPI*)(HANDLE, DWORD, const char*);
 using Subscribe = HRESULT(WINAPI*)(HANDLE, DWORD, const char*);
+// https://docs.flightsimulator.com/msfs2024/retail/programming-apis/simconnect/api-reference/events-and-data/simconnect_subscribetoflowevent/
+using SubscribeFlow = HRESULT(WINAPI*)(HANDLE);
 using CameraGet = HRESULT(WINAPI*)(HANDLE, DWORD);
 using LastPacket = HRESULT(WINAPI*)(HANDLE, DWORD*);
 using MapEvent = HRESULT(WINAPI*)(HANDLE, DWORD, const char*);
@@ -63,6 +65,8 @@ struct State {
   bool taxi_left = false, taxi_right = false;
   AircraftIdentityCache identity;
   AircraftSessionLifecycle aircraft_session;
+  bool flow_subscribed = false;
+  const char* flow_error = "flow_not_subscribed";
   std::uint64_t taxi_ms = 0;
   const char* taxi_error = "not_initialized";
   TaxiSpeedCutoff speed_cutoff;
@@ -82,7 +86,12 @@ struct State {
 };
 State state;
 std::atomic<std::uint32_t> profile_id{1};
+std::atomic<std::uint64_t> session_epoch{0};
+// Bit0: callback notification; bit1: reset serviced. Fresh telemetry is needed
+// before returning to0. Repeated invalid samples cannot churn epochs.
+std::atomic<unsigned> invalid_world{0};
 SRWLOCK lifecycle = SRWLOCK_INIT;
+bool fresh(std::uint64_t sample, std::uint64_t now) noexcept;
 void reset_session_locked() noexcept {
   state.identity = {};
   state.aircraft_ms = state.camera_ms = state.ground_speed_ms = state.taxi_ms = state.lighting_ms = 0;
@@ -103,8 +112,17 @@ bool accept_session_packet(const void* raw, DWORD bytes) noexcept {
   const bool changed = state.aircraft_session.accept(raw, bytes);
   if (changed || !state.aircraft_session.running())
     reset_session_locked();
+  session_epoch.store(state.aircraft_session.epoch(), std::memory_order_release);
   ReleaseSRWLockExclusive(&state.lock);
   return changed;
+}
+bool session_reconnect_required(bool invalidated) noexcept {
+  AcquireSRWLockShared(&state.lock);
+  // A legacy Sim-stop can precede FLOW_END. Keep listening so closing the
+  // connection cannot discard the event that establishes the persistent latch.
+  const bool reconnect = invalidated && state.aircraft_session.running() && !state.aircraft_session.loading();
+  ReleaseSRWLockShared(&state.lock);
+  return reconnect;
 }
 bool accept_identity_packet(const void* raw, DWORD bytes, std::uint64_t now) noexcept {
   AcquireSRWLockExclusive(&state.lock);
@@ -116,9 +134,66 @@ bool accept_identity_packet(const void* raw, DWORD bytes, std::uint64_t now) noe
   if (changed) {
     state.aircraft_session.changed();
     reset_session_locked();
+    session_epoch.store(state.aircraft_session.epoch(), std::memory_order_release);
   }
   ReleaseSRWLockExclusive(&state.lock);
   return changed;
+}
+void service_world_invalidation() noexcept {
+  AcquireSRWLockExclusive(&state.lock);
+  auto pending = invalid_world.load(std::memory_order_acquire);
+  if ((pending & 1u) && invalid_world.compare_exchange_strong(pending, 2, std::memory_order_acq_rel)) {
+    if (!(pending & 2u) && !state.aircraft_session.loading())
+      state.aircraft_session.changed();
+    reset_session_locked();
+    state.error = "camera_world_values";
+    session_epoch.store(state.aircraft_session.epoch(), std::memory_order_release);
+  }
+  ReleaseSRWLockExclusive(&state.lock);
+}
+AircraftSessionReadiness readiness_locked(std::uint64_t now) noexcept {
+  AircraftSessionReadiness out;
+  out.epoch = state.aircraft_session.epoch();
+  out.flow_subscribed = state.flow_subscribed;
+  out.last_flow_event = state.aircraft_session.last_flow_event();
+  const auto pending = invalid_world.load(std::memory_order_acquire);
+  out.loading = state.aircraft_session.loading() || pending != 0;
+  const auto identity = state.identity.sample(now);
+  const bool telemetry = identity.fresh && identity.detected_profile && fresh(state.aircraft_ms, now) && fresh(state.camera_ms, now);
+  out.ready = !state.aircraft_session.loading() && state.aircraft_session.running() && !(pending & 1u) && telemetry;
+  if (out.ready && pending == 2) {
+    unsigned serviced = 2;
+    out.ready = invalid_world.compare_exchange_strong(serviced, 0, std::memory_order_acq_rel) || serviced == 0;
+    out.loading = !out.ready;
+  }
+  out.error = state.aircraft_session.loading()    ? "aircraft_session_loading"
+              : out.loading                       ? "camera_world_revalidation"
+              : !state.aircraft_session.running() ? "simulator_stopped"
+              : !telemetry                        ? "aircraft_session_telemetry_pending"
+                                                  : state.flow_error;
+  return out;
+}
+bool accept_camera_packet(const void* raw, DWORD bytes, std::uint64_t sample_ms) noexcept {
+  if (!raw || bytes != 96 || !sample_ms)
+    return false;
+  std::array<DWORD, 3> header{};
+  std::memcpy(header.data(), raw, sizeof(header));
+  if (header[0] != bytes || (header[2] != 40 && header[2] != 41))
+    return false;
+  CameraData value{};
+  std::memcpy(&value, static_cast<const unsigned char*>(raw) + 12, sizeof(value));
+  if (value.position_reference != 2 || !std::isfinite(value.fov) || value.fov <= 0 || value.fov >= 3.2 ||
+      !std::isfinite(value.position[0]) || !std::isfinite(value.position[1]) || !std::isfinite(value.position[2]) ||
+      std::abs(value.position[0]) > 90 || std::abs(value.position[1]) > 180 || std::abs(value.position[2]) > 100000) {
+    notify_invalid_camera_world();
+    service_world_invalidation();
+    return true;
+  }
+  AcquireSRWLockExclusive(&state.lock);
+  state.camera = value;
+  state.camera_ms = sample_ms;
+  ReleaseSRWLockExclusive(&state.lock);
+  return true;
 }
 void on_ground_failure(const char* text) noexcept {
   AcquireSRWLockExclusive(&state.lock);
@@ -306,6 +381,7 @@ DWORD WINAPI worker(void*) noexcept {
   const auto dispatch = reinterpret_cast<Dispatch>(GetProcAddress(dll, "SimConnect_GetNextDispatch"));
   const auto system_state = reinterpret_cast<SystemState>(GetProcAddress(dll, "SimConnect_RequestSystemState"));
   const auto subscribe = reinterpret_cast<Subscribe>(GetProcAddress(dll, "SimConnect_SubscribeToSystemEvent"));
+  const auto subscribe_flow = reinterpret_cast<SubscribeFlow>(GetProcAddress(dll, "SimConnect_SubscribeToFlowEvent"));
   const auto get = reinterpret_cast<CameraGet>(GetProcAddress(dll, "SimConnect_CameraGet"));
   const auto last_packet = reinterpret_cast<LastPacket>(GetProcAddress(dll, "SimConnect_GetLastSentPacketID"));
   const auto map_event = reinterpret_cast<MapEvent>(GetProcAddress(dll, "SimConnect_MapClientEventToSimEvent"));
@@ -324,6 +400,14 @@ DWORD WINAPI worker(void*) noexcept {
     return 0;
   }
   HRESULT hr = open(&session, "Taxi Cam aircraft mount telemetry", nullptr, 0, notification, 0);
+  DWORD flow_packet = 0;
+  const HRESULT flow_hr = SUCCEEDED(hr) && subscribe_flow ? subscribe_flow(session) : E_NOINTERFACE;
+  if (SUCCEEDED(flow_hr) && last_packet)
+    last_packet(session, &flow_packet);
+  AcquireSRWLockExclusive(&state.lock);
+  state.flow_subscribed = SUCCEEDED(flow_hr);
+  state.flow_error = !subscribe_flow ? "flow_export_unavailable" : FAILED(flow_hr) ? "flow_subscription_failed" : "";
+  ReleaseSRWLockExclusive(&state.lock);
   // Public lifecycle events discard the connection's queued body/camera/TAXI
   // responses before the companion reconnects. This also redefines aircraft
   // Lvars that were unavailable while the new aircraft was loading.
@@ -453,6 +537,7 @@ DWORD WINAPI worker(void*) noexcept {
       break;
     }
     const auto now = GetTickCount64();
+    service_world_invalidation();
     if (type_defined && now - previous_type >= 1000) {
       previous_type = now;
       if (identity_request > 0xfffffffcu)
@@ -520,12 +605,16 @@ DWORD WINAPI worker(void*) noexcept {
         failure("simconnect_packet_bounds");
         continue;
       }
-      if (header[2] == 4 || header[2] == 6) {
-        reconnect = accept_session_packet(raw, bytes);
+      if (header[2] == 4 || header[2] == 6 || (AircraftSessionLifecycle::flow_receive_id(header[2]) && bytes == 272)) {
+        const bool invalidated = accept_session_packet(raw, bytes);
+        // Keep the flow subscription alive throughout loading. Reconnect only
+        // after completion, discarding every response queued before it.
+        reconnect = session_reconnect_required(invalidated);
         if (reconnect)
           break;
       } else if (header[2] == 15 || (header[2] == 8 && bytes >= 40 && header[5] == 5)) {
-        reconnect = accept_identity_packet(raw, bytes, GetTickCount64());
+        const bool invalidated = accept_identity_packet(raw, bytes, GetTickCount64());
+        reconnect = session_reconnect_required(invalidated);
         if (reconnect)
           break;
       } else if (header[2] == 8) {
@@ -541,19 +630,8 @@ DWORD WINAPI worker(void*) noexcept {
         } else {
           accept_aircraft_packet(raw, bytes, GetTickCount64());
         }
-      } else if (header[2] == 40 && header[0] == 96 && bytes >= 96) {
-        CameraData value{};
-        std::memcpy(&value, static_cast<const unsigned char*>(raw) + 12, 84);
-        if (value.position_reference != 2 || !std::isfinite(value.fov) || value.fov <= 0 || value.fov >= 3.2 ||
-            !std::isfinite(value.position[0]) || !std::isfinite(value.position[1]) || !std::isfinite(value.position[2]) ||
-            std::abs(value.position[0]) > 90 || std::abs(value.position[1]) > 180 || std::abs(value.position[2]) > 100000) {
-          failure("camera_world_values", false);
-          continue;
-        }
-        AcquireSRWLockExclusive(&state.lock);
-        state.camera = value;
-        state.camera_ms = GetTickCount64();
-        ReleaseSRWLockExclusive(&state.lock);
+      } else if ((header[2] == 40 || header[2] == 41) && header[0] == 96 && bytes == 96) {
+        accept_camera_packet(raw, bytes, GetTickCount64());
       } else if (header[2] == 1) {
         // Exception SendID identifies a request, not a data-definition ID.
         // Correlated TAXI failures never clear valid aircraft/groundspeed.
@@ -571,7 +649,12 @@ DWORD WINAPI worker(void*) noexcept {
           lighting_exception = lighting_exception || (sent && sent == exception[4]);
         for (const auto sent : on_ground_packets)
           on_ground_exception = on_ground_exception || (sent && sent == exception[4]);
-        if (on_ground_exception) {
+        if (flow_packet && flow_packet == exception[4]) {
+          AcquireSRWLockExclusive(&state.lock);
+          state.flow_subscribed = false;
+          state.flow_error = "flow_simconnect_exception";
+          ReleaseSRWLockExclusive(&state.lock);
+        } else if (on_ground_exception) {
           on_ground_defined = false;
           on_ground_failure("on_ground_simconnect_exception");
         } else if (lighting_exception) {
@@ -617,7 +700,7 @@ DWORD WINAPI worker(void*) noexcept {
     const auto identity = state.identity.sample(command_now);
     const auto decision = state.button_commands.step(
         {command_now, epoch, buttons.sample_ms, profile.id, (buttons.left_on ? 1u : 0u) | (buttons.right_on ? 2u : 0u), commands,
-         state.aircraft_session.running() && identity.fresh && identity.detected_profile == profile.id, buttons.valid, speed.valid,
+         readiness_locked(command_now).ready && identity.fresh && identity.detected_profile == profile.id, buttons.valid, speed.valid,
          state.speed_cutoff.inhibited(), !manual_only, speed.knots, profile.speed_cutoff_knots});
     ReleaseSRWLockExclusive(&state.lock);
     for (unsigned side = 0; side < 2; ++side) {
@@ -627,7 +710,7 @@ DWORD WINAPI worker(void*) noexcept {
       const auto send_now = GetTickCount64();
       const auto current_identity = state.identity.sample(send_now);
       const bool current = state.button_commands.current(decision, side, send_now) && state.aircraft_session.epoch() == epoch &&
-                           state.aircraft_session.running() && current_identity.fresh && current_identity.detected_profile == profile.id;
+                           readiness_locked(send_now).ready && current_identity.fresh && current_identity.detected_profile == profile.id;
       ReleaseSRWLockShared(&state.lock);
       if (!current || WaitForSingleObject(state.stop, 0) == WAIT_OBJECT_0)
         continue;
@@ -716,70 +799,13 @@ LightingSample lighting_locked(std::uint64_t now) noexcept {
   }
   return out;
 }
-}  // namespace
-bool select_aircraft_profile(std::uint32_t id) noexcept {
-  if (!profiles::find(id))
-    return false;
-  shutdown_body_pose_provider();
-  profile_id.store(id);
-  return true;
-}
-AircraftIdentitySample get_aircraft_identity() noexcept {
-  AcquireSRWLockShared(&state.lock);
-  const auto result = state.aircraft_session.running() ? state.identity.sample(GetTickCount64()) : AircraftIdentitySample{};
-  ReleaseSRWLockShared(&state.lock);
-  return result;
-}
-std::uint64_t get_aircraft_session_epoch() noexcept {
-  AcquireSRWLockShared(&state.lock);
-  const auto result = state.aircraft_session.epoch();
-  ReleaseSRWLockShared(&state.lock);
-  return result;
-}
-bool aircraft_matches_profile() noexcept {
-  const auto identity = get_aircraft_identity();
-  // Manual and automatic selection use the same vendor/variant identity. ATC
-  // brand text alone cannot approve or reject an aircraft adapter.
-  return identity.fresh && identity.detected_profile == profile_id.load();
-}
-bool initialize_body_pose_provider() noexcept {
-  AcquireSRWLockExclusive(&lifecycle);
-  if (state.worker && WaitForSingleObject(state.worker, 0) == WAIT_OBJECT_0) {
-    CloseHandle(state.worker);
-    CloseHandle(state.stop);
-    state.worker = nullptr;
-    state.stop = nullptr;
-  }
-  if (state.worker) {
-    ReleaseSRWLockExclusive(&lifecycle);
-    return true;
-  }
-  // Automatic EFIS telemetry can start before any native hook pins the addon.
-  // FROM_ADDRESS also works for the standalone test executable's main image.
-  HMODULE provider_module = nullptr;
-  if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN, reinterpret_cast<LPCWSTR>(&worker),
-                          &provider_module)) {
-    ReleaseSRWLockExclusive(&lifecycle);
-    failure("provider_module_pin");
-    taxi_failure("provider_module_pin");
-    return false;
-  }
-  state.stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-  if (state.stop)
-    state.worker = CreateThread(nullptr, 0, worker, nullptr, 0, nullptr);
-  const bool ready = state.worker != nullptr;
-  if (!ready && state.stop) {
-    CloseHandle(state.stop);
-    state.stop = nullptr;
-  }
-  ReleaseSRWLockExclusive(&lifecycle);
-  return ready;
-}
-void shutdown_body_pose_provider() noexcept {
-  AcquireSRWLockExclusive(&lifecycle);
+// The lifecycle lock owns these handles. A blocked SDK call must never make a
+// control-thread stop/profile request wait, and must retain its live state.
+bool stop_provider_locked() noexcept {
   if (state.worker) {
     SetEvent(state.stop);
-    WaitForSingleObject(state.worker, INFINITE);
+    if (WaitForSingleObject(state.worker, 0) != WAIT_OBJECT_0)
+      return false;
     CloseHandle(state.worker);
     CloseHandle(state.stop);
     state.worker = nullptr;
@@ -805,7 +831,104 @@ void shutdown_body_pose_provider() noexcept {
   state.calibration_camera_ms = 0;
   state.error = "not_initialized";
   ReleaseSRWLockExclusive(&state.lock);
+  return true;
+}
+}  // namespace
+bool select_aircraft_profile(std::uint32_t id) noexcept {
+  if (!profiles::find(id))
+    return false;
+  AcquireSRWLockExclusive(&lifecycle);
+  AcquireSRWLockExclusive(&state.lock);
+  if (state.aircraft_session.loading() || !state.aircraft_session.running()) {
+    ReleaseSRWLockExclusive(&state.lock);
+    ReleaseSRWLockExclusive(&lifecycle);
+    return false;
+  }
+  if (id == profile_id.load() && state.worker && state.stop && WaitForSingleObject(state.worker, 0) == WAIT_TIMEOUT &&
+      WaitForSingleObject(state.stop, 0) == WAIT_TIMEOUT) {
+    // Explicit reconnect/full reset still requires new samples and calibration,
+    // but the same adapter needs no unsubscribe gap that could lose FLOW_END
+    // or FLIGHT_START. The worker will issue a new coherent identity poll.
+    reset_session_locked();
+    ReleaseSRWLockExclusive(&state.lock);
+    ReleaseSRWLockExclusive(&lifecycle);
+    return true;
+  }
+  ReleaseSRWLockExclusive(&state.lock);
+  const bool stopped = stop_provider_locked();
+  if (stopped)
+    profile_id.store(id);
   ReleaseSRWLockExclusive(&lifecycle);
+  return stopped;
+}
+AircraftIdentitySample get_aircraft_identity() noexcept {
+  AcquireSRWLockShared(&state.lock);
+  const auto result = state.aircraft_session.running() ? state.identity.sample(GetTickCount64()) : AircraftIdentitySample{};
+  ReleaseSRWLockShared(&state.lock);
+  return result;
+}
+std::uint64_t get_aircraft_session_epoch() noexcept {
+  return session_epoch.load(std::memory_order_acquire);
+}
+AircraftSessionReadiness get_aircraft_session_readiness() noexcept {
+  AircraftSessionReadiness out;
+  out.epoch = get_aircraft_session_epoch();
+  out.loading = invalid_world.load(std::memory_order_acquire) != 0;
+  out.error = "aircraft_session_cache_busy";
+  if (TryAcquireSRWLockShared(&state.lock)) {
+    out = readiness_locked(GetTickCount64());
+    ReleaseSRWLockShared(&state.lock);
+  }
+  return out;
+}
+void notify_invalid_camera_world() noexcept {
+  invalid_world.fetch_or(1u, std::memory_order_acq_rel);
+}
+bool aircraft_matches_profile() noexcept {
+  const auto identity = get_aircraft_identity();
+  // Manual and automatic selection use the same vendor/variant identity. ATC
+  // brand text alone cannot approve or reject an aircraft adapter.
+  return identity.fresh && identity.detected_profile == profile_id.load();
+}
+bool initialize_body_pose_provider() noexcept {
+  AcquireSRWLockExclusive(&lifecycle);
+  if (state.worker && WaitForSingleObject(state.worker, 0) == WAIT_OBJECT_0) {
+    CloseHandle(state.worker);
+    CloseHandle(state.stop);
+    state.worker = nullptr;
+    state.stop = nullptr;
+  }
+  if (state.worker) {
+    const bool ready = WaitForSingleObject(state.stop, 0) == WAIT_TIMEOUT;
+    ReleaseSRWLockExclusive(&lifecycle);
+    return ready;
+  }
+  // Automatic EFIS telemetry can start before any native hook pins the addon.
+  // FROM_ADDRESS also works for the standalone test executable's main image.
+  HMODULE provider_module = nullptr;
+  if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN, reinterpret_cast<LPCWSTR>(&worker),
+                          &provider_module)) {
+    ReleaseSRWLockExclusive(&lifecycle);
+    failure("provider_module_pin");
+    taxi_failure("provider_module_pin");
+    return false;
+  }
+  state.stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+  if (state.stop)
+    state.worker = CreateThread(nullptr, 0, worker, nullptr, 0, nullptr);
+  const bool ready = state.worker != nullptr;
+  if (!ready && state.stop) {
+    CloseHandle(state.stop);
+    state.stop = nullptr;
+  }
+  ReleaseSRWLockExclusive(&lifecycle);
+  return ready;
+}
+bool shutdown_body_pose_provider() noexcept {
+  AcquireSRWLockExclusive(&lifecycle);
+  const bool stopped = stop_provider_locked();
+  ReleaseSRWLockExclusive(&lifecycle);
+  return stopped;
 }
 void reset_body_pose_calibration() noexcept {
   AcquireSRWLockExclusive(&state.lock);
@@ -824,7 +947,7 @@ bool calibrate_body_pose(const Vector3& position, float fov, std::uint64_t now) 
   const auto locked_now = GetTickCount64();
   if (now < locked_now)
     now = locked_now;
-  bool good = fresh(state.camera_ms, now) && fresh(state.aircraft_ms, now) && now - state.camera_ms <= 100 &&
+  bool good = readiness_locked(now).ready && fresh(state.camera_ms, now) && fresh(state.aircraft_ms, now) && now - state.camera_ms <= 100 &&
               now - state.aircraft_ms <= 100 && std::abs(state.camera.fov - fov) <= 0.0001;
   const auto camera_surface = body_math::ecef(state.camera.position[0], state.camera.position[1], 0);
   const auto private_surface = body_math::ecef(lla[0], lla[1], 0);
@@ -863,7 +986,9 @@ BodyPoseSnapshot sample_body_pose(std::uint64_t now) noexcept {
   const auto locked_now = GetTickCount64();
   if (now < locked_now)
     now = locked_now;
-  if (!fresh(state.aircraft_ms, now))
+  if (state.aircraft_session.loading() || invalid_world.load(std::memory_order_acquire) || !state.aircraft_session.running())
+    out.error = "aircraft_session_loading";
+  else if (!fresh(state.aircraft_ms, now))
     out.error = state.aircraft_ms ? "aircraft_telemetry_stale" : state.error;
   else if (!state.calibrated) {
     out.calibration_required = fresh(state.camera_ms, now);
@@ -907,8 +1032,9 @@ TaxiButtonSample get_taxi_buttons() noexcept {
 void update_taxi_button_request(const TaxiButtonRequest& request, bool permitted) noexcept {
   AcquireSRWLockExclusive(&state.lock);
   const auto* profile = profiles::find(profile_id.load());
-  state.button_commands.update(request, permitted, GetTickCount64(), state.aircraft_session.epoch(), profile ? profile->id : 0,
-                               profile && profile->taxi_control != profiles::TaxiControl::manual_only);
+  const auto now = GetTickCount64();
+  state.button_commands.update(request, permitted && readiness_locked(now).ready, now, state.aircraft_session.epoch(),
+                               profile ? profile->id : 0, profile && profile->taxi_control != profiles::TaxiControl::manual_only);
   ReleaseSRWLockExclusive(&state.lock);
 }
 TaxiButtonRequestStatus get_taxi_button_request_status() noexcept {
@@ -931,6 +1057,31 @@ TaxiCutoffStatus get_taxi_cutoff() noexcept {
 }
 #ifdef TAXI_BODY_POSE_PROVIDER_TESTING
 namespace body_pose_provider_testing {
+bool install_worker(void* worker_handle, void* stop_handle) noexcept {
+  AcquireSRWLockExclusive(&lifecycle);
+  bool installed = false;
+  if (!state.worker && !state.stop && worker_handle && stop_handle) {
+    const auto process = GetCurrentProcess();
+    HANDLE worker_copy{}, stop_copy{};
+    if (DuplicateHandle(process, worker_handle, process, &worker_copy, 0, FALSE, DUPLICATE_SAME_ACCESS) &&
+        DuplicateHandle(process, stop_handle, process, &stop_copy, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
+      state.worker = worker_copy;
+      state.stop = stop_copy;
+      installed = true;
+    } else if (worker_copy) {
+      CloseHandle(worker_copy);
+    }
+  }
+  ReleaseSRWLockExclusive(&lifecycle);
+  return installed;
+}
+LifecycleSnapshot lifecycle_snapshot() noexcept {
+  AcquireSRWLockShared(&lifecycle);
+  const LifecycleSnapshot result{reinterpret_cast<std::uintptr_t>(state.worker), reinterpret_cast<std::uintptr_t>(state.stop),
+                                 profile_id.load()};
+  ReleaseSRWLockShared(&lifecycle);
+  return result;
+}
 bool accept_on_ground_packet(const void* packet, std::uint32_t bytes, std::uint64_t sample_ms) noexcept {
   return ::taxi_camera::native_camera::accept_on_ground_packet(packet, bytes, sample_ms);
 }
@@ -942,6 +1093,21 @@ OnGroundSample on_ground_at(std::uint64_t now_ms) noexcept {
 }
 bool accept_session_packet(const void* packet, std::uint32_t bytes) noexcept {
   return native_camera::accept_session_packet(packet, bytes);
+}
+bool session_reconnect_required(bool invalidated) noexcept {
+  return native_camera::session_reconnect_required(invalidated);
+}
+bool accept_camera_packet(const void* packet, std::uint32_t bytes, std::uint64_t sample_ms) noexcept {
+  return native_camera::accept_camera_packet(packet, bytes, sample_ms);
+}
+AircraftSessionReadiness session_readiness_at(std::uint64_t now_ms) noexcept {
+  AcquireSRWLockShared(&state.lock);
+  const auto out = readiness_locked(now_ms);
+  ReleaseSRWLockShared(&state.lock);
+  return out;
+}
+void service_world_invalidation() noexcept {
+  native_camera::service_world_invalidation();
 }
 bool accept_identity_packet(const void* packet, std::uint32_t bytes, std::uint64_t now) noexcept {
   return native_camera::accept_identity_packet(packet, bytes, now);

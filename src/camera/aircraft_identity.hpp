@@ -17,6 +17,23 @@ struct AircraftIdentitySample {
 class AircraftSessionLifecycle {
  public:
   static constexpr std::uint32_t SimEvent = 100, AircraftEvent = 101, FlightEvent = 102;
+  // Public MSFS2024 SIMCONNECT_FLOW_EVENT values (DWORD, not event IDs).
+  // https://docs.flightsimulator.com/msfs2024/html/6_Programming_APIs/SimConnect/API_Reference/Structures_And_Enumerations/SIMCONNECT_FLOW_EVENT.htm
+  enum Flow : std::uint32_t {
+    FltLoad = 1,
+    FltLoaded = 2,
+    TeleportStart = 3,
+    TeleportDone = 4,
+    BackToMainMenu = 9,
+    FlightStart = 14,
+    FlightEnd = 15
+  };
+  static constexpr std::uint32_t FlowReceiveId = 39;
+  // The SDK web enum includes EVENT_EX1, shifting FLOW/CAMERA to40/41.
+  // The installed MSFS1.8.16 CameraGet instead reports40, consistent with
+  // FLOW39 without that enum entry. Accept these compatibility layouts only
+  // with their exact, disjoint packet shapes, not an arbitrary receive ID.
+  static bool flow_receive_id(std::uint32_t id) noexcept { return id == FlowReceiveId || id == 40; }
   bool accept(const void* raw, std::uint32_t bytes) noexcept {
     if (!raw || bytes < 24 || bytes > 65536)
       return false;
@@ -24,18 +41,46 @@ class AircraftSessionLifecycle {
     std::memcpy(h.data(), raw, sizeof(h));
     if (h[0] != bytes)
       return false;
+    if (flow_receive_id(h[2]) && bytes == 272 && std::memchr(static_cast<const char*>(raw) + 16, 0, 256)) {
+      const auto event = h[3];
+      if (event != FltLoad && event != FltLoaded && event != TeleportStart && event != TeleportDone && event != BackToMainMenu &&
+          event != FlightStart && event != FlightEnd)
+        return false;
+      last_flow_event_ = event;
+      const auto before = pending_;
+      if (event == FltLoad || event == TeleportStart || event == BackToMainMenu || event == FlightEnd) {
+        const unsigned bit = event == FltLoad ? 1u : event == TeleportStart ? 2u : 4u;
+        pending_ |= bit;
+        if (!before)
+          changed();
+      } else if (event == FltLoaded) {
+        // A generic .flt load is not FLIGHT_START: menu/loading scenes can
+        // already expose valid aircraft telemetry. Only FLIGHT_START releases
+        // a previously observed end/menu latch.
+        pending_ &= ~1u;
+      } else if (event == TeleportDone) {
+        pending_ &= ~2u;
+      } else if (event == FlightStart) {
+        pending_ &= ~4u;
+      }
+      // Completion invalidates samples received during loading but does not
+      // manufacture another session. Duplicate starts/completions are inert.
+      return before != pending_;
+    }
     if (h[2] == 4 && bytes == 24 && h[4] == SimEvent && h[5] <= 1) {
       const bool transition = known_ && running_ != (h[5] != 0);
       known_ = true;
       running_ = h[5] != 0;
-      if (transition)
+      if (transition && !loading())
         changed();
-      return transition;
+      return transition && !loading();
     }
     if (h[2] == 6 && bytes == 288 && (h[4] == AircraftEvent || h[4] == FlightEvent) &&
         std::memchr(static_cast<const char*>(raw) + 24, 0, 260)) {
-      changed();
-      return true;
+      if (!loading()) {
+        changed();
+        return true;
+      }
     }
     return false;
   }
@@ -45,10 +90,14 @@ class AircraftSessionLifecycle {
   }
   std::uint64_t epoch() const noexcept { return epoch_; }
   bool running() const noexcept { return !known_ || running_; }
+  bool loading() const noexcept { return pending_ != 0; }
+  std::uint32_t last_flow_event() const noexcept { return last_flow_event_; }
 
  private:
   std::uint64_t epoch_ = 0;
   bool known_ = false, running_ = false;
+  unsigned pending_ = 0;
+  std::uint32_t last_flow_event_ = 0;
 };
 // Cached public metadata only; owns no simulator objects and makes no API calls.
 class AircraftIdentityCache {

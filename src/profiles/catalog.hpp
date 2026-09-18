@@ -24,18 +24,16 @@ struct Composition {
 };
 enum class TaxiControl { push_event, lvar_off, manual_only };
 enum class PfdDetectionPolicy { dominant_activity, ini_a380_allocation_group };
-inline constexpr Composition AmberEtacs = [] {
+inline constexpr Composition A350Etacs = [] {
   Composition c;
-  c.square_nose_markers = 0;
-  c.guide_color = {1, 0.55f, 0};
   // A350-900 image-space guide defaults; live adjustments remain per profile.
   c.tail_upper = {0.29f, 0.76f};
   c.tail_corner = {0.26f, 0.87f};
   c.tail_inner = {0.31f, 0.87f};
   return c;
 }();
-inline constexpr Composition AmberEtacsA35K = [] {
-  auto c = AmberEtacs;
+inline constexpr Composition A350EtacsA35K = [] {
+  auto c = A350Etacs;
   c.tail_upper = {0.31f, 0.69f};
   c.tail_corner = {0.29f, 0.85f};
   c.tail_inner = {0.37f, 0.855f};
@@ -97,7 +95,7 @@ inline constexpr AircraftProfile A359{2,
                                       {{{774, 251}, {774, 496}}},
                                       true,
                                       60,
-                                      AmberEtacs,
+                                      A350Etacs,
                                       {28, 29, 87, 91, 27, 90},
                                       {"inibuilds-aircraft-a350", "presets/inibuilds", "attachments/inibuilds"}};
 inline constexpr AircraftProfile A35K{3,
@@ -116,7 +114,7 @@ inline constexpr AircraftProfile A35K{3,
                                       {{{774, 251}, {774, 496}}},
                                       true,
                                       60,
-                                      AmberEtacsA35K,
+                                      A350EtacsA35K,
                                       {28, 29, 87, 91, 27, 90},
                                       {"inibuilds-aircraft-a350", "presets/inibuilds", "attachments/inibuilds"}};
 // iniBuilds A380 display layout started from FBW. Mounts and guide defaults

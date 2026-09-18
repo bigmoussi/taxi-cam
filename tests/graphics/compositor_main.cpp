@@ -43,6 +43,7 @@ struct Result {
   std::uint64_t packed_float_pixels = 0;
   std::uint64_t exposure_checks = 0;
   std::uint64_t magenta_pixels = 0;
+  std::uint64_t recolored_guide_pixels = 0;
   std::uint64_t night_rgb_checks = 0;
   Compositor::Statistics statistics;
 };
@@ -146,10 +147,11 @@ void pixel_case(ID3D12Device* device,
                 Result& result,
                 const std::array<float, 2>& exposures = {-8, -4},
                 bool overlay_case = false,
-                bool round_nose = false) {
+                bool round_nose = false,
+                bool recolor_guides = false) {
   auto layout = taxi_camera::profiles::A380.composition;
   if (round_nose)
-    layout.square_nose_markers = taxi_camera::profiles::A359.composition.square_nose_markers;
+    layout.square_nose_markers = 0;  // Explicit custom shape; all aircraft defaults use squares.
   compositor.set_composition(layout);
   std::array<Reference<ID3D12Resource>, 2> sources;
   for (std::size_t index = 0; index < sources.size(); ++index) {
@@ -244,8 +246,12 @@ void pixel_case(ID3D12Device* device,
   transition(list, pfd.get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_DEST);
   for (UINT frame = 0; frame < 2; ++frame) {
     const auto exposure_statistics = compositor.statistics();
-    compositor.set_reference_guides(overlay_case && frame == 0);
-    compositor.set_ground_speed(frame == 0 ? 11.f : std::numeric_limits<float>::quiet_NaN(), overlay_case);
+    if (recolor_guides && frame) {
+      layout.guide_color = {32.f / 255, 174.f / 255, 224.f / 255};
+      compositor.set_composition(layout);
+    }
+    compositor.set_reference_guides(overlay_case && (frame == 0 || recolor_guides));
+    compositor.set_ground_speed(frame == 0 || recolor_guides ? 11.f : std::numeric_limits<float>::quiet_NaN(), overlay_case);
     require(compositor.set_display_exposure(exposures[frame]) && compositor.display_exposure() == exposures[frame],
             "Valid exposure was not applied to the next recording");
     require(compositor.statistics().shader_compiles == exposure_statistics.shader_compiles &&
@@ -258,7 +264,7 @@ void pixel_case(ID3D12Device* device,
         const auto color = source.packed_float ? packed_color(frame, source_index, source.night) : float_color(frame, source_index);
         list->ClearRenderTargetView(handles[source_index], color.data(), 0, nullptr);
       } else {
-        generator.record(list, handles[source_index], source.width, source.height, source.bgra, frame, source_index);
+        generator.record(list, handles[source_index], source.width, source.height, source.bgra, recolor_guides ? 0 : frame, source_index);
       }
       transition(list, sources[source_index].get(), D3D12_RESOURCE_STATE_RENDER_TARGET, source.before);
     }
@@ -293,10 +299,13 @@ void pixel_case(ID3D12Device* device,
   submission.finish(compositor);
   constexpr std::array<unsigned char, 4> SentinelBytes{17, 34, 51, 255};
   std::array<unsigned char, 3> night_day_pixel{};
+  std::vector<unsigned char> first_color_frame;
   for (UINT frame = 0; frame < 2; ++frame) {
     void* mapped = nullptr;
     const D3D12_RANGE range{0, static_cast<SIZE_T>(bytes)};
     check(readbacks[frame]->Map(0, &range, &mapped), "Map test-only composition readback");
+    if (recolor_guides && !frame)
+      first_color_frame.assign(static_cast<const unsigned char*>(mapped), static_cast<const unsigned char*>(mapped) + bytes);
     if (source_descriptions[0].night) {
       const auto* nose =
           static_cast<const unsigned char*>(mapped) + footprint.Offset + UINT64(127) * footprint.Footprint.RowPitch + 4 * 384;
@@ -331,9 +340,10 @@ void pixel_case(ID3D12Device* device,
           }
       if (round_nose)
         require(nose_pixels == 226 && !is_magenta(100, 114) && !is_magenta(115, 129),
-                "A350 nose markers must be 12-pixel-diameter circles");
+                "An explicit custom circle remains 12 pixels in diameter");
       else
-        require(nose_pixels == 392, "Both A380 nose markers must be filled 14-by-14 squares");
+        require(nose_pixels == 392 && is_magenta(101, 115) && is_magenta(114, 128) && is_magenta(653, 115) && is_magenta(666, 128),
+                "Both default nose markers must include the corners of filled 14-by-14 squares");
       require(is_magenta(234, 637) && is_magenta(533, 637) && is_magenta(253, 582) && is_magenta(514, 582) && is_magenta(279, 641) &&
                   is_magenta(488, 641) && !is_magenta(245, 631),
               "Tail reference brackets missed the approved calibration landmarks");
@@ -342,7 +352,21 @@ void pixel_case(ID3D12Device* device,
     for (UINT y = 0; y < 1024; ++y) {
       const auto* row = static_cast<const unsigned char*>(mapped) + footprint.Offset + UINT64(y) * footprint.Footprint.RowPitch;
       for (UINT x = 0; x < 768; ++x) {
-        const int font_cell = reference_overlay_oracle::font_cell(x, y, overlay_case && frame == 0, 11);
+        const bool overlay_enabled = overlay_case && (frame == 0 || recolor_guides);
+        std::array<unsigned char, 4> guide_oracle{};
+        const bool guide_pixel = reference_overlay_oracle::pixel(x, y, guide_oracle, overlay_enabled, overlay_enabled, 11, round_nose) &&
+                                 guide_oracle == std::array<unsigned char, 4>{255, 0, 255, 255};
+        if (recolor_guides && frame) {
+          const auto* previous = first_color_frame.data() + footprint.Offset + UINT64(y) * footprint.Footprint.RowPitch + 4 * x;
+          if (guide_pixel) {
+            require(row[4 * x] == 32 && row[4 * x + 1] == 174 && row[4 * x + 2] == 224 && row[4 * x + 3] == 255,
+                    "Every guide pixel changes to the chosen live RGB color at its original position");
+            ++result.recolored_guide_pixels;
+          } else
+            require(std::equal(previous, previous + 4, row + 4 * x),
+                    "Guide-only recoloring preserves GS color, camera pixels, divider and lower trim exactly");
+        }
+        const int font_cell = reference_overlay_oracle::font_cell(x, y, overlay_enabled, 11);
         if (font_cell >= 0) {
           require(font_coverage.observe(font_cell, row + x * 4), "GS font lost its opaque white-label/green-value colour contract");
           ++result.checked_pixels;
@@ -353,10 +377,11 @@ void pixel_case(ID3D12Device* device,
         if (y >= 763) {
           expected = SentinelBytes;
           ++result.lower_pixels;
-        } else if (reference_overlay_oracle::pixel(x, y, expected, overlay_case && frame == 0, overlay_case && frame == 0, 11,
-                                                   round_nose)) {
+        } else if (reference_overlay_oracle::pixel(x, y, expected, overlay_enabled, overlay_enabled, 11, round_nose)) {
           if (y >= 251 && y < 263)
             ++result.divider_pixels;
+          if (guide_pixel && recolor_guides && frame)
+            expected = {32, 174, 224, 255};
           if (expected == std::array<unsigned char, 4>{255, 0, 255, 255})
             ++result.magenta_pixels;
         } else {
@@ -368,8 +393,8 @@ void pixel_case(ID3D12Device* device,
           else if (source_descriptions[source_index].floating)
             ++result.float_pixels;
           for (UINT channel = 0; channel < 3; ++channel)
-            expected[channel] = expected_channel(source_descriptions[source_index], x, source_y, region_height, channel, frame,
-                                                 source_index, exposures[frame]);
+            expected[channel] = expected_channel(source_descriptions[source_index], x, source_y, region_height, channel,
+                                                 recolor_guides ? 0 : frame, source_index, exposures[frame]);
           tolerance = 2;
         }
         for (UINT channel = 0; channel < 4; ++channel) {
@@ -383,7 +408,8 @@ void pixel_case(ID3D12Device* device,
         ++result.checked_pixels;
       }
     }
-    require(font_coverage.complete(overlay_case && frame == 0, 11), "GS glyphs are missing, filled rectangles or missing antialiasing");
+    require(font_coverage.complete(overlay_case && (frame == 0 || recolor_guides), 11),
+            "GS glyphs are missing, filled rectangles or missing antialiasing");
     const D3D12_RANGE no_writes{0, 0};
     readbacks[frame]->Unmap(0, &no_writes);
     ++result.frames;
@@ -456,14 +482,15 @@ Result run(bool force_warp) {
   // every unmarked camera/lower-trim pixel. No descriptor or shader changes.
   pixel_case(device.get(), compositor, generator, pairs[0], false, result, {-8, -8}, true);
   pixel_case(device.get(), compositor, generator, pairs[0], false, result, {-8, -8}, true, true);
+  pixel_case(device.get(), compositor, generator, pairs[0], false, result, {-8, -8}, true, false, true);
   auto night = pairs.back();
   night[0].night = night[1].night = true;
   pixel_case(device.get(), compositor, generator, night, false, result,
              {Compositor::DefaultExposureEv, Compositor::DefaultExposureEv + taxi_camera::DisplayExposureController::DefaultNightBoostEv});
   result.statistics = compositor.statistics();
-  require(result.statistics.shader_compiles == 2 && result.statistics.descriptor_writes == 21 && result.statistics.input_changes == 10 &&
-              result.statistics.recordings == 20 && result.night_rgb_checks == 2 && result.float_pixels > 1000000 &&
-              result.packed_float_pixels > 2900000 && result.magenta_pixels > 400,
+  require(result.statistics.shader_compiles == 2 && result.statistics.descriptor_writes == 23 && result.statistics.input_changes == 11 &&
+              result.statistics.recordings == 22 && result.night_rgb_checks == 2 && result.float_pixels > 1000000 &&
+              result.packed_float_pixels > 2900000 && result.magenta_pixels > 400 && result.recolored_guide_pixels > 400,
           "Unexpected compositor rebuild, descriptor update or recording count");
   compositor.release();
   if (messages.get()) {
@@ -494,7 +521,7 @@ int wmain(int argc, wchar_t** argv) {
         "\"checkedPixels\":%llu,\"dividerPixels\":%llu,\"preservedLowerPixels\":%llu,\"rejectionChecks\":%llu,"
         "\"msaaRejectionChecks\":%llu,\"shaderCompiles\":%llu,\"descriptorWrites\":%llu,\"inputChanges\":%llu,\"floatPixels\":%llu,"
         "\"packedFloatPixels\":%llu,\"exposureChecks\":%llu,\"magentaPixels\":%llu,\"nightRgbChecks\":%llu,\"referenceOverlay\":true,"
-        "\"hdrDisplayConversion\":true}"
+        "\"hdrDisplayConversion\":true,\"liveGuideColor\":true,\"recoloredGuidePixels\":%llu}"
         "\n",
         result.warp ? "true" : "false", result.debug_layer ? "true" : "false", static_cast<unsigned long long>(result.debug_errors),
         static_cast<unsigned long long>(result.frames), static_cast<unsigned long long>(result.checked_pixels),
@@ -504,7 +531,8 @@ int wmain(int argc, wchar_t** argv) {
         static_cast<unsigned long long>(result.statistics.descriptor_writes),
         static_cast<unsigned long long>(result.statistics.input_changes), static_cast<unsigned long long>(result.float_pixels),
         static_cast<unsigned long long>(result.packed_float_pixels), static_cast<unsigned long long>(result.exposure_checks),
-        static_cast<unsigned long long>(result.magenta_pixels), static_cast<unsigned long long>(result.night_rgb_checks));
+        static_cast<unsigned long long>(result.magenta_pixels), static_cast<unsigned long long>(result.night_rgb_checks),
+        static_cast<unsigned long long>(result.recolored_guide_pixels));
     return 0;
   } catch (const std::exception& error) {
     std::fprintf(stderr, "FAIL: %s\n", error.what());

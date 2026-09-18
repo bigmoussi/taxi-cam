@@ -120,6 +120,18 @@ struct Callbacks {
   // Both callbacks must be provided; a partial pair is ignored.
   void (*metadata_begin)(void*, ID3D12GraphicsCommandList*, std::uint64_t object_generation) noexcept = nullptr;
   void (*metadata_end)(void*, ID3D12GraphicsCommandList*, std::uint64_t object_generation) noexcept = nullptr;
+  // Metadata only, outside locks and BEFORE pass invalidation/original Begin.
+  // ordinary_access validates bounded descriptors and excludes PRESERVE_LOCAL
+  // or unknown access types. Flags are exact, including SUSPENDING/RESUMING.
+  void (*pass_began)(void*,
+                     ID3D12GraphicsCommandList*,
+                     std::uint64_t object_generation,
+                     D3D12_RENDER_PASS_FLAGS flags,
+                     bool ordinary_access) noexcept = nullptr;
+  // Every observed external enhanced Barrier call, before metadata/original,
+  // including buffer/global-only, empty and malformed calls. No resource model
+  // is implied; consumers without a complete enhanced model must invalidate.
+  void (*enhanced_call)(void*, ID3D12GraphicsCommandList*, std::uint64_t object_generation) noexcept = nullptr;
 };
 struct Result {
   bool ready = false;

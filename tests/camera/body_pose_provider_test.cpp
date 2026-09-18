@@ -1,5 +1,7 @@
 // Explicitly invoked live read-only provider validation; no camera acquisition.
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include "../../src/camera/body_pose_provider.hpp"
 #include <windows.h>
 #include <cstdio>
@@ -10,6 +12,272 @@
 using namespace taxi_camera::native_camera;
 namespace {
 #ifdef TAXI_BODY_POSE_PROVIDER_TESTING
+template <class Check>
+void blocked_worker_lifecycle(Check check) {
+  namespace testing = body_pose_provider_testing;
+  struct BlockedWorker {
+    HANDLE entered{}, release{}, stop{};
+    static DWORD WINAPI run(void* opaque) {
+      const auto& self = *static_cast<BlockedWorker*>(opaque);
+      SetEvent(self.entered);
+      // Model an SDK call that does not respond to the provider's stop event.
+      // Its independent deadline bounds this test even if shutdown regresses.
+      return WaitForSingleObject(self.release, 5000) == WAIT_OBJECT_0 && WaitForSingleObject(self.stop, 0) == WAIT_OBJECT_0 ? 0 : 1;
+    }
+  } blocked;
+  check(select_aircraft_profile(1));
+  blocked.entered = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+  blocked.release = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+  blocked.stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+  check(blocked.entered && blocked.release && blocked.stop);
+  const auto worker = CreateThread(nullptr, 0, BlockedWorker::run, &blocked, 0, nullptr);
+  check(worker && WaitForSingleObject(blocked.entered, 2000) == WAIT_OBJECT_0);
+  check(testing::install_worker(worker, blocked.stop));
+  const auto before = testing::lifecycle_snapshot();
+  check(before.worker && before.stop && before.profile == 1);
+  check(initialize_body_pose_provider());
+  const std::array<DWORD, 10> body_header{96, 0, 8, 1, 0, 1, 0, 0, 1, 7};
+  const std::array<double, 7> body_values{51, -0.1, 123, 0, 0, 270, 5};
+  std::array<unsigned char, 96> body{};
+  std::memcpy(body.data(), body_header.data(), sizeof(body_header));
+  std::memcpy(body.data() + 40, body_values.data(), sizeof(body_values));
+  check(testing::accept_aircraft_packet(body.data(), body.size(), GetTickCount64()) && get_ground_speed().valid);
+  const auto initial_epoch = get_aircraft_session_epoch();
+  check(select_aircraft_profile(1));
+  check(!get_ground_speed().valid && get_aircraft_session_epoch() == initial_epoch);
+  const auto same = testing::lifecycle_snapshot();
+  check(same.worker == before.worker && same.stop == before.stop && WaitForSingleObject(blocked.stop, 0) == WAIT_TIMEOUT);
+  std::array<DWORD, 6> sim{24, 0, 4, 0, AircraftSessionLifecycle::SimEvent, 1};
+  check(!testing::accept_session_packet(sim.data(), sizeof(sim)));
+  sim[5] = 0;
+  check(testing::accept_session_packet(sim.data(), sizeof(sim)));
+  check(!testing::session_reconnect_required(true) && !select_aircraft_profile(2));
+  check(testing::lifecycle_snapshot().profile == 1 && WaitForSingleObject(blocked.stop, 0) == WAIT_TIMEOUT);
+  sim[5] = 1;
+  check(testing::accept_session_packet(sim.data(), sizeof(sim)));
+  const auto began = GetTickCount64();
+  check(!shutdown_body_pose_provider());
+  check(GetTickCount64() - began < 250 && WaitForSingleObject(worker, 0) == WAIT_TIMEOUT);
+  check(WaitForSingleObject(blocked.stop, 0) == WAIT_OBJECT_0);
+  for (unsigned attempt = 0; attempt < 8; ++attempt) {
+    check(!initialize_body_pose_provider());
+    check(!select_aircraft_profile(2));
+    check(!select_aircraft_profile(1));
+    check(!shutdown_body_pose_provider());
+    const auto pending = testing::lifecycle_snapshot();
+    check(pending.worker == before.worker && pending.stop == before.stop && pending.profile == before.profile);
+  }
+  check(GetTickCount64() - began < 250);
+  // Even while shutdown is pending, snapshots/cache reads and the independent
+  // worker remain available. No new-profile commit or replacement worker ran.
+  DWORD flags{};
+  check(GetHandleInformation(reinterpret_cast<HANDLE>(before.worker), &flags) != FALSE);
+  check(GetHandleInformation(reinterpret_cast<HANDLE>(before.stop), &flags) != FALSE);
+  check(SetEvent(blocked.release) != FALSE && WaitForSingleObject(worker, 2000) == WAIT_OBJECT_0);
+  DWORD result = 1;
+  check(GetExitCodeThread(worker, &result) != FALSE && result == 0);
+  check(select_aircraft_profile(2));
+  const auto stopped = testing::lifecycle_snapshot();
+  check(!stopped.worker && !stopped.stop && stopped.profile == 2);
+  check(shutdown_body_pose_provider() && shutdown_body_pose_provider());
+  check(select_aircraft_profile(1));
+  CloseHandle(worker);
+  CloseHandle(blocked.entered);
+  CloseHandle(blocked.release);
+  CloseHandle(blocked.stop);
+}
+template <class Check>
+void session_readiness_regressions(Check check) {
+  namespace testing = body_pose_provider_testing;
+  using Session = AircraftSessionLifecycle;
+  std::array<unsigned char, 272> flow{};
+  const auto flow_packet = [&](DWORD event, DWORD receive_id = Session::FlowReceiveId) {
+    flow.fill(0);
+    const std::array<DWORD, 4> h{272, 0, receive_id, event};
+    std::memcpy(flow.data(), h.data(), sizeof(h));
+    std::strcpy(reinterpret_cast<char*>(flow.data() + 16), "same-aircraft-new-airport.flt");
+  };
+  for (DWORD receive_id : {39ul, 40ul}) {
+    Session session;
+    const auto accept = [&](DWORD event) {
+      flow_packet(event, receive_id);
+      return session.accept(flow.data(), flow.size());
+    };
+    std::array<DWORD, 6> sim{24, 0, 4, 0, Session::SimEvent, 1};
+    check(!session.accept(sim.data(), sizeof(sim)) && session.running() && session.epoch() == 0);
+    check(accept(Session::FltLoad) && session.loading() && session.epoch() == 1);
+    check(!accept(Session::FltLoad) && session.epoch() == 1);
+    sim[5] = 0;
+    check(!session.accept(sim.data(), sizeof(sim)) && session.loading() && session.epoch() == 1);
+    sim[5] = 1;
+    check(!session.accept(sim.data(), sizeof(sim)) && session.loading() && session.epoch() == 1);
+    check(!accept(Session::FlightStart) && session.loading());
+    check(accept(Session::FltLoaded) && !session.loading() && session.epoch() == 1);
+    check(!accept(Session::FltLoaded) && session.epoch() == 1);
+    check(accept(Session::TeleportStart) && session.loading() && session.epoch() == 2);
+    check(!accept(Session::TeleportStart) && session.epoch() == 2);
+    check(accept(Session::FltLoad) && session.epoch() == 2);
+    check(accept(Session::FltLoaded) && session.loading());
+    check(accept(Session::TeleportDone) && !session.loading() && session.epoch() == 2);
+    check(!accept(Session::TeleportDone));
+    check(accept(Session::FlightEnd) && session.loading() && session.epoch() == 3);
+    check(!accept(Session::BackToMainMenu) && session.epoch() == 3);
+    check(accept(Session::FltLoad) && session.loading());
+    check(accept(Session::FlightStart) && session.loading());
+    check(accept(Session::FltLoaded) && !session.loading() && session.epoch() == 3);
+    check(accept(Session::BackToMainMenu) && session.epoch() == 4);
+    check(!accept(Session::BackToMainMenu));
+    check(accept(Session::FlightStart) && !session.loading());
+    check(accept(Session::FlightEnd) && session.epoch() == 5);
+    check(accept(Session::FltLoad));
+    check(accept(Session::FltLoaded) && session.loading() && session.epoch() == 5);
+    check(!accept(Session::FltLoaded) && session.loading());
+    check(!session.accept(sim.data(), sizeof(sim)) && session.loading());
+    check(accept(Session::FlightStart) && !session.loading() && session.epoch() == 5);
+    flow_packet(Session::FltLoad, receive_id);
+    for (DWORD bytes = 0; bytes < flow.size(); ++bytes)
+      check(!session.accept(flow.data(), bytes));
+    check(!session.accept(nullptr, flow.size()));
+    flow.fill(0xff);
+    const std::array<DWORD, 4> bad{272, 0, receive_id, Session::FltLoad};
+    std::memcpy(flow.data(), bad.data(), sizeof(bad));
+    check(!session.accept(flow.data(), flow.size()) && !session.loading());
+    flow_packet(17, receive_id);
+    check(!session.accept(flow.data(), flow.size()) && !session.loading());
+    flow_packet(Session::FltLoad, 41);
+    check(!session.accept(flow.data(), flow.size()) && !session.loading());
+  }
+  // Late Connect starts without a fabricated flow transition. Any supported
+  // coherent identity can reopen readiness before its profile is selected.
+  check(select_aircraft_profile(2));
+  std::uint64_t now = GetTickCount64();
+  std::array<unsigned char, 296> type{};
+  const std::array<DWORD, 10> th{296, 0, 8, 5, 0, 5, 0, 0, 1, 1};
+  std::memcpy(type.data(), th.data(), sizeof(th));
+  std::strcpy(reinterpret_cast<char*>(type.data() + 40), "ATCCOM.ATC_NAME AIRBUS.0.text");
+  std::array<unsigned char, 284> path{};
+  const std::array<DWORD, 6> ph{284, 0, 15, 6, 0, 0};
+  std::memcpy(path.data(), ph.data(), sizeof(ph));
+  std::strcpy(reinterpret_cast<char*>(path.data() + 24), "SimObjects/Airplanes/FlyByWire_A380X/aircraft.cfg");
+  std::array<unsigned char, 96> body{}, camera{};
+  const std::array<DWORD, 10> bh{96, 0, 8, 1, 0, 1, 0, 0, 1, 7};
+  const std::array<double, 7> bv{51, -0.1, 123, 0, 0, 270, 0};
+  std::memcpy(body.data(), bh.data(), sizeof(bh));
+  std::memcpy(body.data() + 40, bv.data(), sizeof(bv));
+  const std::array<DWORD, 3> ch{96, 0, 40};
+  const std::array<double, 3> cv{51, -0.1, 125};
+  const DWORD world = 2;
+  const double fov = 0.8;
+  std::memcpy(camera.data(), ch.data(), sizeof(ch));
+  std::memcpy(camera.data() + 12, cv.data(), sizeof(cv));
+  std::memcpy(camera.data() + 36, &world, sizeof(world));
+  std::memcpy(camera.data() + 88, &fov, sizeof(fov));
+  const auto supply = [&]() {
+    check(!testing::accept_identity_packet(type.data(), type.size(), now));
+    check(!testing::accept_identity_packet(path.data(), path.size(), now));
+    check(testing::accept_aircraft_packet(body.data(), body.size(), now));
+    check(testing::accept_camera_packet(camera.data(), camera.size(), now));
+  };
+  check(!testing::session_readiness_at(now).ready);
+  const auto epoch = get_aircraft_session_epoch();
+  supply();
+  check(testing::session_readiness_at(now).ready && !aircraft_matches_profile());
+  check(!testing::session_readiness_at(now).flow_subscribed &&
+        std::strcmp(testing::session_readiness_at(now).error, "flow_not_subscribed") == 0);
+  check(get_aircraft_session_epoch() == epoch);
+  check(!testing::session_readiness_at(now + 501).ready);
+  flow_packet(Session::FltLoad);
+  check(testing::accept_session_packet(flow.data(), flow.size()));
+  check(get_aircraft_session_epoch() == epoch + 1);
+  auto status = testing::session_readiness_at(now);
+  check(status.loading && !status.ready && status.last_flow_event == Session::FltLoad);
+  supply();
+  check(!testing::session_readiness_at(now).ready && !sample_body_pose(now).calibration_required);
+  check(!calibrate_body_pose(body_math::ecef(cv[0], cv[1], cv[2]), static_cast<float>(fov), now));
+  update_taxi_button_request({1, epoch + 1, 2, 3, 3}, true);
+  const auto request = get_taxi_button_request_status();
+  check(request.failed && !request.pending_mask && std::strcmp(request.error, "taxi_request_not_permitted") == 0);
+  const std::array<DWORD, 6> sim{24, 0, 4, 0, Session::SimEvent, 1};
+  check(!testing::accept_session_packet(sim.data(), sizeof(sim)));
+  check(testing::session_readiness_at(now).loading && get_aircraft_session_epoch() == epoch + 1);
+  flow_packet(Session::FltLoaded);
+  check(testing::accept_session_packet(flow.data(), flow.size()));
+  check(!testing::session_readiness_at(now).ready && !testing::session_readiness_at(now).loading);
+  check(!testing::accept_session_packet(flow.data(), flow.size()));
+  // Completion discarded samples collected during loading, including the
+  // apparently matching old aircraft. Each contract must report anew.
+  ++now;
+  check(!testing::accept_identity_packet(type.data(), type.size(), now));
+  check(!testing::accept_identity_packet(path.data(), path.size(), now));
+  check(testing::accept_aircraft_packet(body.data(), body.size(), now));
+  check(!testing::session_readiness_at(now).ready);
+  check(testing::accept_camera_packet(camera.data(), camera.size(), now));
+  check(testing::session_readiness_at(now).ready && get_aircraft_session_epoch() == epoch + 1);
+  flow_packet(Session::TeleportStart);
+  check(testing::accept_session_packet(flow.data(), flow.size()) && get_aircraft_session_epoch() == epoch + 2);
+  supply();
+  flow_packet(Session::TeleportDone);
+  check(testing::accept_session_packet(flow.data(), flow.size()) && !testing::session_readiness_at(now).ready);
+  supply();
+  check(testing::session_readiness_at(now).ready);
+  // Native precursor is nonblocking and immediately gates output. Repeated
+  // bad WORLD packets invalidate intermediate fresh data without more epochs.
+  notify_invalid_camera_world();
+  check(!get_aircraft_session_readiness().ready);
+  testing::service_world_invalidation();
+  check(get_aircraft_session_epoch() == epoch + 3);
+  supply();
+  notify_invalid_camera_world();
+  testing::service_world_invalidation();
+  check(get_aircraft_session_epoch() == epoch + 3 && !testing::session_readiness_at(now).ready);
+  supply();
+  check(testing::session_readiness_at(now).ready);
+  const double invalid = std::numeric_limits<double>::quiet_NaN();
+  std::memcpy(camera.data() + 12, &invalid, sizeof(invalid));
+  check(testing::accept_camera_packet(camera.data(), camera.size(), now));
+  check(get_aircraft_session_epoch() == epoch + 4 && !testing::session_readiness_at(now).ready);
+  std::memcpy(camera.data() + 12, cv.data(), sizeof(cv));
+  const DWORD documented_camera_id = 41;
+  std::memcpy(camera.data() + 8, &documented_camera_id, sizeof(documented_camera_id));
+  supply();
+  check(testing::session_readiness_at(now).ready);
+  for (DWORD bytes = 0; bytes < camera.size(); ++bytes)
+    check(!testing::accept_camera_packet(camera.data(), bytes, now));
+  check(!testing::accept_camera_packet(flow.data(), flow.size(), now));
+  check(!testing::accept_session_packet(camera.data(), camera.size()));
+  // End Flight -> generic .flt completion can still be a menu or loading
+  // scene. Fresh matching identity/body/WORLD is insufficient without the
+  // distinct FLIGHT_START event, regardless of intermediate Sim=1 messages.
+  const auto ended_epoch = get_aircraft_session_epoch();
+  flow_packet(Session::FlightEnd);
+  check(testing::accept_session_packet(flow.data(), flow.size()));
+  check(!testing::session_reconnect_required(true));
+  check(!select_aircraft_profile(1) && testing::lifecycle_snapshot().profile == 2);
+  flow_packet(Session::FltLoad);
+  check(testing::accept_session_packet(flow.data(), flow.size()));
+  supply();
+  check(!testing::session_readiness_at(now).ready);
+  flow_packet(Session::FltLoaded);
+  check(testing::accept_session_packet(flow.data(), flow.size()));
+  check(!testing::session_reconnect_required(true));
+  supply();
+  check(!testing::accept_session_packet(sim.data(), sizeof(sim)));
+  status = testing::session_readiness_at(now);
+  check(status.loading && !status.ready && status.epoch == ended_epoch + 1);
+  check(!sample_body_pose(now).calibration_required);
+  check(!calibrate_body_pose(body_math::ecef(cv[0], cv[1], cv[2]), static_cast<float>(fov), now));
+  update_taxi_button_request({2, ended_epoch + 1, 2, 3, 3}, true);
+  check(get_taxi_button_request_status().failed && !get_taxi_button_request_status().pending_mask);
+  flow_packet(Session::FlightStart);
+  check(testing::accept_session_packet(flow.data(), flow.size()));
+  check(testing::session_reconnect_required(true));
+  check(!testing::session_readiness_at(now).ready);
+  supply();
+  status = testing::session_readiness_at(now);
+  check(!status.loading && status.ready && status.epoch == ended_epoch + 1);
+  check(!testing::accept_session_packet(flow.data(), flow.size()));
+  check(select_aircraft_profile(1));
+}
 int offline_tests() {
   unsigned checks = 0;
   const auto check = [&](bool good) {
@@ -19,6 +287,7 @@ int offline_tests() {
       std::exit(1);
     }
   };
+  blocked_worker_lifecycle(check);
   namespace testing = body_pose_provider_testing;
   std::array<unsigned char, 96> packet{};
   const std::array<DWORD, 10> header{96, 0, 8, 1, 0, 1, 0, 0, 1, 7};
@@ -313,6 +582,7 @@ int offline_tests() {
   check(testing::accept_on_ground_packet(ground_packet.data(), 48, 10000));
   check(testing::accept_session_packet(load_event.data(), load_event.size()));
   check(!testing::on_ground_at(10000).valid);
+  session_readiness_regressions(check);
   shutdown_body_pose_provider();
   check(!get_ground_speed().valid && std::isnan(get_ground_speed().knots));
   check(!get_on_ground().valid && std::strcmp(get_on_ground().error, "not_initialized") == 0);
@@ -325,6 +595,15 @@ int offline_tests() {
   return 0;
 }
 #endif
+bool stop_live_provider() {
+  const auto began = GetTickCount64();
+  do {
+    if (shutdown_body_pose_provider())
+      return true;
+    Sleep(1);
+  } while (GetTickCount64() - began < 2000);
+  return false;
+}
 int live_ground_speed() {
   if (!initialize_body_pose_provider())
     return 1;
@@ -347,8 +626,7 @@ int live_ground_speed() {
     std::printf("null");
   std::printf(",\"error\":\"%s\",\"body_uncalibrated\":%s,\"body_calibration_required\":%s,\"body_error\":\"%s\"}\n", speed.error,
               uncalibrated ? "true" : "false", body.calibration_required ? "true" : "false", body.error);
-  shutdown_body_pose_provider();
-  return good ? 0 : 1;
+  return stop_live_provider() && good ? 0 : 1;
 }
 int live_lighting() {
   if (!initialize_body_pose_provider())
@@ -370,8 +648,7 @@ int live_lighting() {
   const bool good = light.valid && count >= 3 && get_ground_speed().valid;
   std::printf("{\"passed\":%s,\"samples\":%u,\"ambient\":%.17g,\"brightness\":%.17g,\"error\":\"%s\"}\n", good ? "true" : "false", count,
               light.valid ? light.ambient : -1, light.valid ? light.brightness : -1, light.error);
-  shutdown_body_pose_provider();
-  return good ? 0 : 1;
+  return stop_live_provider() && good ? 0 : 1;
 }
 }  // namespace
 int main(int argc, char** argv) {
@@ -434,7 +711,6 @@ int main(int argc, char** argv) {
       sample.pose.up[2], sample.pose.forward[0], sample.pose.forward[1], sample.pose.forward[2]);
   reset_body_pose_calibration();
   good = good && !sample_body_pose(GetTickCount64()).valid;
-  shutdown_body_pose_provider();
-  good = good && !sample_body_pose(GetTickCount64()).valid;
+  good = stop_live_provider() && good && !sample_body_pose(GetTickCount64()).valid;
   return good ? 0 : 1;
 }

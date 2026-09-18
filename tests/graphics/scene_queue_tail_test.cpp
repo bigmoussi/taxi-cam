@@ -74,18 +74,28 @@ void run() {
   owner.key = 7;
   owner.native = reinterpret_cast<ID3D12Device*>(&device);
   owner.active = true;
+  manager->published_devices_[0].store(owner.native);
   // The fixture uses a recording sink, never a D3D12 device or GPU submission.
-  std::array<std::uintptr_t, 2> markers{};
+  std::array<std::uintptr_t, 3> markers{};
   auto* known = reinterpret_cast<ID3D12GraphicsCommandList*>(&markers[0]);
   auto* unknown = reinterpret_cast<ID3D12GraphicsCommandList*>(&markers[1]);
+  auto* helper_list = reinterpret_cast<ID3D12GraphicsCommandList*>(&markers[2]);
   auto& recording = manager->lists_[0];
   recording.native = known;
   recording.device_key = 7;
   recording.object_generation = 19;
   manager->list_indices_.emplace(known, 0);
+  manager->publish_list(recording);
+  auto& helper_recording = manager->lists_[1];
+  helper_recording.native = helper_list;
+  helper_recording.device_key = 7;
+  helper_recording.object_generation = 20;
+  manager->list_indices_.emplace(helper_list, 1);
+  manager->publish_list(helper_recording);
   Discovery discovery{manager.get()};
   require(manager->set_unknown_list_observer(discover, &discovery), "Install CPU-only discovery callback");
   const auto blocked = [&](ID3D12GraphicsCommandList* list, bool should_bypass, bool expect_receipt, bool expect_discovery) {
+    manager->publish_list(recording);
     discovery.called.store(false, std::memory_order_release);
     std::unique_lock held(manager->submission_mutex_);
     std::promise<void> entered;
@@ -126,11 +136,123 @@ void run() {
   const taxi_camera::source_state::Key source{0x1234, 1};
   require(owner.source_states.register_source(source, taxi_camera::source_state::Model::legacy_rt), "Seed ordered source-state evidence");
   blocked(unknown, false, false, true);
-  require(owner.source_states.state(source).model == taxi_camera::source_state::Model::unknown &&
-              manager->statistics().unknown_submitted_lists == 2,
+  manager->apply_deferred();
+  require(owner.source_states.state(source).model == taxi_camera::source_state::Model::unknown && !owner.failed,
           "Unknown and unobserved submissions retain conservative source invalidation");
   require(queue.signals == 3 && queue.waits == 2, "Unobserved recordings never invent a receipt");
-  std::printf("PASS CPU-only submission locks: unrelated bypass, discovery lock order, conservative guards and ordered receipts.\n");
+
+  Queue helper_queue{queue_table.data(), &device};
+  auto* helper_native = reinterpret_cast<ID3D12CommandQueue*>(&helper_queue);
+  recording.source_touched = true;
+  manager->publish_list(recording);
+  ID3D12CommandList* batch[]{known};
+  const auto receipt = manager->before_submission(native_queue, 1, batch);
+  require(receipt != 0, "Begin an ordinary source receipt before cross-queue helper");
+  ID3D12CommandList* helper_batch[]{helper_list};
+  std::unique_lock native_tail(manager->mutex_);
+  auto helper = std::async(std::launch::async, [&] {
+    const auto result = manager->before_submission(helper_native, 1, helper_batch);
+    if (result)
+      manager->after_submission(helper_native, result);
+    return result;
+  });
+  const bool helper_returned = helper.wait_for(std::chrono::milliseconds(100)) == std::future_status::ready;
+  auto private_work = std::async(std::launch::async, [&] {
+    const auto result = manager->begin_private_submission(owner.key, helper_native);
+    if (result.receipt)
+      manager->end_private_submission(result.receipt);
+    return result;
+  });
+  const bool private_returned = private_work.wait_for(std::chrono::milliseconds(100)) == std::future_status::ready;
+  // Always release the original receipt before assertions, even on regression.
+  native_tail.unlock();
+  manager->after_submission(native_queue, receipt);
+  const auto helper_receipt = helper.get();
+  const auto private_result = private_work.get();
+  require(helper_returned && !helper_receipt && !helper_queue.signals && !helper_queue.waits,
+          "A proven unrelated helper on another queue cannot wait for its owner Execute or metadata lock");
+  require(private_returned && private_result.deferred && !private_result.receipt,
+          "Private composition defers without queuing work behind a held submission");
+  require(!owner.failed, "Harmless cross-queue contention does not fail the device");
+
+  const auto promptly = [&](auto&& action, const char* message) {
+    std::unique_lock held(manager->mutex_);
+    auto result = std::async(std::launch::async, action);
+    const bool returned = result.wait_for(std::chrono::milliseconds(100)) == std::future_status::ready;
+    held.unlock();
+    result.get();
+    require(returned, message);
+  };
+  promptly(
+      [&] {
+        manager->submission_refused_batch(native_queue, taxi_camera::engine_hook::queue_submit::Refusal::contended_submission, 1, batch);
+      },
+      "Exact contended refusal does not wait on manager lock held by native tail Execute");
+  promptly([&] { manager->submission_refused(native_queue, taxi_camera::engine_hook::queue_submit::Refusal::contended_submission); },
+           "Legacy contended refusal also returns while native tail holds the manager lock");
+  promptly(
+      [&] {
+        const auto result = manager->begin_private_submission(owner.key, helper_native);
+        require(result.deferred && !result.receipt, "Private metadata contention is retryable");
+      },
+      "Private composition cannot wait for native tail metadata lock");
+  manager->apply_deferred();
+  require(!owner.failed, "Source-only refusals recover without permanently failing capture");
+  require(owner.source_states.rearm_retained_rt() == 1, "Restore source fixture before completion-order regression");
+  const auto post_token =
+      manager->submission_refused_batch(native_queue, taxi_camera::engine_hook::queue_submit::Refusal::contended_submission, 1, batch);
+  manager->apply_deferred();
+  require(owner.source_states.state(source).model == taxi_camera::source_state::Model::legacy_rt,
+          "Source refusal is not prematurely consumed before native forward");
+  manager->submission_refused_completed(post_token);
+  manager->apply_deferred();
+  require(owner.source_states.state(source).model == taxi_camera::source_state::Model::unknown,
+          "Source completion invalidates proof after the exact native batch returns");
+
+  // Reproduce the classification-to-notification gap: mark the exact recording,
+  // pause before its wake flag is posted, then Reset before deferred processing.
+  recording.packets = 1;
+  manager->packets_[0].assigned = true;
+  manager->packets_[0].device_key = owner.key;
+  manager->publish_list(recording);
+  auto& publication = manager->published_lists_[0];
+  constexpr std::uint64_t escaped = 1u << 28;
+  const auto old_word = publication.effects.fetch_or(escaped);
+  manager->deferred_recordings_.store(false);  // Notifier has not posted its wake bit.
+  manager->retire_list(recording);
+  require(manager->packets_[0].quarantined && manager->packets_[0].assigned && manager->packets_[0].retired,
+          "Reset consumes the exact recording mark before its packet can be recycled");
+  manager->packets_[1].assigned = true;
+  manager->packets_[1].device_key = owner.key;
+  recording.packets = 2;
+  manager->publish_list(recording);
+  auto stale = old_word;
+  require(!publication.effects.compare_exchange_strong(stale, old_word | escaped),
+          "A delayed notice cannot mark the replacement recording version");
+  manager->deferred_recordings_.store(true);  // Old notifier now posts its wake bit.
+  manager->apply_deferred();
+  require(!manager->packets_[1].quarantined && !owner.failed, "Delayed wake cannot quarantine replacement packet or unrelated device");
+  manager->submission_refused_batch(native_queue, taxi_camera::engine_hook::queue_submit::Refusal::contended_submission, 1, batch);
+  manager->apply_deferred();
+  require(manager->packets_[1].quarantined && !owner.failed,
+          "Exact escaped snapshot quarantines only its packet while source capture remains recoverable");
+  recording.consumer = true;
+  manager->publish_list(recording);
+  manager->submission_refused_batch(native_queue, taxi_camera::engine_hook::queue_submit::Refusal::contended_submission, 1, batch);
+  manager->apply_deferred();
+  require(owner.failed && manager->packets_[0].assigned && manager->packets_[1].assigned,
+          "Lost stable-output consumer ordering freezes that device and retains its GPU storage");
+  auto& exhausted = manager->published_lists_[1];
+  exhausted.effects.store(0xffffffff00000000ull | (1u << 24));
+  manager->publish_list(helper_recording);
+  const auto saturated = exhausted.effects.load();
+  manager->publish_list(helper_recording);
+  require((saturated >> 32) == UINT32_MAX && (saturated & (1u << 29)) && exhausted.effects.load() == saturated &&
+              !manager->classify_unobserved(helper_native, 1, helper_batch).unrelated,
+          "Publication version exhaustion stays permanently conservative instead of wrapping to an ABA match");
+  std::printf(
+      "PASS CPU-only submission locks: cross-queue helpers, nonblocking refusals/private deferral, exact retirement marks and GPU "
+      "guards.\n");
 }
 }  // namespace submission_lock_fixture
 struct TailContext {

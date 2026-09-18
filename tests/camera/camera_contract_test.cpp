@@ -1,5 +1,6 @@
 #include "../../src/camera/camera_contract.hpp"
 #include "../../src/camera/camera_contract_model.hpp"
+#include "../../src/camera/camera_release_contract.hpp"
 
 #include <algorithm>
 #include <array>
@@ -56,7 +57,7 @@ struct Fixture : discovery::ImageReader {
     return symbols[index];
   }
   explicit Fixture(std::uint32_t displacement = 0, std::uint64_t loaded_base = Base) : shift(displacement), base(loaded_base) {
-    const auto& model = cm::model();
+    const auto& model = camera_release_contract::model();
     symbols.resize(model.symbols.size());
     for (std::size_t i = 0; i < symbols.size(); ++i) {
       const auto kind = model.symbols[i].kind;
@@ -108,7 +109,7 @@ struct Fixture : discovery::ImageReader {
       bytes(symbols[constant.symbol] + constant.offset, constant.bytes.data(), constant.bytes.size());
     for (const auto& pointer : model.pointers)
       integer(symbols[pointer.owner_symbol] + pointer.offset, base + symbols[pointer.target_symbol], 8);
-    for (const auto& boundary : cm::boundaries()) {
+    for (const auto& boundary : camera_release_contract::boundaries()) {
       if (!boundary.required_pdata)
         continue;
       const auto begin = std::int64_t(symbols[boundary.symbol]) + boundary.begin_addend;
@@ -120,7 +121,11 @@ struct Fixture : discovery::ImageReader {
       require(functions[i - 1].end <= functions[i].begin, "Synthetic runtime-function records overlap");
     bytes(Pdata + shift, reinterpret_cast<const std::uint8_t*>(functions.data()), functions.size() * sizeof(RuntimeFunction));
     integer(Pdata + shift + 0x2000, 1);
-    require(cm::bind(symbols, expected_functions, expected_layout), "Generated roles could not bind their synthetic symbols");
+    const auto base_count = cm::model().symbols.size();
+    const std::vector<std::uint32_t> base_symbols(symbols.begin(), symbols.begin() + base_count);
+    require(cm::bind(base_symbols, expected_functions, expected_layout), "Generated roles could not bind their synthetic symbols");
+    expected_functions.release_view = symbols[base_count];
+    expected_functions.drain_views = symbols[base_count + 1];
     vtables = {expected_layout.manager_vtable,           expected_layout.aircraft_facade_vtable, expected_layout.aircraft_controller_vtable,
                expected_layout.aircraft_selected_vtable, expected_layout.scene_node_vtable,      expected_layout.scene_model_vtable};
     require(std::all_of(vtables.begin(), vtables.end(), [](const auto value) { return value != 0; }),
@@ -221,7 +226,7 @@ void complete_resolution() {
   for (const auto shift : {0u, 0x1000u}) {
     Fixture fixture(shift, Fixture::Base + std::uint64_t(shift) * 0x40000);
     const auto result = fixture.run();
-    require(result.valid && result.error.empty() && result.matched_ranges == cm::model().code.size(),
+    require(result.valid && result.error.empty() && result.matched_ranges == camera_release_contract::model().code.size(),
             "Complete coherent relocated camera contract did not resolve");
     require(!std::memcmp(&result.contract.functions, &fixture.expected_functions, sizeof(CameraFunctions)),
             "Resolved function roles differ from independent synthetic placement");
@@ -378,8 +383,46 @@ void constructor_pointer_relations() {
   }
 }
 }  // namespace
+void renderer_retirement_contract() {
+  for (const auto [method, offset] :
+       {std::pair{0u, 12u}, std::pair{0u, 54u}, std::pair{1u, 34u}, std::pair{1u, 0x111u}, std::pair{1u, 0x7cu}}) {
+    Fixture fixture;
+    const auto index = cm::model().symbols.size() + method;
+    fixture.memory[fixture.symbols[index] + offset] ^= 1;
+    refused(fixture.run(), "Changed native release marker/queue displacement published an allocation contract");
+  }
+  {
+    Fixture boundary;
+    const auto begin = boundary.expected_functions.drain_views;
+    const auto found =
+        std::find_if(boundary.functions.begin(), boundary.functions.end(), [&](const auto& item) { return item.begin == begin; });
+    require(found != boundary.functions.end(), "Consumer boundary fixture missing");
+    boundary.integer(boundary.image.exception_rva + static_cast<std::uint32_t>(found - boundary.functions.begin()) * 12 + 4,
+                     found->end - 1);
+    refused(boundary.run(), "Incomplete consumer function boundary published a release contract");
+  }
+  Fixture fixture;
+  const auto table = Fixture::Static + 0x2f0000;
+  fixture.integer(table + 104, fixture.base + fixture.expected_functions.release_view, 8);
+  fixture.integer(table + 120, fixture.base + fixture.expected_functions.drain_views, 8);
+  require(verify_renderer_release_methods(fixture, fixture.image, fixture.base, fixture.base + table, fixture.expected_functions),
+          "Exact current renderer release/consumer endpoints refused");
+  for (auto slot : {104u, 120u}) {
+    fixture.integer(table + slot, fixture.base + fixture.expected_functions.create_entry, 8);
+    require(!verify_renderer_release_methods(fixture, fixture.image, fixture.base, fixture.base + table, fixture.expected_functions),
+            "Unrelated renderer vtable method authorized private queue fields");
+    fixture.integer(table + slot,
+                    fixture.base + (slot == 104 ? fixture.expected_functions.release_view : fixture.expected_functions.drain_views), 8);
+  }
+  fixture.change_at = table + 120;
+  fixture.change_after = fixture.reads[table + 120] + 2;
+  require(!verify_renderer_release_methods(fixture, fixture.image, fixture.base, fixture.base + table, fixture.expected_functions),
+          "Changing renderer consumer endpoint survived its reread");
+}
+
 int main() {
   try {
+    renderer_retirement_contract();
     complete_resolution();
     refusals();
     evidence_rechecks();

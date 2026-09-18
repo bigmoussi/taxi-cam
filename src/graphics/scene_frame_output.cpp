@@ -1,4 +1,5 @@
 #include "scene_frame_output.hpp"
+#include "calibration_d3d12.hpp"
 #include "camera_compositor_d3d12.hpp"
 #include "pfd_stamp_d3d12.hpp"
 
@@ -87,14 +88,15 @@ bool SceneFrameOutput::fail(const char* error) noexcept {
   return false;
 }
 
-bool SceneFrameOutput::initialize(ID3D12Device* device) noexcept {
+bool SceneFrameOutput::initialize(ID3D12Device* device, bool calibration_only) noexcept {
   if (failed_)
     return false;
   if (device_)
-    return device_ == device && !failed_;
+    return device_ == device && calibration_only_ == calibration_only && !failed_;
   if (!device)
     return fail("A live native D3D12 device is required for the PFD output.");
   device_ = device;
+  calibration_only_ = calibration_only;
   device_->AddRef();
   D3D12_COMMAND_QUEUE_DESC queue_desc{};
   queue_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
@@ -103,6 +105,12 @@ bool SceneFrameOutput::initialize(ID3D12Device* device) noexcept {
       FAILED(device_->CreateCommandList(0, queue_desc.Type, allocator_, nullptr, IID_PPV_ARGS(&list_))) || FAILED(list_->Close()) ||
       FAILED(device_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence_))))
     return fail("Creating the private PFD composition queue failed.");
+  D3D12_DESCRIPTOR_HEAP_DESC patch_heap_desc{D3D12_DESCRIPTOR_HEAP_TYPE_RTV, static_cast<UINT>(patches_.size()),
+                                             D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 0};
+  if (FAILED(device_->CreateDescriptorHeap(&patch_heap_desc, IID_PPV_ARGS(&patch_heap_))))
+    return fail("Creating the private patch descriptor heap failed.");
+  if (calibration_only_)
+    return true;
   D3D12_HEAP_PROPERTIES heap{};
   heap.Type = D3D12_HEAP_TYPE_DEFAULT;
   heap.CreationNodeMask = heap.VisibleNodeMask = 1;
@@ -119,10 +127,6 @@ bool SceneFrameOutput::initialize(ID3D12Device* device) noexcept {
   compositor_ = new (std::nothrow) CameraCompositorD3D12;
   if (!address_ || !compositor_ || FAILED(compositor_->initialize(device_)))
     return fail("Initializing the two-camera compositor failed.");
-  D3D12_DESCRIPTOR_HEAP_DESC patch_heap_desc{D3D12_DESCRIPTOR_HEAP_TYPE_RTV, static_cast<UINT>(patches_.size()),
-                                             D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 0};
-  if (FAILED(device_->CreateDescriptorHeap(&patch_heap_desc, IID_PPV_ARGS(&patch_heap_))))
-    return fail("Creating the private patch descriptor heap failed.");
   for (unsigned i = 0; i < patch_drawers_.size(); ++i) {
     patch_drawers_[i] = new (std::nothrow) PfdStampD3D12;
     if (!patch_drawers_[i] || FAILED(patch_drawers_[i]->initialize(device_, PatchFormats[i])))
@@ -131,7 +135,7 @@ bool SceneFrameOutput::initialize(ID3D12Device* device) noexcept {
   return true;
 }
 
-bool SceneFrameOutput::prepare_patches() noexcept {
+bool SceneFrameOutput::prepare_patches(std::uint64_t calibration_frame) noexcept {
   const auto base = patch_heap_->GetCPUDescriptorHandleForHeapStart();
   const auto stride = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
   for (auto& storage : patches_) {
@@ -172,7 +176,14 @@ bool SceneFrameOutput::prepare_patches() noexcept {
     barrier.Transition = {patch->texture, 0, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET};
     list_->ResourceBarrier(1, &barrier);
     list_->OMSetRenderTargets(1, &patch->rtv, FALSE, nullptr);
-    if (!patch_drawers_[patch->drawer]->record_private_patch(list_, device_, address_, width, height, &destination, &patch->content))
+    if (calibration_only_) {
+      // All admitted profiles currently use the same upper display height.
+      // Clear precisely that patch; never copy over the lower native trim.
+      const auto* profile = profiles::find(patch_profile_);
+      if (!profile || upper_height(profile->height) != height ||
+          !record_calibration(list_, patch->rtv, width, profile->height, calibration_frame))
+        return fail("Recording the private calibration patch failed.");
+    } else if (!patch_drawers_[patch->drawer]->record_private_patch(list_, device_, address_, width, height, &destination, &patch->content))
       return fail("Recording the private PFD patch failed.");
     barrier.Transition = {patch->texture, 0, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE};
     list_->ResourceBarrier(1, &barrier);
@@ -208,7 +219,7 @@ std::uint64_t SceneFrameOutput::completed_submissions() const noexcept {
 }
 
 bool SceneFrameOutput::prepare(ID3D12Resource* nose, DXGI_FORMAT nose_format, ID3D12Resource* tail, DXGI_FORMAT tail_format) noexcept {
-  if (!idle() || prepared_)
+  if (calibration_only_ || !idle() || prepared_)
     return false;
   if (FAILED(device_->GetDeviceRemovedReason()))
     return fail("The PFD composition device was removed.");
@@ -259,6 +270,19 @@ bool SceneFrameOutput::prepare(ID3D12Resource* nose, DXGI_FORMAT nose_format, ID
   }
   if (FAILED(list_->Close()))
     return fail("Closing the private composition list failed.");
+  prepared_ = true;
+  return true;
+}
+
+bool SceneFrameOutput::prepare_calibration(std::uint64_t frame) noexcept {
+  if (!calibration_only_ || !patch_requests_ || !idle() || prepared_)
+    return false;
+  if (FAILED(device_->GetDeviceRemovedReason()))
+    return fail("The calibration device was removed.");
+  if (FAILED(allocator_->Reset()) || FAILED(list_->Reset(allocator_, nullptr)))
+    return fail("Resetting the private calibration list failed.");
+  if (!prepare_patches(frame) || FAILED(list_->Close()))
+    return fail("Closing the private calibration list failed.");
   prepared_ = true;
   return true;
 }

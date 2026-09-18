@@ -1,10 +1,10 @@
 #include "../../src/shared/scene_demand.hpp"
-#include "../../src/camera/entry_pair.hpp"
-#include "../../src/camera/render_schedule.hpp"
-#include "../../src/camera/probe_inspection_gate.hpp"
-#include <limits>
 #include <cstdio>
+#include <limits>
 #include <stdexcept>
+#include "../../src/camera/entry_pair.hpp"
+#include "../../src/camera/probe_inspection_gate.hpp"
+#include "../../src/camera/render_schedule.hpp"
 
 namespace {
 namespace ec = taxi_camera::engine_camera;
@@ -117,12 +117,12 @@ void discovery_sequence() {
 }
 void prewarm_readiness() {
   using taxi_camera::standalone::ScenePrewarmReadiness;
-  const ScenePrewarmReadiness ready{true, true, true, true, true, false, true, true, true, true, true, false, 0};
+  const ScenePrewarmReadiness ready{true, true, true, true, true, false, true, true, true, true, true, false, 0, true};
   require(ready.eligible(), "A matched grounded ready session was refused");
   for (auto member : {&ScenePrewarmReadiness::connected, &ScenePrewarmReadiness::session_settings, &ScenePrewarmReadiness::enabled,
                       &ScenePrewarmReadiness::matching_identity, &ScenePrewarmReadiness::graphics_ready,
                       &ScenePrewarmReadiness::buttons_valid, &ScenePrewarmReadiness::pose_ready, &ScenePrewarmReadiness::on_ground_valid,
-                      &ScenePrewarmReadiness::on_ground, &ScenePrewarmReadiness::speed_valid}) {
+                      &ScenePrewarmReadiness::on_ground, &ScenePrewarmReadiness::speed_valid, &ScenePrewarmReadiness::session_ready}) {
     auto unavailable = ready;
     unavailable.*member = false;
     require(!unavailable.eligible(), "Missing background safety evidence admitted prewarm");

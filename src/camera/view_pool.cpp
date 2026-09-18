@@ -10,7 +10,7 @@ namespace {
 constexpr std::uint32_t kReadBudget = 8192;
 constexpr std::uint64_t kArrayOffset = 2752;
 constexpr std::uint64_t kAssociationOffset = 72;
-constexpr std::size_t kMaximumObservations = 1 + 8 * 4;
+constexpr std::size_t kMaximumObservations = 1 + 8 * 5 + 2 + 128;
 
 bool byte_range(std::uint64_t pointer, std::uint64_t offset, std::uint32_t size) noexcept {
   return pointer != 0 && offset <= std::numeric_limits<std::uint64_t>::max() - pointer &&
@@ -75,7 +75,7 @@ class BoundedReader {
 
  private:
   bool read(std::uint64_t address, std::uint32_t size, std::uint8_t* output) noexcept {
-    if ((size != 4 && size != 8 && size != 16) || size > kReadBudget - result_.read_bytes) {
+    if ((size != 1 && size != 4 && size != 8 && size != 16) || size > kReadBudget - result_.read_bytes) {
       result_.status = ViewPoolStatus::read_budget_exhausted;
       return false;
     }
@@ -93,9 +93,7 @@ class BoundedReader {
   std::size_t count_ = 0;
 };
 
-}  // namespace
-
-ViewPoolSnapshot inspect_view_pool(MemoryReader& reader, std::uint64_t renderer) noexcept {
+ViewPoolSnapshot inspect_pool(MemoryReader& reader, std::uint64_t renderer, bool release) noexcept {
   ViewPoolSnapshot result;
   for (std::uint32_t index = 0; index < result.slots.size(); ++index)
     result.slots[index].index = index;
@@ -153,7 +151,50 @@ ViewPoolSnapshot inspect_view_pool(MemoryReader& reader, std::uint64_t renderer)
     }
     slot.association_valid = slot.association == ViewAssociation::occupied;
     slot.free = !slot.association_valid;
+    if (release) {
+      if (!pointer_range(slot.view_address, 23688, 1)) {
+        result.status = ViewPoolStatus::invalid_view;
+        return result;
+      }
+      if (!source.capture(slot.view_address + 23688, 1, bytes.data()))
+        return result;
+      slot.release_pending = bytes[0] != 0;
+    }
     ++result.slots_examined;
+  }
+  for (const auto offset : {2768u, 2784u}) {
+    if (!release)
+      break;
+    result.failure_slot = -1;
+    if (!pointer_range(renderer, offset, 16)) {
+      result.status = ViewPoolStatus::invalid_renderer;
+      return result;
+    }
+    if (!source.capture(renderer + offset, 16, bytes.data()))
+      return result;
+    const auto remaining = u32(bytes.data()), count = u32(bytes.data() + 4);
+    const auto array = u64(bytes.data() + 8);
+    // Native enqueue grows by 32. Unknown/large queues are unavailable, never
+    // truncated into a false absence proof. Empty unallocated queues are valid.
+    const auto capacity = std::uint64_t(count) + remaining;
+    if (count > 64 || capacity > UINT32_MAX || (capacity && (!array || array % 8 || capacity * 8 > UINT64_MAX - array)) ||
+        (array && !pointer_range(array, 0, 8))) {
+      result.status = ViewPoolStatus::invalid_release_queue;
+      return result;
+    }
+    result.release_queue_counts[(offset - 2768) / 16] = count;
+    for (unsigned i = 0; i < count; ++i) {
+      if (!source.capture(array + i * 8, 8, bytes.data()))
+        return result;
+      const auto view = u64(bytes.data());
+      if (!pointer_range(view, 0, 8)) {
+        result.status = ViewPoolStatus::invalid_release_queue;
+        return result;
+      }
+      result.release_views[result.release_count++] = view;
+      for (auto& slot : result.slots)
+        slot.release_queued |= slot.view_address == view;
+    }
   }
   if (!source.recheck())
     return result;
@@ -166,8 +207,18 @@ ViewPoolSnapshot inspect_view_pool(MemoryReader& reader, std::uint64_t renderer)
   }
   result.failure_slot = -1;
   result.valid = true;
+  result.release_checked = release;
   result.status = ViewPoolStatus::complete;
   return result;
+}
+
+}  // namespace
+
+ViewPoolSnapshot inspect_view_pool(MemoryReader& reader, std::uint64_t renderer) noexcept {
+  return inspect_pool(reader, renderer, false);
+}
+ViewPoolSnapshot inspect_view_creation_pool(MemoryReader& reader, std::uint64_t renderer) noexcept {
+  return inspect_pool(reader, renderer, true);
 }
 
 }  // namespace taxi_camera::engine_camera

@@ -100,6 +100,20 @@ class TaxiButtonRoutes {
     return true;
   }
 
+  // A complete allocation group may replace stale automatic ranks, but never
+  // a surviving explicit/semantic side. Keep the replacement marked detected
+  // so a later group change can withdraw or replace it in the same way.
+  bool replace_detected(const std::array<std::uint64_t, 2>& detected) noexcept {
+    if (!detected[0] || !detected[1] || detected[0] == detected[1])
+      return false;
+    for (unsigned side = 0; side < targets.size(); ++side)
+      if (targets[side] && targets[side] != detected_targets_[side])
+        return false;
+    targets = detected_targets_ = detected;
+    assigned_ = true;
+    return true;
+  }
+
   void forget(std::uint64_t id) noexcept {
     assigned_ = assigned_ || targets[0] != 0 || targets[1] != 0;
     for (unsigned side = 0; side < targets.size(); ++side)

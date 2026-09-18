@@ -315,6 +315,92 @@ void exhaustive_free_masks() {
             "An eight-slot capacity combination was counted or ordered incorrectly");
   }
 }
+
+void deferred_renderer_retirement() {
+  constexpr std::uint64_t queue = 0x600000;
+  const auto prepared = [] {
+    Fixture f;
+    for (unsigned i = 0; i < 8; ++i) {
+      f.reader.word(view(i) + 23688, 0, 1);
+      if (i >= 2)
+        f.association(i, ViewAssociation::null_control);
+    }
+    for (auto offset : {2768u, 2784u}) {
+      f.reader.word(kRenderer + offset, 0);
+      f.reader.word(kRenderer + offset + 8, 0);
+    }
+    return f;
+  };
+  const auto run = [](Fixture& f) {
+    f.reader.reads.clear();
+    f.reader.address_reads.clear();
+    auto result = inspect_view_creation_pool(f.reader, f.renderer);
+    require(result.read_bytes <= 8192 && result.release_count <= 128, "Retirement inspection exceeded its bound");
+    if (result.valid) {
+      const auto half = f.reader.reads.size() / 2;
+      require(f.reader.reads.size() % 2 == 0 &&
+                  std::equal(f.reader.reads.begin(), f.reader.reads.begin() + half, f.reader.reads.begin() + half),
+              "Creation inspection did not recheck the entire combined pool/marker/queue trace");
+    } else {
+      require(!result.creation_available(1) && !result.creation_available(2), "Incomplete creation evidence published permission");
+    }
+    return result;
+  };
+  auto f = prepared();
+  require(run(f).creation_available(2), "Clean first native-free slots were refused");
+  f.reader.word(view(2) + 23688, 1, 1);
+  require(f.run().free_count == 6, "Regression fixture must remain native-free under the old association-only predicate");
+  auto result = run(f);
+  require(result.valid && result.free_count == 6 && !result.creation_available(1) && !result.creation_available(2),
+          "Pending first native-free slot was skipped in favor of later clean slots");
+  f.reader.word(view(2) + 23688, 0, 1);
+  f.reader.word(view(3) + 23688, 255, 1);
+  result = run(f);
+  require(result.creation_available(1) && !result.creation_available(2), "Pair admission ignored a pending second allocation slot");
+  f.reader.word(view(3) + 23688, 0, 1);
+  f.reader.word(view(7) + 23688, 1, 1);
+  require(run(f).creation_available(2), "An unselected later slot blocked clean native allocation order");
+
+  for (auto offset : {2768u, 2784u}) {
+    f = prepared();
+    f.reader.word(kRenderer + offset, 31, 4);
+    f.reader.word(kRenderer + offset + 4, 1, 4);
+    f.reader.word(kRenderer + offset + 8, queue);
+    f.reader.word(queue, view(2));
+    result = run(f);
+    require(result.valid && result.release_count == 1 && !result.creation_available(2),
+            "A marker cleared before consumed-queue removal authorized premature reuse");
+    RetiredViewPool retired;
+    require(retired.retain(kRenderer, view(2)), "Old verified view identity was not retained");
+    require(!retired.observe(kRenderer, result) && retired.pending(), "ID disappearance was mistaken for renderer retirement");
+    require(!retired.observe(kRenderer + 8, result), "A different renderer discarded old pending lifetime evidence");
+    f.reader.word(kRenderer + offset, 128, 4);
+    f.reader.word(kRenderer + offset + 4, 0, 4);
+    result = run(f);
+    require(result.creation_available(2) && retired.observe(kRenderer, result) && !retired.pending(),
+            "Native drain with retained queue capacity did not unblock the same start");
+  }
+  f = prepared();
+  f.reader.word(kRenderer + 2784 + 4, 65, 4);
+  require(!run(f).valid, "Oversized live queue was truncated into an absence proof");
+  f = prepared();
+  f.reader.word(kRenderer + 2784, UINT32_MAX, 4);
+  f.reader.word(kRenderer + 2784 + 4, 1, 4);
+  require(!run(f).valid, "Queue capacity arithmetic overflow was accepted");
+  for (auto address : {view(2) + 23688, kRenderer + 2768, kRenderer + 2784, kArray + 16}) {
+    f = prepared();
+    f.reader.changed_address = address;
+    require(!run(f).valid, "Changed retirement evidence survived its exact trace reread");
+  }
+  f = prepared();
+  require(run(f).valid, "Read failure baseline invalid");
+  const auto calls = f.reader.reads.size();
+  for (std::size_t call = 1; call <= calls; ++call) {
+    f = prepared();
+    f.reader.fail_call = call;
+    require(!run(f).valid, "A failed retirement field/readback published allocation permission");
+  }
+}
 }  // namespace
 
 int main() {
@@ -324,6 +410,7 @@ int main() {
     packed_control_records();
     failures_and_mutations();
     exhaustive_free_masks();
+    deferred_renderer_retirement();
     std::printf("PASS: %u bounded view-pool checks; synthetic memory only, no reservations or engine calls.\n", checks);
     return 0;
   } catch (const std::exception& error) {

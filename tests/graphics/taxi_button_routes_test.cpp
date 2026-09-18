@@ -212,6 +212,29 @@ int main() {
   ranked.forget_detected();
   assert((ranked.targets == std::array<std::uint64_t, 2>{0, 0}));
   std::puts("Ranked auto selection invalidation: PASS; explicit and semantic sides preserved, both-lost still refused");
+  taxi_camera::TaxiButtonRoutes recovered;
+  assert(recovered.adopt_detected({20, 18}));
+  recovered.forget(18);
+  assert(!recovered.adopt_detected({30, 28}));
+  assert(recovered.replace_detected({30, 28}));
+  recovered.forget(28);
+  assert(recovered.replace_detected({40, 38}));  // Repeated recovery keeps automatic provenance.
+  assert(recovered.select_explicit({40, 0}));    // Same as old automatic still becomes explicit.
+  assert(!recovered.replace_detected({50, 48}));
+  recovered.forget_detected();
+  assert((recovered.targets == std::array<std::uint64_t, 2>{40, 0}));
+  assert(recovered.select_explicit({0, 38}));
+  assert(!recovered.replace_detected({50, 48}));
+  assert((recovered.targets == std::array<std::uint64_t, 2>{0, 38}));
+  recovered.reset();
+  assert(!recovered.replace_detected({0, 48}) && !recovered.replace_detected({50, 50}));
+  assert(recovered.replace_detected({50, 48}));
+  recovered.forget_detected();
+  assert((recovered.targets == std::array<std::uint64_t, 2>{0, 0}));
+  assert(recovered.adopt_detected({60, 58}, true));
+  recovered.forget(58);
+  assert(!recovered.replace_detected({70, 68}));  // Semantic identity is also authoritative.
+  std::puts("Ranked fallback recovery: PASS; automatic provenance retained, explicit single sides preserved");
   std::puts("Explicit manual/Auto routing: PASS; partial anchors preserved, duplicate pair unchanged");
   std::puts("Taxi button routes: PASS");
 }

@@ -74,6 +74,10 @@ struct ProbeSnapshot {
   std::array<std::uint64_t, 2> activation_counts{};
   std::uint32_t thread_id = 0;
   std::uint32_t free_views = 0;
+  std::uint64_t retirement_deferrals = 0;
+  bool retirement_waiting = false;
+  const char* retirement_status = "not_inspected";
+  std::array<std::uint32_t, 2> retirement_queue_counts{};
   std::array<bool, 2> ready{};
   std::array<const char*, 2> inspection_status{"not_inspected", "not_inspected"};
   std::array<bool, 2> resource_present{};
@@ -101,6 +105,11 @@ void request_scene_test(bool reuse_calibration = false) noexcept;
 // Each request gets a unique completion token. Zero refuses the request.
 // Existing views are closed/revalidated by the observer and are never replaced.
 std::uint64_t request_scene_profile_transition(std::uint32_t id) noexcept;
+// Full flight-session reset. Invalidates starts immediately; the observer
+// closes and retires exact owned IDs using existing lifetime guards. Reports
+// through profile_transition_*; ready requires confirmed absence and public
+// load readiness. Saved mounts/calibration settings are not changed.
+std::uint64_t request_scene_session_reset(std::uint32_t id) noexcept;
 // Button mode retains public telemetry so another button press can restart.
 void request_scene_stop(bool keep_telemetry = false) noexcept;
 void note_scene_capture_progress(std::uint64_t now_ms) noexcept;

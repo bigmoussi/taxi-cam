@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstdio>
 #include <limits>
 #include <stdexcept>
@@ -11,6 +12,31 @@ void require(bool value, const char* label) {
   ++checks;
   if (!value)
     throw std::runtime_error(label);
+}
+void audit_bridge(const wchar_t* path) {
+  // Include dynamically resolved entry-point strings as well as import/symbol
+  // names. D3D11On12CreateDevice previously bypassed an import-only audit.
+  const auto file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+  require(file != INVALID_HANDLE_VALUE, "Open exact bridge for bootstrap audit");
+  LARGE_INTEGER length{};
+  const bool sized = GetFileSizeEx(file, &length) && length.QuadPart > 0 && length.QuadPart <= 64 * 1024 * 1024;
+  if (!sized) {
+    CloseHandle(file);
+    require(false, "Bounded exact bridge audit size");
+  }
+  std::vector<char> bytes(static_cast<std::size_t>(length.QuadPart));
+  DWORD read{};
+  const bool loaded = ReadFile(file, bytes.data(), static_cast<DWORD>(bytes.size()), &read, nullptr) && read == bytes.size();
+  CloseHandle(file);
+  require(loaded, "Read exact bridge for bootstrap audit");
+  for (const char* forbidden :
+       {"SuspendThread", "ResumeThread", "NtSuspendThread", "ZwSuspendThread", "NtResumeThread", "ZwResumeThread", "NtSuspendProcess",
+        "ZwSuspendProcess", "NtResumeProcess", "ZwResumeProcess", "D3D11On12CreateDevice", "MH_Initialize", "MH_CreateHook",
+        "MH_EnableHook", "MH_QueueEnableHook", "MH_ApplyQueued", "MH_Uninitialize"}) {
+    if (std::search(bytes.begin(), bytes.end(), forbidden, forbidden + std::strlen(forbidden)) != bytes.end())
+      throw std::runtime_error(std::string("Forbidden bridge startup dependency: ") + forbidden);
+    ++checks;
+  }
 }
 }  // namespace
 int wmain(int argc, wchar_t** argv) {
@@ -46,6 +72,13 @@ int wmain(int argc, wchar_t** argv) {
     bad = settings;
     bad.calibration_budget = 0;
     require(!valid_settings(bad), "Invalid calibration budget admitted");
+    for (unsigned channel = 0; channel < 3; ++channel) {
+      for (const auto value : {-0.01f, 1.01f, std::numeric_limits<float>::infinity(), std::numeric_limits<float>::quiet_NaN()}) {
+        bad = settings;
+        bad.guide_color[channel] = value;
+        require(!valid_settings(bad), "Invalid marking RGB admitted");
+      }
+    }
     Mailbox owner, reader;
     require(owner.open(GetCurrentProcessId(), true), "Create mailbox");
     require(reader.open(GetCurrentProcessId(), false), "Open mailbox");
@@ -57,14 +90,18 @@ int wmain(int argc, wchar_t** argv) {
     owner.data()->settings.tail_upper = {0.25f, 0.625f};
     owner.data()->settings.tail_corner = {0.1875f, 0.75f};
     owner.data()->settings.tail_inner = {0.375f, 0.875f};
+    owner.data()->settings.guide_color = {0.125f, 0.5f, 0.875f};
     owner.unlock();
     require(reader.lock(100), "Read mailbox lock");
     require(reader.data()->settings.camera_rate == 60, "Settings exchange");
-    require(ProtocolVersion == 8 && reader.data()->settings.nose_dot == std::array<float, 2>{0.125f, 0.375f} &&
+    require(ProtocolVersion == 9 && reader.data()->settings.nose_dot == std::array<float, 2>{0.125f, 0.375f} &&
                 reader.data()->settings.tail_upper == std::array<float, 2>{0.25f, 0.625f} &&
                 reader.data()->settings.tail_corner == std::array<float, 2>{0.1875f, 0.75f} &&
                 reader.data()->settings.tail_inner == std::array<float, 2>{0.375f, 0.875f},
-            "Guide pairs exchanged in protocol8");
+            "Guide pairs exchanged in protocol9");
+    require(reader.data()->settings.guide_color == std::array<float, 3>{0.125f, 0.5f, 0.875f} &&
+                reader.data()->settings.speed_color == settings.speed_color,
+            "Marking colour exchanged independently of ground-speed colour");
     require(reader.data()->settings.profile_request == 17 && reader.data()->settings.aircraft_session_epoch == 23,
             "Profile retry and flight scope exchanged");
     reader.unlock();
@@ -77,10 +114,10 @@ int wmain(int argc, wchar_t** argv) {
       reader.unlock();
     }
     require(owner.lock(100), "Mutate test version");
-    owner.data()->version = 4;
+    owner.data()->version = 8;
     owner.unlock();
     Mailbox refused;
-    require(!refused.open(GetCurrentProcessId(), false), "Incompatible mailbox accepted");
+    require(!refused.open(GetCurrentProcessId(), false), "Previous settings layout accepted");
     owner.close();
     reader.close();
     const DWORD found = find_simulator(L"C:\\not-a-simulator\\FlightSimulator2024.exe");
@@ -95,6 +132,7 @@ int wmain(int argc, wchar_t** argv) {
       require(!same_path(L"C:\\not-a-simulator\\FlightSimulator2024.exe", path), "Fake configured path must not be the live image");
     }
     require(argc == 2, "Provide exact bridge DLL");
+    audit_bridge(argv[1]);
     std::wstring install = argv[1];
     install.resize(install.find_last_of(L"\\/"));
     settings_override = install + L"\\smoke-settings-" + std::to_wstring(GetCurrentProcessId());
@@ -106,6 +144,8 @@ int wmain(int argc, wchar_t** argv) {
     saved.tail_upper = {0.25f, 0.625f};
     saved.tail_corner = {0.1875f, 0.75f};
     saved.tail_inner = {0.375f, 0.875f};
+    saved.guide_color = {0.125f, 0.5f, 0.875f};
+    saved.speed_color = {0.25f, 0.75f, 0.375f};
     saved.calibration_budget = 1024;
     saved.manual_mask = 3;
     saved.left_id = 999;
@@ -121,6 +161,8 @@ int wmain(int argc, wchar_t** argv) {
     require(loaded.nose_dot == saved.nose_dot && loaded.tail_upper == saved.tail_upper && loaded.tail_corner == saved.tail_corner &&
                 loaded.tail_inner == saved.tail_inner,
             "All guide pairs persist with camera settings");
+    require(loaded.guide_color == saved.guide_color && loaded.speed_color == saved.speed_color,
+            "Marking and ground-speed colours persist independently");
     require(!loaded.manual_mask && !loaded.left_id && !loaded.right_id && !loaded.route_request && !loaded.profile_request &&
                 !loaded.aircraft_session_epoch,
             "Session texture IDs and manual tests must not persist");
@@ -169,7 +211,7 @@ int wmain(int argc, wchar_t** argv) {
     require(start(nullptr) == ERROR_BAD_ENVIRONMENT, "Private camera started in wrong host");
     require(start(nullptr) == ERROR_BAD_ENVIRONMENT, "Repeated wrong-host call admitted");
     require(FreeLibrary(dll) != FALSE, "Unused wrong-host bridge unload");
-    std::printf("PASS native smoke: %u settings, IPC, startup path and exact-DLL wrong-host checks.\n", checks);
+    std::printf("PASS native smoke: %u settings, IPC, startup path, exact-DLL bootstrap audit and wrong-host checks.\n", checks);
     return 0;
   } catch (const std::exception& error) {
     std::fprintf(stderr, "FAIL native smoke: %s\n", error.what());

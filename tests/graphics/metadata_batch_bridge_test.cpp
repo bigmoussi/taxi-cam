@@ -91,6 +91,247 @@ void descriptor_identity_checks() {
   win::descriptor_copy_simple.original = nullptr;
   win::descriptor_copy.original = nullptr;
 }
+void submission_close_endpoint_checks() {
+  namespace win = taxi_camera::standalone;
+  auto& r = win::registry();
+  const auto old_ready = r.ready.load();
+  const auto old_verified = r.close_forward_verified;
+  const auto old_key = r.key;
+  const auto* old_profile = r.profile;
+  auto item = std::make_shared<win::List>();
+  item->native = reinterpret_cast<ID3D12GraphicsCommandList*>(0x770000);
+  item->id = 770;
+  auto target = std::make_shared<win::Resource>();
+  target->native = reinterpret_cast<ID3D12Resource*>(0x880000);
+  target->id = 880;
+  target->desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+  target->desc.Width = 768;
+  target->desc.Height = 1024;
+  target->desc.DepthOrArraySize = 1;
+  target->desc.MipLevels = 5;
+  target->desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+  target->desc.SampleDesc.Count = 1;
+  target->desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+  item->submission_proof.reset(1, true);
+  item->submission_proof.observe_legacy({reinterpret_cast<std::uint64_t>(target->native), target->id}, D3D12_RESOURCE_STATE_RENDER_TARGET,
+                                        D3D12_RESOURCE_STATE_COMMON, 0);
+  item->submission_proof.gpu_work();  // Same original list consumes the display after the leading exit.
+  item->submission_proof.close(1, true);
+  item->closed_recording.store(1, std::memory_order_release);
+  r.lists[item->native] = item;
+  r.resources[target->native] = target;
+  r.profile = &taxi_camera::profiles::A380;
+  r.ready = true;
+  r.key = 0;  // No runtime device/patch exists. Tokens above must never reach COM.
+  ID3D12CommandList* batch[]{item->native};
+  const auto previous_plans = r.queue_patch_plans.load();
+  {
+    r.close_forward_verified = false;
+    taxi_camera::SceneCaptureManager::DisplaySubmissionPlan plan;
+    win::plan_display_submission(nullptr, nullptr, 1, batch, plan);
+    require(!plan.count && !plan.current() && !target->submission_activity && r.queue_patch_plans == previous_plans,
+            "Unverified downstream Close admitted a plan or submission activity despite incomplete final-work proof");
+  }
+  {
+    r.close_forward_verified = true;
+    taxi_camera::SceneCaptureManager::DisplaySubmissionPlan plan;
+    win::plan_display_submission(nullptr, nullptr, 1, batch, plan);
+    require(target->submission_activity == 1 && !target->draws,
+            "Verified native Close did not credit leading-exit evidence before later work independently of native draws");
+    require(!plan.count && !plan.current() && r.queue_patch_plans == previous_plans,
+            "Metadata-only fixture manufactured an owned GPU plan without a ready patch");
+  }
+  r.lists.erase(item->native);
+  r.resources.erase(target->native);
+  r.key = old_key;
+  r.profile = old_profile;
+  r.close_forward_verified = old_verified;
+  r.ready = old_ready;
+  std::puts("PASS submission Close endpoint: unknown forwarding chain refuses plans/activity; native endpoint credits proven exits.");
+}
+void submission_profile_filter_checks() {
+  namespace win = taxi_camera::standalone;
+  using Proof = win::PfdSubmissionProof;
+  auto& r = win::registry();
+  const auto old_ready = r.ready.load();
+  const auto old_backfill = r.live_backfill.exchange(false);
+  const auto old_epoch = r.observation_epoch.load();
+  r.observation_epoch = 2;  // Metadata remains observed without PFD runtime/COM traffic.
+  r.ready = true;
+  std::array<std::uint64_t, 16> old_filter{};
+  for (std::size_t i = 0; i < old_filter.size(); ++i)
+    old_filter[i] = r.display_filter[i].exchange(UINT64_MAX);  // Force every negative-filter lookup to collide.
+  auto list = std::make_shared<win::List>();
+  list->native = reinterpret_cast<ID3D12GraphicsCommandList*>(0x991000);
+  list->id = 991;
+  list->ready = true;
+  r.lists[list->native] = list;
+  std::vector<std::shared_ptr<win::Resource>> resources;
+  const auto make_resource = [&](UINT16 mips, DXGI_FORMAT format) {
+    auto item = std::make_shared<win::Resource>();
+    item->id = 10000 + resources.size();
+    item->native = reinterpret_cast<ID3D12Resource*>(0xa00000 + resources.size() * 0x100);
+    item->desc = {D3D12_RESOURCE_DIMENSION_TEXTURE2D,     0, 768, 1024, 1, mips, format, {1, 0}, D3D12_TEXTURE_LAYOUT_UNKNOWN,
+                  D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET};
+    r.resources[item->native] = item;
+    resources.push_back(item);
+    return item;
+  };
+  const auto target = make_resource(5, DXGI_FORMAT_R8G8B8A8_UNORM);
+  const Proof::Key key{reinterpret_cast<std::uint64_t>(target->native), target->id};
+  const auto observe = [&](const std::shared_ptr<win::Resource>& resource, UINT mip,
+                           D3D12_RESOURCE_BARRIER_FLAGS flags = D3D12_RESOURCE_BARRIER_FLAG_NONE) {
+    D3D12_RESOURCE_BARRIER barrier{};
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Flags = flags;
+    barrier.Transition = {resource->native, mip, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE};
+    win::observe_legacy(nullptr, list->native, list->id, barrier, win::boundary::ScopeEnabled);
+  };
+  list->submission_proof.reset(1, true);
+  for (unsigned i = 0; i < Proof::maximum_resources + 1; ++i) {
+    const auto unrelated = make_resource(i & 1 ? 2 : 5, i & 1 ? DXGI_FORMAT_R8G8B8A8_UNORM : DXGI_FORMAT_R16G16B16A16_FLOAT);
+    observe(unrelated, 0);
+  }
+  observe(target, 0);
+  list->submission_proof.close(1, true);
+  require(list->submission_proof.complete(1) && list->submission_proof.prefix_candidate(key, 1) &&
+              list->submission_proof.prefix_candidate(0u, 1).key == key && !list->submission_proof.prefix_candidate(1u, 1),
+          "Bloom collisions with nonprofile mip/format consumed bounded candidate slots or invalidated exact display proof");
+  list->submission_proof.reset(2, true);
+  for (UINT mip = 1; mip < 5; ++mip)
+    observe(target, mip);
+  observe(target, 0);
+  list->submission_proof.close(2, true);
+  require(list->submission_proof.candidate(key, 2) && list->submission_proof.prefix_candidate(key, 2),
+          "Valid independent FBW lower-mip transitions poisoned exact base-mip exit proof");
+  list->submission_proof.reset(3, true);
+  observe(target, 4);
+  list->submission_proof.close(3, true);
+  require(
+      list->submission_proof.complete(3) && !list->submission_proof.prefix_candidate(key, 3) && !list->submission_proof.candidate(key, 3),
+      "Lower-mip-only activity became base-mip evidence");
+  list->submission_proof.reset(4, true);
+  observe(target, 0);
+  observe(target, 5);  // Outside the admitted resource's real mip range.
+  list->submission_proof.close(4, true);
+  require(!list->submission_proof.complete(4), "Out-of-range mip was silently treated as harmless lower-mip metadata");
+  list->submission_proof.reset(5, true);
+  observe(target, 0);
+  observe(target, 4, D3D12_RESOURCE_BARRIER_FLAG_BEGIN_ONLY);
+  list->submission_proof.close(5, true);
+  require(!list->submission_proof.complete(5), "Lower-mip filtering erased split-barrier uncertainty");
+  list->submission_proof.reset(6, true);
+  observe(target, 0);
+  D3D12_RESOURCE_BARRIER alias{};
+  alias.Type = D3D12_RESOURCE_BARRIER_TYPE_ALIASING;
+  win::observe_legacy(nullptr, list->native, list->id, alias, win::boundary::ScopeEnabled);
+  list->submission_proof.close(6, true);
+  require(!list->submission_proof.complete(6), "Exact profile filtering erased wildcard alias uncertainty");
+  r.lists.erase(list->native);
+  for (const auto& resource : resources)
+    r.resources.erase(resource->native);
+  for (std::size_t i = 0; i < old_filter.size(); ++i)
+    r.display_filter[i] = old_filter[i];
+  r.observation_epoch = old_epoch;
+  r.live_backfill = old_backfill;
+  r.ready = old_ready;
+  win::known_lists = {};
+  std::puts("PASS submission metadata filtering: exact profile admission, FBW lower mips, split/alias and bounds.");
+}
+unsigned work_forwards{};
+template <unsigned Slot, class Signature, class Action>
+struct WorkCall;
+template <unsigned Slot, class C, class... Args, class Action>
+struct WorkCall<Slot, void (STDMETHODCALLTYPE C::*)(Args...), Action> {
+  using Hook = taxi_camera::standalone::StateHook<Slot, void (STDMETHODCALLTYPE C::*)(Args...), Action>;
+  static void STDMETHODCALLTYPE forward(C*, Args...) { ++work_forwards; }
+  static void run(ID3D12GraphicsCommandList* native) { Hook::invoke(forward, static_cast<C*>(native), Args{}...); }
+};
+void submission_gpu_classification_checks() {
+  namespace win = taxi_camera::standalone;
+  using Proof = win::PfdSubmissionProof;
+  auto& r = win::registry();
+  const auto old_ready = r.ready.load();
+  const auto old_epoch = r.observation_epoch.load();
+  const auto old_backfill = r.live_backfill.exchange(false);
+  r.ready = true;
+  r.observation_epoch = 2;  // Discovery must keep this proof even while camera capture is idle.
+  auto list = std::make_shared<win::List>();
+  list->native = reinterpret_cast<ID3D12GraphicsCommandList*>(0x992000);
+  list->id = 992;
+  list->ready = true;
+  r.lists[list->native] = list;
+  const Proof::Key key{0xa10000, 20000};
+  const auto run = [&](UINT operation, bool disjoint, auto call, bool native_forward = true) {
+    const auto generation = ++list->recording;
+    list->submission_proof.reset(generation, true);
+    list->queries.reset(true);
+    const auto previous_forwards = work_forwards;
+    call();
+    require(work_forwards == previous_forwards + (native_forward ? 1 : 0) && !win::owned_depth,
+            "GPU hook did not forward once or retained its reentry guard");
+    list->submission_proof.observe_legacy(
+        key, D3D12_RESOURCE_STATE_RENDER_TARGET,
+        static_cast<D3D12_RESOURCE_STATES>(D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE),
+        D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES);
+    list->submission_proof.close(generation, true);
+    const Proof::Recording batch[]{{&list->submission_proof, generation}};
+    require(Proof::batch_allows(batch, 1) && static_cast<bool>(list->submission_proof.prefix_candidate(key, generation)) == disjoint,
+            "Actual idle GPU handler misclassified interference before a leading RT exit");
+    require(!list->submission_proof.candidate(key, generation), "Actual GPU handler admitted a barrier-only tail copy");
+    require(list->submission_proof.first_gpu_work() == operation &&
+                list->submission_proof.prefix_blocker() == (disjoint ? UINT_MAX : operation),
+            "Actual GPU handler lost the first-operation/blocker distinction");
+  };
+#define WORK_CASE(Slot, Interface, Method, Action, Disjoint) \
+  run(Slot, Disjoint, [&] { WorkCall<Slot, decltype(&Interface::Method), win::Action>::run(list->native); })
+  WORK_CASE(14, ID3D12GraphicsCommandList, Dispatch, StateDisjointGpuWork, true);
+  WORK_CASE(15, ID3D12GraphicsCommandList, CopyBufferRegion, StateDisjointGpuWork, true);
+  WORK_CASE(18, ID3D12GraphicsCommandList, CopyTiles, StateDisjointGpuWork, true);
+  WORK_CASE(19, ID3D12GraphicsCommandList, ResolveSubresource, StateDisjointGpuWork, true);
+  WORK_CASE(47, ID3D12GraphicsCommandList, ClearDepthStencilView, StateDisjointGpuWork, true);
+  WORK_CASE(48, ID3D12GraphicsCommandList, ClearRenderTargetView, GpuWork, false);
+  WORK_CASE(49, ID3D12GraphicsCommandList, ClearUnorderedAccessViewUint, StateDisjointGpuWork, true);
+  WORK_CASE(50, ID3D12GraphicsCommandList, ClearUnorderedAccessViewFloat, StateDisjointGpuWork, true);
+  WORK_CASE(54, ID3D12GraphicsCommandList, ResolveQueryData, StateDisjointGpuWork, true);
+  WORK_CASE(60, ID3D12GraphicsCommandList1, AtomicCopyBufferUINT, GpuWork, false);
+  WORK_CASE(61, ID3D12GraphicsCommandList1, AtomicCopyBufferUINT64, GpuWork, false);
+  WORK_CASE(64, ID3D12GraphicsCommandList1, ResolveSubresourceRegion, StateDisjointGpuWork, true);
+  WORK_CASE(66, ID3D12GraphicsCommandList2, WriteBufferImmediate, StateDisjointGpuWork, true);
+  WORK_CASE(72, ID3D12GraphicsCommandList4, BuildRaytracingAccelerationStructure, StateDisjointGpuWork, true);
+  WORK_CASE(73, ID3D12GraphicsCommandList4, EmitRaytracingAccelerationStructurePostbuildInfo, StateDisjointGpuWork, true);
+  WORK_CASE(74, ID3D12GraphicsCommandList4, CopyRaytracingAccelerationStructure, StateDisjointGpuWork, true);
+  WORK_CASE(76, ID3D12GraphicsCommandList4, DispatchRays, StateDisjointGpuWork, true);
+  WORK_CASE(79, ID3D12GraphicsCommandList6, DispatchMesh, GpuWork, false);
+#undef WORK_CASE
+  using Begin = WorkCall<52, decltype(&ID3D12GraphicsCommandList::BeginQuery), win::QueryBegin>;
+  using End = WorkCall<53, decltype(&ID3D12GraphicsCommandList::EndQuery), win::QueryEnd>;
+  auto* heap = reinterpret_cast<ID3D12QueryHeap*>(0xb10000);  // Comparison only; never dereferenced.
+  run(53, true, [&] {
+    End::Hook::invoke(End::forward, list->native, heap, D3D12_QUERY_TYPE_TIMESTAMP, 0);
+    require(list->queries.known_empty(), "Timestamp EndQuery changed independent query admission");
+  });
+  for (const auto type : {D3D12_QUERY_TYPE_OCCLUSION, D3D12_QUERY_TYPE_PIPELINE_STATISTICS}) {
+    run(52, true, [&] {
+      Begin::Hook::invoke(Begin::forward, list->native, heap, type, 0);
+      require(list->queries.active_count() == 1, "Paired query scope was lost during submission proof classification");
+    });
+    run(53, true, [&] {
+      list->queries.begin(reinterpret_cast<std::uint64_t>(heap), type, 0);
+      End::Hook::invoke(End::forward, list->native, heap, type, 0);
+      require(list->queries.known_empty(), "Completed paired query retained an active scope");
+    });
+  }
+  run(16, true, [&] { win::copy_texture(nullptr, list->native, list->id, nullptr, 0, 0, 0, nullptr, nullptr, false); }, false);
+  run(17, true, [&] { win::copy_resource(nullptr, list->native, list->id, nullptr, nullptr, false); }, false);
+  run(12, false, [&] { win::after_draw(nullptr, list->native, list->id, false); }, false);
+  r.lists.erase(list->native);
+  r.live_backfill = old_backfill;
+  r.observation_epoch = old_epoch;
+  r.ready = old_ready;
+  win::known_lists = {};
+  std::puts("PASS idle submission GPU handlers: timestamp/paired queries, state-disjoint work, RT writers and exact forwarding.");
+}
 using ClearHook =
     taxi_camera::standalone::StateHook<11, decltype(&ID3D12GraphicsCommandList::ClearState), taxi_camera::standalone::ClearState>;
 unsigned outer_clears{}, inner_clears{};
@@ -367,6 +608,79 @@ void known_list_and_idle_checks() {
       "\"timingDiagnosticOnly\":true,\"nativeGpuCalls\":0}\n",
       iterations, active_ms, idle_ms);
 }
+void display_session_reset_checks() {
+  namespace win = taxi_camera::standalone;
+  auto& r = win::registry();
+  const auto old_ready = r.ready.load();
+  const auto old_verified = r.close_forward_verified;
+  const auto old_epoch = r.observation_epoch.load();
+  const auto old_floor = r.session_recording_floor.load();
+  const auto old_key = r.key;
+  const auto* old_profile = r.profile;
+  auto item = std::make_shared<win::List>();
+  item->native = reinterpret_cast<ID3D12GraphicsCommandList*>(0x790000);
+  item->id = 790;
+  auto target = std::make_shared<win::Resource>();
+  target->native = reinterpret_cast<ID3D12Resource*>(0x890000);
+  target->id = 890;
+  target->desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+  target->desc.Width = 768;
+  target->desc.Height = 1024;
+  target->desc.DepthOrArraySize = 1;
+  target->desc.MipLevels = 5;
+  target->desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+  target->desc.SampleDesc.Count = 1;
+  target->desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+  r.ready = r.close_forward_verified = true;
+  r.key = 0;
+  r.profile = &taxi_camera::profiles::A380;
+  r.observation_epoch = 10;  // Already idle: a full reset must still invalidate the recording.
+  item->observation_epoch = 10;
+  item->submission_proof.reset(1, true);
+  item->submission_proof.observe_legacy({reinterpret_cast<std::uint64_t>(target->native), target->id}, D3D12_RESOURCE_STATE_RENDER_TARGET,
+                                        D3D12_RESOURCE_STATE_COMMON, 0);
+  item->submission_proof.close(1, true);
+  item->closed_recording = 1;
+  r.lists[item->native] = item;
+  r.resources[target->native] = target;
+  r.routes.select_explicit({target->id, 0});
+  r.active_mask = r.calibration_mask = 1;
+  target->draws = 8;
+  target->submission_activity = 9;
+  win::refresh_selected(r);
+  const auto generation = r.queue_patch_generation.load();
+  win::reset_display_session();
+  require(!r.routes.targets[0] && !r.active_mask && !r.calibration_mask && !r.selected_resources[0] && !target->draws &&
+              !target->submission_activity && r.queue_patch_generation > generation,
+          "Full session reset kept routes, activity or display demand from the previous flight");
+  require(
+      r.resources.at(target->native) == target && r.lists.at(item->native) == item && target->alive && item->submission_proof.complete(1),
+      "Control-thread reset destroyed native lifetime metadata or mutated a replayable recording");
+  ID3D12CommandList* batch[]{item->native};
+  const auto outcome = static_cast<unsigned>(win::DisplaySubmissionOutcome::generation_changed);
+  const auto rejected = r.queue_outcomes[outcome].load();
+  taxi_camera::SceneCaptureManager::DisplaySubmissionPlan old_plan;
+  win::plan_display_submission(nullptr, nullptr, 1, batch, old_plan);
+  require(!old_plan.count && !target->submission_activity && r.queue_outcomes[outcome] == rejected + 1,
+          "Old closed display proof survived full reset and credited new-flight activity");
+  // Model the proof published by a wholly observed new native Reset/Close.
+  item->observation_epoch = r.observation_epoch.load();
+  taxi_camera::SceneCaptureManager::DisplaySubmissionPlan fresh_plan;
+  win::plan_display_submission(nullptr, nullptr, 1, batch, fresh_plan);
+  require(target->submission_activity == 1 && r.queue_outcomes[outcome] == rejected + 1,
+          "Fresh-session recording could not rediscover a retained live display");
+  win::reset_display_session();
+  require(!target->submission_activity && item->observation_epoch < r.session_recording_floor,
+          "Repeated reset while idle failed to invalidate the next recording");
+  r.lists.erase(item->native);
+  r.resources.erase(target->native);
+  r.observation_epoch = old_epoch;
+  r.session_recording_floor = old_floor;
+  r.key = old_key;
+  r.profile = old_profile;
+  r.ready = old_ready;
+  r.close_forward_verified = old_verified;
+}
 void inventory_checks() {
   namespace win = taxi_camera::standalone;
   auto& r = win::registry();
@@ -411,7 +725,11 @@ int main() {
   try {
     state_reentry_checks();
     descriptor_identity_checks();
+    submission_close_endpoint_checks();
+    submission_profile_filter_checks();
+    submission_gpu_classification_checks();
     known_list_and_idle_checks();
+    display_session_reset_checks();
     inventory_checks();
     auto& r = win::registry();
     auto* native = reinterpret_cast<ID3D12GraphicsCommandList*>(0x1000);

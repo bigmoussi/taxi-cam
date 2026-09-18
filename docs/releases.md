@@ -34,7 +34,7 @@ Candidates expire after 30 days. If a candidate is missing or expired, build and
 6. Test the installer using isolated fixtures and retain diagnostic artifacts.
 7. Retain a release candidate, then wait for approval before the publish job starts.
 
-The runner is `windows-2025`. Official actions are pinned to commit SHAs. The native compiler archive and Inno Setup compiler download are pinned in `dependencies.json` and verified before use.
+The runner is `windows-2025`. Official actions are pinned to commit SHAs. The native compiler and Inno Setup compiler download are pinned in `dependencies.json` and verified before use.
 
 The validation step runs:
 

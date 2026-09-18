@@ -4,7 +4,7 @@
 
 namespace taxi_camera::standalone {
 // Display demand is independent of native ownership. OFF parks the existing
-// pair; aircraft/profile changes use a separate retained-pair transition.
+// pair; aircraft/airport changes use a separate full-session reset.
 struct SceneDemand {
   bool start;
   bool suspend;
@@ -29,10 +29,11 @@ struct ScenePrewarmReadiness {
   bool cutoff{}, buttons_valid{}, pose_ready{}, on_ground_valid{}, on_ground{};
   bool speed_valid{}, diagnostics_active{};
   double speed_knots{};
+  bool session_ready{};
   bool eligible() const noexcept {
-    return connected && session_settings && enabled && matching_identity && graphics_ready && !cutoff && buttons_valid && pose_ready &&
-           on_ground_valid && on_ground && speed_valid && std::isfinite(speed_knots) && speed_knots >= 0 && speed_knots <= 0.5 &&
-           !diagnostics_active;
+    return session_ready && connected && session_settings && enabled && matching_identity && graphics_ready && !cutoff && buttons_valid &&
+           pose_ready && on_ground_valid && on_ground && speed_valid && std::isfinite(speed_knots) && speed_knots >= 0 &&
+           speed_knots <= 0.5 && !diagnostics_active;
   }
 };
 struct ScenePrewarmProgress {

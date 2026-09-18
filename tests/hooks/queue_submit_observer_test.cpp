@@ -33,6 +33,8 @@ struct ExpectedCall {
   ID3D12CommandQueue* queue = nullptr;
   UINT count = 0;
   ID3D12CommandList* const* lists = nullptr;
+  UINT augmented_count = 0;
+  ID3D12CommandList* const* augmented_lists = nullptr;
 };
 thread_local ExpectedCall expected;
 thread_local std::uint64_t expected_receipt = 0;
@@ -56,6 +58,7 @@ void invoke(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lis
 
 struct Context {
   std::atomic<unsigned> before{0}, after{0}, refused{0}, contended{0}, bad{0}, phase{0};
+  std::atomic<unsigned> calls_at_contention{0};
   std::atomic<std::uint64_t> sequence{0};
   std::atomic<bool> recurse_before{false}, recurse_after{false};
   bool receipt_enabled = true;
@@ -95,8 +98,16 @@ class MockQueue : public ID3D12CommandQueue {
                                           D3D12_TILE_MAPPING_FLAGS) override {}
   void STDMETHODCALLTYPE ExecuteCommandLists(UINT count, ID3D12CommandList* const* lists) override {
     ++calls;
-    if (expected.queue != this || expected.count != count || expected.lists != lists)
+    if (expected.queue != this || (expected.augmented_count ? expected.augmented_count : expected.count) != count ||
+        (!expected.augmented_count && expected.lists != lists))
       ++bad;
+    if (expected.augmented_count) {
+      if (lists == expected.lists)
+        ++bad;
+      for (UINT i = 0; i < count && i < expected.augmented_count; ++i)
+        if (lists[i] != expected.augmented_lists[i])
+          ++bad;
+    }
     if (context) {
       unsigned phase = 1;
       context->phase.compare_exchange_strong(phase, 2);
@@ -165,7 +176,15 @@ void refused(void* opaque, ID3D12CommandQueue*, qs::Refusal reason) noexcept {
 }
 
 qs::Callbacks callbacks(Context* context) {
-  return {context, before, after, refused};
+  return {context, before, after, refused,
+          [](void* opaque, ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists) noexcept {
+            auto& current = *static_cast<Context*>(opaque);
+            if (expected.queue != queue || expected.count != count || expected.lists != lists)
+              ++current.bad;
+            current.calls_at_contention = static_cast<MockQueue*>(queue)->calls.load();
+            refused(opaque, queue, qs::Refusal::contended_submission);
+            return std::uint64_t{0};
+          }};
 }
 
 DWORD protection(void* address) {
@@ -245,7 +264,7 @@ void mock() {
   queue->hold_until = nullptr;
   queue->entered_hold = nullptr;
   require(queue->calls == 10 && queue->bad == 0 && context->before == 4 && context->after == 3 && context->contended == 1 &&
-              context->refused == 5 && context->bad == 0 && context->phase == 0,
+              context->refused == 5 && context->bad == 0 && context->phase == 0 && context->calls_at_contention == 9,
           "A contended helper submit blocked on the owner thread or dropped a forwarded batch");
 
   std::array<std::thread, 4> workers;
@@ -290,6 +309,207 @@ void mock() {
   invoke(queue, 2, lists);
   require(queue->calls == 812 && queue->bad == 0 && context->after == observed_after,
           "Removed hook still observed or omitted an original call");
+}
+
+struct AugmentationContext : Context {
+  std::array<qs::Insertion, qs::kMaximumInsertions> insertions{};
+  std::array<ID3D12CommandList*, qs::kMaximumCommandLists + qs::kMaximumInsertions> expected_lists{};
+  UINT insertion_count = 0, expected_count = 0;
+  std::atomic<unsigned> augment_calls{0}, result_calls{0}, last_inserted{0};
+  bool recurse_augment = false, recurse_result = false;
+};
+
+UINT augment(void* opaque,
+             ID3D12CommandQueue* queue,
+             std::uint64_t receipt,
+             UINT count,
+             ID3D12CommandList* const* lists,
+             qs::Insertion* output,
+             UINT capacity) noexcept {
+  auto& context = *static_cast<AugmentationContext*>(opaque);
+  ++context.augment_calls;
+  if (context.phase != 1 || receipt != expected_receipt || expected.queue != queue || expected.count != count || expected.lists != lists ||
+      capacity != qs::kMaximumInsertions)
+    ++context.bad;
+  for (UINT i = 0; i < capacity; ++i)
+    output[i] = context.insertions[i];
+  if (context.recurse_augment) {
+    context.recurse_augment = false;
+    invoke(queue, count, lists);
+  }
+  return context.insertion_count;
+}
+
+void augmentation_result(void* opaque, ID3D12CommandQueue* queue, std::uint64_t receipt, UINT inserted) noexcept {
+  auto& context = *static_cast<AugmentationContext*>(opaque);
+  ++context.result_calls;
+  context.last_inserted = inserted;
+  if (receipt != expected_receipt || queue != expected.queue)
+    ++context.bad;
+  if (context.recurse_result) {
+    context.recurse_result = false;
+    invoke(queue, expected.count, expected.lists);
+  } else if (inserted) {
+    expected.augmented_count = context.expected_count;
+    expected.augmented_lists = context.expected_lists.data();
+  }
+}
+
+void augmentation() {
+  auto* context = new AugmentationContext;
+  auto* queue = new MockQueue;
+  queue->context = context;
+  auto observe = callbacks(context);
+  observe.augment = augment;
+  observe.augmentation_result = augmentation_result;
+  require(qs::register_queue(queue, observe).status == qs::Status::registered, "Augmentation registration failed");
+  auto mismatch = observe;
+  mismatch.augmentation_result = nullptr;
+  require(qs::register_queue(queue, mismatch).status == qs::Status::callback_mismatch,
+          "Augmentation result identity changed after registration");
+  mismatch = observe;
+  mismatch.augment = nullptr;
+  require(qs::register_queue(queue, mismatch).status == qs::Status::callback_mismatch,
+          "Augmentation preparation identity changed after registration");
+  auto* a = reinterpret_cast<ID3D12CommandList*>(0x10000);
+  auto* b = reinterpret_cast<ID3D12CommandList*>(0x20000);
+  auto* x = reinterpret_cast<ID3D12CommandList*>(0x30000);
+  auto* y = reinterpret_cast<ID3D12CommandList*>(0x40000);
+  ID3D12CommandList* original[]{a, b};
+  const auto run = [&](UINT accepted) {
+    const auto calls = queue->calls.load(), after_count = context->after.load(), result_count = context->result_calls.load();
+    invoke(queue, 2, original);
+    require(queue->calls == calls + 1 && context->after == after_count + 1 && context->result_calls == result_count + 1 &&
+                context->last_inserted == accepted && queue->bad == 0 && context->bad == 0 && original[0] == a && original[1] == b,
+            "Augmentation changed application order, arguments, native call count or receipt pairing");
+  };
+  context->insertions = {{{0, x}, {1, y}}};
+  context->expected_lists = {a, x, b};
+  context->expected_count = 3;
+  context->insertion_count = 1;
+  run(1);
+  context->expected_lists = {a, x, b, y};
+  context->expected_count = 4;
+  context->insertion_count = 2;
+  run(2);
+  context->insertions = {{{1, x}, {1, y}}};
+  context->expected_lists = {a, b, x, y};
+  run(2);
+  context->insertion_count = 1;
+  context->insertions = {{{0, x, true}, {}}};
+  context->expected_lists = {x, a, b};
+  context->expected_count = 3;
+  run(1);
+  context->insertion_count = 2;
+  context->expected_count = 4;
+  context->insertions = {{{0, x, true}, {0, y, false}}};
+  context->expected_lists = {x, a, y, b};
+  run(2);
+  context->insertions = {{{0, x, true}, {0, y, true}}};
+  context->expected_lists = {x, y, a, b};
+  run(2);
+  context->insertions = {{{0, x, false}, {1, y, true}}};
+  context->expected_lists = {a, x, y, b};
+  run(2);
+  context->insertions = {{{0, x, false}, {0, y, true}}};
+  run(0);
+  context->insertions = {{{0, x, true}, {UINT_MAX, y, true}}};
+  run(0);
+  context->insertion_count = 0;
+  run(0);
+  context->insertion_count = 3;
+  run(0);
+  context->insertion_count = 2;
+  context->insertions = {{{1, x}, {0, y}}};
+  run(0);
+  context->insertions = {{{0, x}, {2, y}}};
+  run(0);
+  context->insertions = {{{0, x}, {1, nullptr}}};
+  run(0);
+  context->insertions = {{{0, x}, {1, x}}};
+  run(0);
+  context->insertions = {{{0, x}, {1, b}}};
+  run(0);
+  context->insertions = {{{0, x}, {1, y}}};
+  original[1] = nullptr;
+  const auto calls_before_null = queue->calls.load();
+  invoke(queue, 2, original);
+  require(queue->calls == calls_before_null + 1 && context->last_inserted == 0 && queue->bad == 0,
+          "A null original list was dereferenced or augmented");
+  original[1] = b;
+
+  std::array<ID3D12CommandList*, qs::kMaximumCommandLists> maximum{};
+  for (UINT i = 0; i < maximum.size(); ++i)
+    maximum[i] = reinterpret_cast<ID3D12CommandList*>(std::uintptr_t{0x100000} + i * 16);
+  context->insertions = {{{0, x}, {qs::kMaximumCommandLists - 1, y}}};
+  context->expected_lists[0] = maximum[0];
+  context->expected_lists[1] = x;
+  for (UINT i = 1; i < maximum.size(); ++i)
+    context->expected_lists[i + 1] = maximum[i];
+  context->expected_lists.back() = y;
+  context->expected_count = qs::kMaximumCommandLists + 2;
+  invoke(queue, static_cast<UINT>(maximum.size()), maximum.data());
+  require(queue->bad == 0 && context->bad == 0 && context->last_inserted == 2,
+          "Maximum-size batch could not append both bounded insertions");
+  context->insertions = {{{0, x, true}, {qs::kMaximumCommandLists - 1, y, false}}};
+  context->expected_lists[0] = x;
+  for (UINT i = 0; i < maximum.size(); ++i)
+    context->expected_lists[i + 1] = maximum[i];
+  context->expected_lists.back() = y;
+  invoke(queue, static_cast<UINT>(maximum.size()), maximum.data());
+  require(queue->bad == 0 && context->bad == 0 && context->last_inserted == 2,
+          "Maximum-size batch could not prepend and append while retaining all original entries");
+
+  const auto skip_count = context->augment_calls.load();
+  invoke(queue, qs::kMaximumCommandLists + 1, original);
+  invoke(queue, 0, original);
+  invoke(queue, 1, nullptr);
+  context->receipt_enabled = false;
+  invoke(queue, 2, original);
+  context->phase = 0;
+  context->receipt_enabled = true;
+  require(context->augment_calls == skip_count && queue->bad == 0, "Refused or zero-receipt batch attempted augmentation");
+
+  context->insertions = {{{0, x}, {1, y}}};
+  context->expected_lists = {a, x, b, y};
+  context->expected_count = 4;
+  const auto after_before_recursion = context->after.load();
+  const auto refusal_before_recursion = context->refused.load();
+  context->recurse_before = true;
+  invoke(queue, 2, original);
+  require(
+      context->augment_calls == skip_count && context->after == after_before_recursion && context->refused == refusal_before_recursion + 1,
+      "Reentrant before callback was allowed to augment");
+  context->recurse_augment = true;
+  invoke(queue, 2, original);
+  require(context->last_inserted == 0 && context->after == after_before_recursion && context->refused == refusal_before_recursion + 2 &&
+              queue->bad == 0,
+          "Reentrant augmentation was submitted or completed");
+  context->recurse_result = true;
+  invoke(queue, 2, original);
+  require(context->after == after_before_recursion && context->refused == refusal_before_recursion + 3 && queue->bad == 0,
+          "Reentrant acceptance callback did not fall back to exact native arguments");
+
+  std::atomic<bool> helper_finished{false}, entered_hold{false};
+  queue->hold_until = &helper_finished;
+  queue->entered_hold = &entered_hold;
+  queue->hold_count = 4;
+  const auto augment_before_contention = context->augment_calls.load();
+  std::thread helper([&] {
+    while (!entered_hold.load(std::memory_order_acquire))
+      SwitchToThread();
+    ID3D12CommandList* local[]{a};
+    invoke(queue, 1, local);
+    helper_finished.store(true, std::memory_order_release);
+  });
+  invoke(queue, 2, original);
+  helper.join();
+  queue->hold_until = nullptr;
+  queue->entered_hold = nullptr;
+  require(context->augment_calls == augment_before_contention + 1 && context->contended == 1 && queue->bad == 0 && context->bad == 0 &&
+              context->phase == 0,
+          "Contended submission was augmented, blocked or lost while one augmented call forwarded");
+  require(qs::remove().status == qs::Status::removed, "Augmentation hook removal failed");
 }
 
 void protection_failure(const std::string& mode) {
@@ -496,6 +716,8 @@ int main(int argc, char** argv) {
   try {
     if (mode == "mock")
       mock();
+    else if (mode == "augment")
+      augmentation();
     else if (mode == "hardware" || mode == "warp")
       gpu(mode == "warp");
     else if (mode == "fail-writable" || mode == "fail-install-restore" || mode == "fail-cas-restore" || mode == "fail-remove-restore")

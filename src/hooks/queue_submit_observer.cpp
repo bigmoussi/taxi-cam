@@ -150,6 +150,29 @@ void refuse(QueueState& entry, ID3D12CommandQueue* queue, Refusal reason) noexce
   entry.callbacks.refused(entry.callbacks.context, queue, reason);
 }
 
+bool valid_insertions(const std::array<Insertion, kMaximumInsertions>& insertions,
+                      UINT inserted,
+                      UINT count,
+                      ID3D12CommandList* const* lists) noexcept {
+  if (inserted > insertions.size())
+    return false;
+  for (UINT i = 0; i < inserted; ++i) {
+    const auto& item = insertions[i];
+    if (!item.list || item.after_list >= count)
+      return false;
+    const auto position = [](const Insertion& value) { return 2 * value.after_list + (value.before ? 0u : 1u); };
+    if (i && position(item) < position(insertions[i - 1]))
+      return false;
+    for (UINT j = 0; j < count; ++j)
+      if (!lists[j] || item.list == lists[j])
+        return false;
+    for (UINT j = 0; j < i; ++j)
+      if (item.list == insertions[j].list)
+        return false;
+  }
+  return true;
+}
+
 void STDMETHODCALLTYPE submit(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists) noexcept {
   const auto forward = original.load(std::memory_order_acquire);
   // Published before the slot exchange and immutable after a successful install.
@@ -176,8 +199,17 @@ void STDMETHODCALLTYPE submit(ID3D12CommandQueue* queue, UINT count, ID3D12Comma
   if (!lock.owned) {
     // Frame-generation and Present helpers share this queue. Waiting here
     // deadlocks DXGI when the owner is already inside original Execute.
+    const auto notify = entry->callbacks.contended;
+    const bool notified = notify && entry->enabled.load(std::memory_order_acquire);
+    std::uint64_t token = 0;
+    if (notified) {
+      entry->refusals.fetch_add(1, std::memory_order_relaxed);
+      token = notify(entry->callbacks.context, queue, count, lists);
+    }
     forward(queue, count, lists);
-    if (entry->enabled.load(std::memory_order_acquire))
+    if (notified && entry->callbacks.contended_completed)
+      entry->callbacks.contended_completed(entry->callbacks.context, queue, token);
+    if (!notify && entry->enabled.load(std::memory_order_acquire))
       refuse(*entry, queue, Refusal::contended_submission);
     return;
   }
@@ -198,13 +230,37 @@ void STDMETHODCALLTYPE submit(ID3D12CommandQueue* queue, UINT count, ID3D12Comma
   std::uint64_t receipt = 0;
   if (!oversized && !invalid)
     receipt = entry->callbacks.before(entry->callbacks.context, queue, count, lists);
-  // Never replay, split, omit, replace or add lists to the application's batch.
+  // Unrelated work retains its exact original arguments and fast forwarding.
   if (!receipt && !oversized && !invalid) {
     lock.release();
     forward(queue, count, lists);
     return;
   }
-  forward(queue, count, lists);
+  std::array<Insertion, kMaximumInsertions> insertions{};
+  std::array<ID3D12CommandList*, kMaximumCommandLists + kMaximumInsertions> augmented{};
+  UINT inserted = 0;
+  if (receipt && !nested_submission && entry->callbacks.augment) {
+    inserted = entry->callbacks.augment(entry->callbacks.context, queue, receipt, count, lists, insertions.data(), kMaximumInsertions);
+    if (nested_submission || !valid_insertions(insertions, inserted, count, lists))
+      inserted = 0;
+    if (entry->callbacks.augmentation_result)
+      entry->callbacks.augmentation_result(entry->callbacks.context, queue, receipt, inserted);
+    if (nested_submission)
+      inserted = 0;
+  }
+  if (inserted) {
+    UINT output = 0, next = 0;
+    for (UINT i = 0; i < count; ++i) {
+      while (next < inserted && insertions[next].after_list == i && insertions[next].before)
+        augmented[output++] = insertions[next++].list;
+      augmented[output++] = lists[i];
+      while (next < inserted && insertions[next].after_list == i)
+        augmented[output++] = insertions[next++].list;
+    }
+    forward(queue, output, augmented.data());
+  } else {
+    forward(queue, count, lists);
+  }
   if (nested_submission)
     refuse(*entry, queue, Refusal::reentrant_submission);
   else if (oversized || invalid)
@@ -236,7 +292,9 @@ Result exchange(void** slot, void* expected, void* replacement, bool installing)
 }
 
 bool same_callbacks(const Callbacks& left, const Callbacks& right) noexcept {
-  return left.context == right.context && left.before == right.before && left.after == right.after && left.refused == right.refused;
+  return left.context == right.context && left.before == right.before && left.after == right.after && left.refused == right.refused &&
+         left.contended == right.contended && left.contended_completed == right.contended_completed && left.augment == right.augment &&
+         left.augmentation_result == right.augmentation_result;
 }
 
 }  // namespace

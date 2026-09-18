@@ -571,7 +571,7 @@ bool reference_guide(float2 position, bool nose) {
   float2 local = float2(min(position.x, 768 - position.x), nose ? position.y : position.y - TailTop);
   if (nose) {
     float2 delta = local - float2(NoseDotX * 768, NoseDotY * NoseHeight);
-    // Profile-specific references: 14px A380 squares and 12px A350 circles.
+    // Profiles use 14px squares; retain 12px circle support for custom layouts.
     return SquareNoseMarkers != 0 ? all(abs(delta) < 7) : length(delta) <= 6;
   }
   // The reference bracket's bounding-box centre is near (0.335, 0.69);

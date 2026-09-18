@@ -2,6 +2,7 @@
 
 #include "activation_mask.hpp"
 #include "camera_contract_model.hpp"
+#include "camera_release_contract.hpp"
 #include "code_contract.hpp"
 #include "rtti_vtables.hpp"
 
@@ -114,7 +115,7 @@ bool boundaries(discovery::ImageReader& reader, const discovery::Inventory& imag
       return false;
     previous = entry.end;
   }
-  for (const auto& expected : camera_contract_model::boundaries()) {
+  for (const auto& expected : camera_release_contract::boundaries()) {
     if (expected.symbol >= symbols.size() || !expected.bytes)
       return false;
     const auto begin64 = std::int64_t(symbols[expected.symbol]) + expected.begin_addend;
@@ -201,6 +202,23 @@ bool same_templates(discovery::ImageReader& reader,
 
 }  // namespace
 
+bool verify_renderer_release_methods(discovery::ImageReader& reader,
+                                     const discovery::Inventory& image,
+                                     std::uint64_t base,
+                                     std::uint64_t vtable,
+                                     const CameraFunctions& functions) {
+  if (!base || vtable < base || vtable - base > UINT32_MAX || vtable % 8 || !functions.release_view || !functions.drain_views ||
+      !section(image, functions.release_view, 126, true) || !section(image, functions.drain_views, 948, true))
+    return false;
+  const auto rva = static_cast<std::uint32_t>(vtable - base);
+  if (!section(image, rva, 128, false) || base > UINT64_MAX - image.image_size)
+    return false;
+  std::array<std::uint64_t, 2> methods{}, again{};
+  return exact(reader, rva + 104, &methods[0], 8) && exact(reader, rva + 120, &methods[1], 8) &&
+         methods[0] == base + functions.release_view && methods[1] == base + functions.drain_views &&
+         exact(reader, rva + 104, &again[0], 8) && exact(reader, rva + 120, &again[1], 8) && methods == again;
+}
+
 CameraContractResolution resolve_camera_contract(discovery::ImageReader& source,
                                                  const discovery::Inventory& image,
                                                  std::uint64_t loaded_image_base) {
@@ -218,14 +236,18 @@ CameraContractResolution resolve_camera_contract(discovery::ImageReader& source,
   limits.metadata_bytes = 8192;
   if (!same_image(image, discovery::inspect_image(reader, limits)))
     return fail("Fresh main-image headers differ from the selected image.");
-  const auto& model = camera_contract_model::model();
+  const auto& model = camera_release_contract::model();
   const auto resolved = relocatable::resolve_contract(reader, image, model, {}, loaded_image_base);
   result.scanned_bytes = resolved.scanned_bytes;
   if (!resolved.valid)
     return fail("Instruction discovery refused: " + resolved.error);
   CameraContract contract;
-  if (!camera_contract_model::bind(resolved.symbols, contract.functions, contract.layout))
+  const auto base_count = camera_contract_model::model().symbols.size();
+  const std::vector<std::uint32_t> base_symbols(resolved.symbols.begin(), resolved.symbols.begin() + base_count);
+  if (!camera_contract_model::bind(base_symbols, contract.functions, contract.layout))
     return fail("The resolved camera contract is incomplete.");
+  contract.functions.release_view = resolved.symbols[base_count];
+  contract.functions.drain_views = resolved.symbols[base_count + 1];
   std::vector<CodeRange> ranges;
   for (const auto& code : model.code)
     ranges.push_back({resolved.symbols[code.symbol], static_cast<std::uint32_t>(code.bytes.size())});

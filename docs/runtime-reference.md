@@ -22,9 +22,13 @@ When startup cannot be configured and the original file is verified unchanged, i
 
 | Control | Location and behaviour |
 | --- | --- |
+| **Connect / Disconnect** | One button in **Overview**, also available in the tray menu. Connect attaches and enables camera operation, including profiles saved with the old Service switch off. It changes to Disconnect while connecting or connected. Disconnect stops output, clears temporary preview/calibration/scene and aircraft-button requests, and suspends automatic retries until Connect is chosen again. Connect then retries attachment and enables cameras without stopping MSFS or changing calibration. Prefer the main menu; a late Connect learns display textures on the next cockpit draw. **Restart Flight** only if the list stays empty. |
+| **Auto-connect** | **Overview** connection box; on by default, starts attachment when MSFS is detected. Preference is saved in `%LOCALAPPDATA%\Taxi Cam\settings.ini`. Disconnect leaves this saved preference unchanged; an explicit Connect or turning Auto-connect on resumes attachment. |
 | **Keyboard shortcuts…** | **Overview → Flight-deck control**; configure left, right and both-display toggles. Defaults are Ctrl + Shift + L / R / B. |
 | **TAXI buttons** | Beside the shortcut editor button; follow cockpit TAXI controls where supported. Disabled for the iniBuilds A380, whose buttons are INOP. Shortcuts work with this setting on or off. |
 | **Donate** | Sidebar, above the bug-report icon; opens the PayPal donation page in the default browser. |
+
+Disconnect followed by Connect also restarts the resident bridge's setup: it clears previous display routes and activity, reopens display discovery, and revalidates the retained camera views before preparing output again. Saved calibration is unchanged. A new companion process triggers the same setup even when the bridge is already loaded.
 | **Report a bug** | Sidebar bug icon or tray menu; opens the GitHub issue form. |
 | Version number | Bottom of the sidebar; opens the Taxi Cam GitHub repository in the default browser. |
 
@@ -50,7 +54,7 @@ Night-boost preference revision 1 sets `night_boost` to 8 once for each existing
 
 | Saved field | Default | Range or purpose |
 | --- | --- | --- |
-| `enabled` | 1 | Enable the camera service |
+| `enabled` | 1 | Legacy saved field; runtime enable follows Connect/Disconnect. Connect and Auto-connect enable operation regardless of a saved 0. |
 | `follow_taxi` | 1; iniBuilds A380: 0 | Read aircraft TAXI controls; 0 uses manual control |
 | `auto_detect` | 1 | Detect the PFD pair using the profile's policy |
 | `camera_rate` | 10 | Integer 5–60 (minimum 5), activation limit per camera. The first keep-install of this version writes 10 into existing `settings.ini` and known aircraft profile INIs; later upgrades keep a user-changed rate. Missing keys use 10. |
@@ -59,6 +63,7 @@ Night-boost preference revision 1 sets `night_boost` to 8 once for each existing
 | `automatic_exposure` | 1 | Adjust exposure from ambient light |
 | `exposure` | −11.5 for all aircraft | Daytime EV, −16 to +4 |
 | `speed_red`, `speed_green`, `speed_blue` | 22 / 255, 109 / 255, 19 / 255 for all aircraft (`#166D13`) | Normalized RGB, 0–1, edited with the colour picker |
+| `guide_red`, `guide_green`, `guide_blue` | 1, 0, 1 for all aircraft (`#FF00FF`) | Normalized RGB, 0–1, saved in `[guides]`; **Marking colour** changes all reference marks independently of GS |
 | `night_boost` | 8 | Maximum automatic boost, 0–8 EV; existing profiles migrate once |
 | `night_boost_revision` | 1 on save or migration | Per-profile migration marker; not a user control |
 | `calibration_budget` | 4096 | 64–16384 identification-draw batches per window |
@@ -131,9 +136,9 @@ The logical gap between panes is four working-image rows. The visible divider co
 
 The **Reference guides** page edits `nose_dot`, `tail_upper`, `tail_corner` and `tail_inner`. Each point is stored in `[guides]` as `<point>_x` and `<point>_y`. Saved coordinates are normalized: X ranges from 0 to 0.5 and Y from 0 to 1; the UI displays these as 0-50% and 0-100%. X is measured from the left edge and Y from the top of the relevant camera pane. The right point mirrors X about the pane centre. Missing keys use that aircraft profile's shipped coordinates.
 
-**Apply live** publishes the current edit without saving. **Save changes** writes it to the active profile. **Reset guide positions** restores only that profile's shipped guide points; camera mounts and display settings are retained. Guide changes take effect on subsequent composed frames using the same scene resources. These positions remain relative to the image and do not automatically track wheels when camera mounts change.
+**Apply live** publishes the current position edit without saving. **Marking colour** uses the same colour picker as GS and applies the chosen colour to the nose squares and tail brackets immediately. **Save changes** writes these choices to the active profile. **Reset guides** restores that profile's shipped guide points and magenta colour; camera mounts and ground-speed colour are retained. Missing colour keys use the profile default. Guide changes take effect on subsequent composed frames using the same scene resources. These positions remain relative to the image and do not automatically track wheels when camera mounts change.
 
-A380 nose markers are filled 14-by-14-pixel magenta squares in the working image. A350 nose dots are amber circles with a 6-pixel radius (12-pixel diameter). Saved centres are retained. Tail brackets use a two-pixel distance threshold. Their positions should be calibrated against the visible tyres at the chosen camera framing before being promoted to shipped defaults.
+A380 and A350 nose markers are filled 14-by-14-pixel squares in the working image, with magenta as the default marking colour. Saved centres are retained. Tail brackets use a two-pixel distance threshold. Their positions should be calibrated against the visible tyres at the chosen camera framing before being promoted to shipped defaults.
 
 The GS box uses thin antialiased lettering with two character spaces between the white `GS` label and the coloured speed value. Ground speed is truncated to whole knots (for example, 12.9 displays as 12). Invalid, stale or overflowing values display `--`. The existing 60-knot automatic cutoff controls camera activation independently.
 
@@ -169,6 +174,8 @@ A drawing attempt requires a verified target, current image, complete state evid
 
 Camera composition can succeed while PFD writes are refused. When images exist but no PFD write has yet been recorded, the app reports that it is waiting for a verified write opportunity. These counters report recorded operations; they do not confirm that a frame was presented.
 
+`PFD queue admission` reports bounded counters for each submission-path outcome, including an unverified Close endpoint, incomplete recordings, missing display exits, unavailable prepared patches and planned copies. `PFD queue proof refusals` identifies the first recorded cause, such as an unobserved Reset, uncertain barrier, unsupported command or unsafe render pass. `PFD prefix blocking commands` names the earlier command that rejected an otherwise valid leading display exit. `proof_flags` uses bits 1/2/4/8/16 for known/closed/active-pass/barrier-only/matching-generation evidence. Candidate activity lists both draws and submitted completions. Formatting runs on the existing five-second log cadence, using the same rotated file limits.
+
 ## Exposure
 
 With valid ambient-light data, the exposure controller computes:
@@ -193,14 +200,14 @@ Mutex:   Local\380TaxiCamera.Control.<MSFS_PID>
 Mapping: Local\380TaxiCamera.Data.<MSFS_PID>
 ~~~
 
-The header contains `magic`, `version`, `bytes`, `owner_pid` and `owner_heartbeat`. Magic is `0x54415849`, protocol version is `8` and size must equal `sizeof(Shared)`. The payload is the native C++ `Settings` and `Status` layout, so the EXE and DLL must be shipped as a compatible pair. Session-only TAXI requests carry a serial, selected sides and desired states. Status returns fresh button telemetry and request acknowledgement; these commands are never saved in aircraft calibration.
+The header contains `magic`, `version`, `bytes`, `owner_pid` and `owner_heartbeat`. Magic is `0x54415849`, protocol version is `9` and size must equal `sizeof(Shared)`. The payload is the native C++ `Settings` and `Status` layout, so the EXE and DLL must be shipped as a compatible pair. Session-only TAXI requests carry a serial, selected sides and desired states. Status returns fresh button telemetry and request acknowledgement; these commands are never saved in aircraft calibration.
 
 The mapping carries values, IDs and bounded text. It carries no camera pixels or native object pointers. Routine access tries the mutex without blocking. A busy mutex retains the last validated settings only until their original heartbeat expires; a failed read never extends that deadline. Heartbeat age is measured after the read. An abandoned mutex immediately invalidates the bridge cache and clears enable and heartbeat rather than consuming a partial write.
 
 | Operation | Interval or bound |
 | --- | --- |
 | Companion connection/settings loop | 200 ms delay |
-| Startup header/Windows-loader preflight retry | 1 second; at most 60 attempts; no retry after a remote load/start may have begun |
+| Startup header/Windows-loader preflight retry | 1 second; at most 60 attempts per wave; recovery waves every 15 seconds (capped); no second LoadLibrary after a remote load may have begun; Disconnect cancels retries and the next Connect clears companion attempt state |
 | Bridge control/output-service loop | 25 ms delay |
 | Companion heartbeat acceptance | At most 5000 ms old |
 | Aircraft identity sampling / freshness | 1000 ms / 3000 ms |
@@ -225,6 +232,12 @@ Source: [IPC](../src/shared/protocol.hpp), [control loop](../src/bridge/bridge_m
 
 ## Diagnostics
 
+`launcher.log` records separate elapsed milliseconds for preflight, remote-load creation and wait, post-load inspection, export lookup, and start creation and wait. The two remote thread IDs and raw wait result/error distinguish cancellation, a failed wait and a loader timeout. The process-discovery timestamp is not the start of the remote load. A timeout still retains the existing guard against launching a duplicate remote load.
+
+`bridge.log` records maximum observed discovery, camera-service and control-loop work durations, plus up to sixteen candidate IDs and their draw counters alongside the automatic-selection result. These bounded records help distinguish a stalled control loop from a detector rejecting inactive or ambiguous candidates. They are CPU elapsed times, not GPU timings; normal log rotation still applies.
+
+A populated PFD inventory with no associated draw activity can indicate views whose native descriptor creation predates Connect. The already-powered A350 case with opaque views and transitions on separate command lists remains unresolved: inventory membership and manual IDs do not prove a writable view. Connect-in-flight and native binding recovery remain available where the existing D3D12 evidence is sufficient; this is separate from the detector's activity ranking.
+
 Native camera access uses dynamic instruction and object-identity discovery in the loaded executable. Moved code and data may be accepted when the complete reviewed contract still matches; executable hashes and storefront names are not compatibility gates. Changed instructions, layouts or ambiguous identities keep the camera disabled. A successful discovery check is separate from live rendering validation. See [Dynamic camera compatibility](dynamic-camera-compatibility.md) for the model and its limits.
 
 The bridge writes a status snapshot to the companion and appends metadata to:
@@ -232,6 +245,10 @@ The bridge writes a status snapshot to the companion and appends metadata to:
 ~~~text
 %LOCALAPPDATA%\Taxi Cam\bridge.log
 ~~~
+
+Runtime text logs rotate before an incoming record would exceed their limit. `bridge.log` and its previous file `bridge.log.1` are each limited to 8 MiB; `launcher.log` and `launcher.log.1` are each limited to 4 MiB. Rotation keeps recent diagnostics and continues recording. A pre-existing oversized log is reduced to its most recent complete lines on the next write. The fixed temporary rotation file is also bounded. Concurrent writers share a nonblocking lock and an exclusive writer handle; if the file or archive is unavailable, that record is skipped and the next write retries without increasing the full file.
+
+Renderer fault evidence uses a separate maximum of 16 records of 4 KiB each. Before creating a new session record, the bridge removes eligible old records outside the exception handler. Active or locked records are preserved; if there is no safe capacity, new fault evidence is declined. Installer diagnostics replace the previous installation report rather than appending indefinitely.
 
 Control-transition logs include companion connectivity, cached-read contention count, requested scene state, TAXI validity/grace expiry, scene stop reason and recovery attempts. Output changes and readiness-wait episodes are also logged immediately when observed by the control loop. Camera entry IDs, per-view readiness, draw counts, unknown command lists and invalid recording counts distinguish a control disconnect, temporary pending view and GPU capture-state loss.
 When an established camera entry is pending or its inspection changes during a read, the observer retains the pair and waits for fresh validation. It closes only independently validated ready views and makes no pose, resize or activation calls against unavailable views. A timeout does not authorize removing an unavailable camera. Completed images remain subject to resource-generation checks.
@@ -268,7 +285,8 @@ The log's `queries` and `query_ms` cover actual calls to the instrumented memory
 | Symptom | Inspect |
 | --- | --- |
 | No bridge status | Companion connection, executable path/structure and bridge startup |
-| Empty PFD texture list after starting Taxi Cam inside a loaded flight | The bridge may have missed existing texture/RTV creation. Reload the aircraft or flight with Taxi Cam running so the display resources are recreated; a panel redraw alone does not recover them. If the list stays empty after recreation, investigate display dimensions and formats. |
+| Display list populated but automatic selection stays empty | Inspect `PFD selection` in `bridge.log`: it records whether automatic selection is enabled, candidate count, the detector's last result, and explicitly requested IDs. `no_activity` waits for drawing; `stabilizing` needs more consistent samples; `ambiguous_activity` means the leading pair is not sufficiently separated from another display. |
+| Empty PFD texture list after starting Taxi Cam inside a loaded flight | Late attach can miss Create*/CreateRTV. The bridge learns display textures on barrier/copy use and associates unique RT entries with OM targets during a bounded window. It waits for the profile's complete display set, including eight iniBuilds A380 displays, and restarts eligibility when the aircraft profile is applied. Wait for the next cockpit draw, then Refresh. The empty-list budget is three seconds; a nonempty list gets ten seconds for association. If the list stays empty after recreation, investigate display dimensions and formats. |
 | Camera compatibility check failed | Reported instruction-discovery, function-boundary, object-identity or activation-data failure; include the launcher and bridge logs in the support report |
 | Scenes not ready | Camera lifecycle and fresh aircraft/camera telemetry |
 | Scenes ready, zero captures | Scene-to-texture match, source state and queue observation |

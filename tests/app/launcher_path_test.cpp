@@ -16,6 +16,130 @@ struct Files {
         DeleteFileW(path->c_str());
   }
 };
+void loader_wait_checks() {
+  using namespace taxi_camera::standalone;
+  struct OwnEvent {
+    HANDLE handle = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    ~OwnEvent() {
+      if (handle)
+        CloseHandle(handle);
+    }
+  } event;
+  require(event.handle != nullptr, "Create own event for loader wait tests");
+  std::atomic<bool> running{true};
+  require(SetEvent(event.handle) != FALSE, "Signal own loader completion event");
+  const auto complete = wait_for_loader(event.handle, &running);
+  require(complete.observed && complete.result == WAIT_OBJECT_0 && !complete.error && !complete.cancelled,
+          "Completed wait preserves the actual Windows signal result");
+  const auto failed = wait_for_loader(nullptr, &running);
+  require(failed.observed && failed.result == WAIT_FAILED && failed.error == ERROR_INVALID_HANDLE && !failed.cancelled,
+          "Failed wait captures the Windows error before cleanup can overwrite it");
+  require(ResetEvent(event.handle) != FALSE, "Reset own loader completion event");
+  const auto pending = wait_for_loader(event.handle, &running, 1);
+  require(pending.observed && pending.result == WAIT_TIMEOUT && !pending.error && !pending.cancelled,
+          "An unsignaled event reaches the bounded wait deadline");
+  running = false;
+  const auto cancelled = wait_for_loader(event.handle, &running);
+  require(!cancelled.observed && !cancelled.error && cancelled.cancelled,
+          "Stopped companion cancels the wait without reporting an observed Windows timeout");
+  for (const bool starting : {false, true}) {
+    const auto error = loader_wait_failure(failed, starting);
+    const auto timeout = loader_wait_failure(pending, starting);
+    const auto stopped = loader_wait_failure(cancelled, starting);
+    require(!error.ok && error.error == ERROR_INVALID_HANDLE && !timeout.ok && timeout.error == WAIT_TIMEOUT && !stopped.ok &&
+                stopped.error == ERROR_CANCELLED,
+            "Load and startup failures distinguish Windows errors, deadlines and cancellation");
+    for (const auto* result : {&error, &timeout, &stopped}) {
+      LaunchRetry retry;
+      require(!result->retry_before_load && !retry.schedule(*result, 0),
+              "Accurate wait errors preserve the terminal no-second-load policy");
+    }
+  }
+  LaunchDiagnostics trace;
+  {
+    LaunchTiming timing(trace);
+    timing.phase(L"windows_loader_create", trace.load_create_ms);
+    timing.phase(L"windows_loader", trace.load_wait_ms);
+    running = true;
+    trace.loader_wait = wait_for_loader(event.handle, &running, 1);
+    timing.phase(L"after_load_module_scan", trace.post_load_ms);
+    timing.phase(L"bridge_export", trace.export_ms);
+    timing.phase(L"bridge_start_create", trace.start_create_ms);
+    timing.phase(L"bridge_start", trace.start_wait_ms);
+  }
+  require(trace.started_ms && trace.started_ms <= GetTickCount64() && trace.load_wait_ms >= 1 &&
+              trace.elapsed_ms == trace.preflight_ms + trace.load_create_ms + trace.load_wait_ms + trace.post_load_ms + trace.export_ms +
+                                      trace.start_create_ms + trace.start_wait_ms,
+          "Monotonic phase durations account for the complete launch interval");
+  const auto invalid_process = load_bridge(0, L"", L"", nullptr, &trace);
+  require(!invalid_process.ok && invalid_process.error == ERROR_INVALID_PARAMETER && trace.started_ms &&
+              trace.elapsed_ms == trace.preflight_ms && !trace.load_started && !trace.loader_wait.observed &&
+              std::wstring(trace.phase) == L"preflight",
+          "An early preflight return records timing without attempting a remote load");
+}
+void launcher_log_checks(const std::wstring& directory) {
+  using namespace taxi_camera::standalone;
+  require(CreateDirectoryW(directory.c_str(), nullptr) != FALSE, "Create isolated launcher log directory");
+  struct LogDirectory {
+    std::wstring path;
+    ~LogDirectory() {
+      DeleteFileW((path + L"\\launcher.log").c_str());
+      DeleteFileW((path + L"\\launcher.log.1").c_str());
+      DeleteFileW((path + L"\\launcher.log.rotating").c_str());
+      RemoveDirectoryW(path.c_str());
+    }
+  } cleanup{directory};
+  LaunchDiagnostics trace;
+  trace.phase = L"windows_loader";
+  trace.load_started = true;
+  trace.started_ms = 5000000000ull;
+  trace.preflight_ms = 21;
+  trace.load_create_ms = 300000;
+  trace.load_wait_ms = 30000;
+  trace.elapsed_ms = trace.preflight_ms + trace.load_create_ms + trace.load_wait_ms;
+  trace.loader_thread_id = 1234;
+  trace.loader_wait = {WAIT_TIMEOUT, ERROR_SUCCESS, true, false};
+  log_launch(directory, 99, loader_wait_failure(trace.loader_wait, false), trace);
+  auto log = read_small_text_file(directory + L"\\launcher.log");
+  for (const auto* field : {L"phase=windows_loader", L"started_ms=5000000000", L"elapsed_ms=330021", L"preflight_ms=21",
+                            L"load_create_ms=300000", L"load_wait_ms=30000", L"post_load_ms=0", L"export_ms=0", L"start_create_ms=0",
+                            L"start_wait_ms=0", L"load_tid=1234", L"start_tid=0", L"load_wait_observed=1", L"load_wait=0x00000102",
+                            L"load_wait_error=0", L"load_cancelled=0", L"start_wait_observed=0", L"retry_before_load=0"})
+    require(log.find(field) != std::wstring::npos, "Launcher log retains phase timings, thread IDs and raw wait diagnostics");
+  trace.phase = L"bridge_start";
+  trace.start_thread_id = 5678;
+  trace.start_wait = {WAIT_FAILED, ERROR_INVALID_HANDLE, true, false};
+  log_launch(directory, 99, loader_wait_failure(trace.start_wait, true), trace);
+  trace.start_wait = {WAIT_TIMEOUT, ERROR_SUCCESS, false, true};
+  log_launch(directory, 99, loader_wait_failure(trace.start_wait, true), trace);
+  log = read_small_text_file(directory + L"\\launcher.log");
+  require(log.find(L"error=6 phase=bridge_start") != std::wstring::npos && log.find(L"start_tid=5678") != std::wstring::npos &&
+              log.find(L"start_wait=0xffffffff start_wait_error=6 start_cancelled=0") != std::wstring::npos &&
+              log.find(L"error=1223 phase=bridge_start") != std::wstring::npos &&
+              log.find(L"start_wait_observed=0 start_wait=0x00000102 start_wait_error=0 start_cancelled=1") != std::wstring::npos,
+          "Written diagnostics preserve failed versus cancelled startup waits");
+  const auto path = directory + L"\\launcher.log";
+  const auto file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+  require(file != INVALID_HANDLE_VALUE, "Prepare a launcher log at its former stop-writing threshold");
+  std::string previous(static_cast<std::size_t>(LauncherLogBytes), 'x');
+  previous.back() = '\n';
+  DWORD written{};
+  const bool filled =
+      WriteFile(file, previous.data(), static_cast<DWORD>(previous.size()), &written, nullptr) && written == previous.size();
+  CloseHandle(file);
+  require(filled, "Fill the existing launcher diagnostic history");
+  log_launch(directory, 99, loader_wait_failure(trace.start_wait, true), trace);
+  log = read_small_text_file(path);
+  require(log.find(L"phase=bridge_start") != std::wstring::npos && log.find(L"start_cancelled=1") != std::wstring::npos,
+          "A full launcher log rotates and retains the current startup result");
+  WIN32_FILE_ATTRIBUTE_DATA archive{};
+  require(GetFileAttributesExW((path + L".1").c_str(), GetFileExInfoStandard, &archive) && !archive.nFileSizeHigh &&
+              archive.nFileSizeLow == LauncherLogBytes,
+          "The launcher keeps one previous log within the production limit");
+  append_launcher_log(directory, L"Newest diagnostics still recorded\r\n");
+  require(read_small_text_file(path).find(L"Newest diagnostics still recorded") != std::wstring::npos,
+          "Launcher diagnostics continue after the old threshold is reached");
+}
 struct ModuleFixture {
   unsigned snapshots = 0, closed = 0, pauses = 0, fail_snapshots = 0;
   DWORD failure = ERROR_BAD_LENGTH, last_error = 0;
@@ -109,8 +233,9 @@ void dual_install_checks(const std::wstring& original, const std::wstring& alias
   require(known_msfs2024_layout(L"C:/Program Files (x86)/Steam/steamapps/common/Limitless/FlightSimulator2024.exe"),
           "Steam Limitless layout");
   require(known_msfs2024_layout(L"C:\\XboxGames\\Microsoft Flight Simulator 2024\\Content\\FlightSimulator2024.exe"), "XboxGames layout");
-  require(known_msfs2024_layout(L"C:\\Program Files\\WindowsApps\\Microsoft.Limitless_1.8.16.0_x64__8wekyb3d8bbwe\\FlightSimulator2024.exe"),
-          "WindowsApps Limitless layout");
+  require(
+      known_msfs2024_layout(L"C:\\Program Files\\WindowsApps\\Microsoft.Limitless_1.8.16.0_x64__8wekyb3d8bbwe\\FlightSimulator2024.exe"),
+      "WindowsApps Limitless layout");
   require(!known_msfs2024_layout(L"C:\\not-a-simulator\\FlightSimulator2024.exe"), "Random FlightSimulator2024.exe is not a 2024 install");
   require(!known_msfs2024_layout(L"C:\\XboxGames\\Microsoft Flight Simulator 2024\\Content\\SimConnect.dll"), "Non-exe layout rejected");
   require(!known_msfs2024_layout(L"C:\\Program Files\\WindowsApps\\Other.App_1.0.0.0_x64__8wekyb3d8bbwe\\FlightSimulator2024.exe"),
@@ -184,11 +309,13 @@ void dual_install_checks(const std::wstring& original, const std::wstring& alias
 int main() {
   try {
     module_checks();
+    loader_wait_checks();
     using taxi_camera::standalone::same_path;
     wchar_t temporary[MAX_PATH]{}, original[MAX_PATH]{};
     require(GetTempPathW(MAX_PATH, temporary) != 0, "Temporary directory");
     require(GetTempFileNameW(temporary, L"tax", 0, original) != 0, "Unique fixture file");
     Files files{original, std::wstring(original) + L".alias", std::wstring(original) + L".copy"};
+    launcher_log_checks(std::wstring(original) + L".logs");
     require(CreateHardLinkW(files.alias.c_str(), files.original.c_str(), nullptr) != FALSE, "Create alternate path to the same file");
     require(CopyFileW(files.original.c_str(), files.copy.c_str(), TRUE) != FALSE, "Create separate file with identical contents");
 
@@ -209,9 +336,18 @@ int main() {
     LaunchRetry retry;
     require(retry.ready(1000), "First startup attempt immediate");
     require(retry.schedule(pending, 1000) && !retry.ready(1999) && retry.ready(2000), "Preflight retry waits one second");
-    for (unsigned i = 1; i < 59; ++i)
+    for (unsigned i = 1; i < LaunchRetry::MaxPreflightRetries; ++i)
       require(retry.schedule(pending, 1000 + i * 1000), "Bounded preflight retry available");
     require(!retry.schedule(pending, 61000), "No more than 60 total load attempts");
+    require(retry.schedule_recovery(61000) && !retry.ready(61000 + LaunchRetry::RecoveryDelayMs - 1) &&
+                retry.ready(61000 + LaunchRetry::RecoveryDelayMs),
+            "Exhausted preflight schedules a recovery wave");
+    require(retry.retries() == 0 && retry.recoveries() == 1, "Recovery clears the preflight counter");
+    for (unsigned i = 1; i < LaunchRetry::MaxRecoveryWaves; ++i)
+      require(retry.schedule_recovery(100000 + i * LaunchRetry::RecoveryDelayMs), "Bounded recovery waves available");
+    require(!retry.schedule_recovery(UINT64_MAX / 2), "Recovery wave budget is finite");
+    retry.reset();
+    require(retry.ready(0) && retry.retries() == 0 && retry.recoveries() == 0, "Reset clears retry state for Reconnect");
     for (const auto error : {WAIT_TIMEOUT, ERROR_ACCESS_DENIED, ERROR_MOD_NOT_FOUND, ERROR_INVALID_ADDRESS}) {
       LaunchRetry terminal;
       require(!terminal.schedule({false, static_cast<DWORD>(error), L"Load or start may have begun"}, 1000),
@@ -221,7 +357,9 @@ int main() {
     require(!complete.schedule({true, 0, L"Loaded"}, 1000), "Successful load never retried");
     LaunchRetry overflow;
     require(!overflow.schedule(pending, UINT64_MAX), "Retry deadline cannot overflow");
-    std::puts("PASS launcher paths and startup: aliases, dual-install attach, bounded preflight retries and terminal remote-load failures.");
+    std::puts(
+        "PASS launcher paths and startup: aliases, dual-install attach, bounded retries, phase timing, raw wait diagnostics, cancellation "
+        "and terminal remote-load failures.");
     return 0;
   } catch (const std::exception& error) {
     std::fprintf(stderr, "FAIL launcher paths: %s\n", error.what());

@@ -34,7 +34,7 @@ bool same_guides(const standalone::Settings& a, const standalone::Settings& b) {
   for (auto member : GuideMembers)
     if (a.*member != b.*member)
       return false;
-  return true;
+  return a.guide_color == b.guide_color;
 }
 void aircraft_swap_tests() {
   // Read-only IPC capture from the installed FBW A380, 2026-09-14. The brand
@@ -126,7 +126,8 @@ void guide_settings_tests() {
     defaults.speed_color = profile->composition.speed_color;
     reset_guide_settings(defaults, *profile);
     assert(defaults.nose_dot == profile->composition.nose_dot && defaults.tail_upper == profile->composition.tail_upper &&
-           defaults.tail_corner == profile->composition.tail_corner && defaults.tail_inner == profile->composition.tail_inner);
+           defaults.tail_corner == profile->composition.tail_corner && defaults.tail_inner == profile->composition.tail_inner &&
+           defaults.guide_color == profile->composition.guide_color);
     Settings edited = defaults;
     edited.nose_dot = {profile->id * 0.03125f, 0.25f};
     edited.tail_upper = {0.125f, 0.375f + profile->id * 0.03125f};
@@ -134,6 +135,7 @@ void guide_settings_tests() {
     edited.tail_inner = {0.375f, 0.75f + profile->id * 0.03125f};
     edited.mounts[0][1] += 0.125;
     edited.speed_color = {0.25f, 0.5f, 0.75f};
+    edited.guide_color = {profile->id * 0.125f, 0.125f, 0.875f};
     edited.exposure = -7.5f;
     assert(save_settings(edited));
     Settings loaded;
@@ -154,6 +156,19 @@ void guide_settings_tests() {
         }
       }
     }
+    for (unsigned channel = 0; channel < 3; ++channel) {
+      for (float value : {-0.001f, 1.001f, std::numeric_limits<float>::infinity(), -std::numeric_limits<float>::infinity(),
+                          std::numeric_limits<float>::quiet_NaN()}) {
+        auto invalid = edited;
+        invalid.guide_color[channel] = value;
+        assert(!valid_settings(invalid) && !save_settings(invalid));
+      }
+      for (float value : {0.f, 1.f}) {
+        auto edge = edited;
+        edge.guide_color[channel] = value;
+        assert(valid_settings(edge));
+      }
+    }
     assert(load_settings(loaded, L"missing", profile->id) && same_guides(loaded, edited));
     auto reset = edited;
     reset_guide_settings(reset, *profile);
@@ -161,6 +176,31 @@ void guide_settings_tests() {
            reset.exposure == edited.exposure && reset.profile == edited.profile);
 
     const auto path = settings_path(edited);
+    constexpr const wchar_t* color_keys[]{L"guide_red", L"guide_green", L"guide_blue"};
+    for (const auto* key : color_keys)
+      assert(WritePrivateProfileStringW(L"guides", key, nullptr, path.c_str()));
+    auto older = edited;
+    older.guide_color = defaults.guide_color;
+    assert(load_settings(loaded, L"missing", profile->id) && same_guides(loaded, older));
+    assert(loaded.mounts == edited.mounts && loaded.speed_color == edited.speed_color);
+    // Loading an older profile supplies the marking default without rewriting
+    // its saved camera calibration, guide positions or settings format.
+    for (const auto* key : color_keys) {
+      wchar_t raw[32]{};
+      GetPrivateProfileStringW(L"guides", key, L"missing", raw, 32, path.c_str());
+      assert(std::wstring(raw) == L"missing");
+    }
+    assert(WritePrivateProfileStringW(L"guides", color_keys[0], L"0.625", path.c_str()));
+    assert(WritePrivateProfileStringW(L"guides", color_keys[1], L"nan", path.c_str()));
+    assert(WritePrivateProfileStringW(L"guides", color_keys[2], L"not-a-number", path.c_str()));
+    older.guide_color[0] = 0.625f;
+    assert(load_settings(loaded, L"missing", profile->id) && same_guides(loaded, older));
+    for (const auto* key : color_keys) {
+      assert(WritePrivateProfileStringW(L"guides", key, L"1.001", path.c_str()));
+      loaded = edited;
+      assert(!load_settings(loaded, L"missing", profile->id) && same_guides(loaded, edited) && loaded.mounts == edited.mounts);
+      assert(WritePrivateProfileStringW(L"guides", key, nullptr, path.c_str()));
+    }
     assert(WritePrivateProfileStringW(L"guides", nullptr, nullptr, path.c_str()));
     assert(load_settings(loaded, L"missing", profile->id) && same_guides(loaded, defaults));
     assert(loaded.mounts == edited.mounts && loaded.speed_color == edited.speed_color);
@@ -319,6 +359,7 @@ int main() {
     assert(content.left == 16 && content.right == 752 && content.top == 12 && content.bottom == 763);
   }
   for (const auto* profile : {&profiles::A359, &profiles::A35K}) {
+    assert(profile->composition.guide_color == profiles::A380.composition.guide_color && profile->composition.square_nose_markers);
     const auto left = profiles::display_rect(*profile, 0), right = profiles::display_rect(*profile, 1);
     assert(left.left == 0 && left.right == 806 && right.left == 838 && right.right == 1644);
     assert(right.left - left.right == 32);
@@ -371,5 +412,5 @@ int main() {
   guide_settings_tests();
   std::puts(
       "PASS aircraft profiles: isolated settings, variant identity, pane dimensions, mirrored display regions, "
-      "mount geometry, guide roundtrip/bounds/defaults/isolation and detector reset");
+      "mount geometry, guide position/colour roundtrip/bounds/defaults/isolation and detector reset");
 }

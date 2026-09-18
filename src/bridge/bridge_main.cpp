@@ -10,6 +10,7 @@
 #include "../hooks/render_boundary_observer.hpp"
 #include "../shared/companion_control.hpp"
 #include "../shared/protocol.hpp"
+#include "../shared/rotating_log.hpp"
 #include "../shared/scene_demand.hpp"
 #include "camera_status.hpp"
 #include "crash_evidence.hpp"
@@ -20,32 +21,30 @@ namespace {
 using namespace taxi_camera;
 namespace win = standalone;
 std::atomic<bool> started{};
-void log_status(const win::Status& s, const char* detail = "") {
-  wchar_t directory[32768]{};
-  const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", directory, 32768);
-  if (!n || n >= 32700)
-    return;
-  std::wstring path(directory);
-  path += L"\\Taxi Cam";
-  CreateDirectoryW(path.c_str(), nullptr);
-  path += L"\\bridge.log";
-  HANDLE file =
-      CreateFileW(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-  if (file == INVALID_HANDLE_VALUE)
-    return;
-  char line[2048];
-  const auto length = std::snprintf(line, sizeof(line),
-                                    "%llu native=%u scene=%u mask=%u left=%llu right=%llu captured=%llu composed=%llu stamps=%llu "
-                                    "hooks_failed=%llu cutoff=%u | %s | %s\r\n",
-                                    static_cast<unsigned long long>(GetTickCount64()), s.graphics_ready, s.scene_ready, s.taxi_mask,
-                                    static_cast<unsigned long long>(s.left_id), static_cast<unsigned long long>(s.right_id),
-                                    static_cast<unsigned long long>(s.captures), static_cast<unsigned long long>(s.composed),
-                                    static_cast<unsigned long long>(s.stamps), static_cast<unsigned long long>(s.hook_failures),
-                                    s.speed_inhibited, s.message, detail);
-  DWORD wrote{};
-  if (length > 0 && static_cast<size_t>(length) < sizeof(line))
-    WriteFile(file, line, static_cast<DWORD>(length), &wrote, nullptr);
-  CloseHandle(file);
+void log_status(const win::Status& s, const char* detail = "") noexcept {
+  try {
+    wchar_t directory[32768]{};
+    const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", directory, 32768);
+    if (!n || n >= 32700)
+      return;
+    std::wstring path(directory);
+    path += L"\\Taxi Cam";
+    CreateDirectoryW(path.c_str(), nullptr);
+    path += L"\\bridge.log";
+    char line[2048];
+    const auto length = std::snprintf(
+        line, sizeof(line),
+        "%llu pid=%lu tid=%lu native=%u scene=%u mask=%u left=%llu right=%llu captured=%llu composed=%llu stamps=%llu "
+        "hooks_failed=%llu cutoff=%u | %s | %s\r\n",
+        static_cast<unsigned long long>(GetTickCount64()), GetCurrentProcessId(), GetCurrentThreadId(), s.graphics_ready, s.scene_ready,
+        s.taxi_mask, static_cast<unsigned long long>(s.left_id), static_cast<unsigned long long>(s.right_id),
+        static_cast<unsigned long long>(s.captures), static_cast<unsigned long long>(s.composed), static_cast<unsigned long long>(s.stamps),
+        static_cast<unsigned long long>(s.hook_failures), s.speed_inhibited, s.message, detail);
+    if (length > 0 && static_cast<size_t>(length) < sizeof(line))
+      win::append_rotating_log(path, std::string_view(line, static_cast<std::size_t>(length)), win::BridgeLogBytes);
+  } catch (...) {
+    // Diagnostics must not interrupt bridge operation.
+  }
 }
 struct StartupTiming {
   unsigned intent_mask{}, attempts{};
@@ -76,7 +75,10 @@ DWORD run_impl() {
   if (!mailbox.open(GetCurrentProcessId(), false))
     return ERROR_INVALID_DATA;
   win::Status status{};
+  log_status(status, "Bridge worker started.");
   const bool fault_evidence_ready = win::crash_evidence::initialize();
+  log_status(status, fault_evidence_ready ? "Renderer fault evidence armed." : "Renderer fault evidence unavailable.");
+  log_status(status, "Native graphics initialization started.");
   if (!win::initialize_graphics()) {
     const auto graphics = win::graphics_status();
     std::snprintf(status.message, sizeof(status.message), "Native graphics refused: %s", graphics.error);
@@ -89,7 +91,7 @@ DWORD run_impl() {
     log_status(status);
     return ERROR_NOT_SUPPORTED;
   }
-  log_status(status, fault_evidence_ready ? "Renderer fault evidence armed." : "Renderer fault evidence unavailable.");
+  log_status(status, "Native graphics initialization completed.");
   const auto key = win::graphics_status().device;
   wchar_t gpu_timing_option[2]{};
   const bool gpu_timing = GetEnvironmentVariableW(L"TAXI_CAM_GPU_TIMING", gpu_timing_option, 2) == 1 && gpu_timing_option[0] == L'1';
@@ -109,13 +111,25 @@ DWORD run_impl() {
   std::uint64_t last_view_wait_count = 0;
   std::uint64_t next_telemetry{}, next_discovery{}, next_recovery{}, next_log{}, route_request{}, last_frames{};
   std::uint64_t next_inventory{};
+  std::uint64_t discovery_max_ms{}, service_max_ms{}, loop_max_ms{};
+  const auto service_scene = [&] {
+    const auto begin = GetTickCount64();
+    win::service_display_patches();
+    scene_runtime::service();
+    service_max_ms = std::max(service_max_ms, GetTickCount64() - begin);
+  };
   std::vector<PfdTargetObservation> inventory;
   unsigned rate{}, feeds{}, applied_profile{};
   std::uint64_t applied_profile_request{}, applied_session_epoch{};
   std::uint64_t pending_profile_request{}, pending_session_epoch{}, transition_token{};
   unsigned pending_profile{};
   bool changing_profile = false;
+  bool pending_full_reset = false;
+  bool pending_telemetry_selected = false;
+  std::uint64_t pending_gpu_generation{};
   win::CompanionControl control;
+  win::CompanionSetupSession connection_session;
+  std::uint64_t applied_connection{}, pending_connection{};
   win::Status last_logged{};
   bool logged = false, last_connected = false, last_requested = false;
   std::uint64_t last_stop_sequence{};
@@ -124,19 +138,49 @@ DWORD run_impl() {
     control.refresh(mailbox);
     const auto now = GetTickCount64();
     const auto& settings = control.settings();
+    const auto owner_pid = control.owner_pid();
     const bool connected = control.connected(now);
+    const auto connection = connection_session.observe(connected, settings.enabled != 0, control.owner_pid(), settings.profile_request);
+    if (connection.stopped) {
+      win::set_target_mask(0);
+      win::set_calibration(0, settings.calibration_budget);
+      win::set_graphics_observation_demand(false);
+      native_camera::suspend_scene_rendering(true);
+      // The observer closes/revalidates owned views and cancels uncreated
+      // requests. Keep the native lifetime transaction, including in-flight GPU
+      // leases; reconnect will start a fresh setup token over these live objects.
+      if (!pending_full_reset)
+        native_camera::request_scene_profile_transition(applied_profile ? applied_profile : settings.profile);
+      scene_runtime::manager().stop_source_tracking();
+      scene_handoff().stop_scene();
+      scene_runtime::reset_feed(key);
+      changing_profile = false;
+      transition_token = 0;
+      requested = failed = false;
+      intent = {};
+      progress = {};
+      prewarm = {};
+      startup = warmup_startup = {};
+      route_request = 0;
+      log_status(status, "Connection stopped: camera output closed; next Connect will rescan and set up again.");
+    }
     const auto session_epoch = native_camera::get_aircraft_session_epoch();
+    const auto session = native_camera::get_aircraft_session_readiness();
     const bool session_settings = settings.aircraft_session_epoch == session_epoch;
-    const bool command_context = connected && session_settings && settings.enabled && !changing_profile &&
+    const bool command_context = connected && session_settings && session.ready && settings.enabled && !changing_profile &&
+                                 !connection.started && connection.generation == applied_connection &&
                                  settings.profile == applied_profile && settings.profile_request == applied_profile_request &&
                                  session_epoch == applied_session_epoch && native_camera::aircraft_matches_profile();
     native_camera::update_taxi_button_request(
         {settings.taxi_request, settings.aircraft_session_epoch, settings.profile, settings.taxi_selected_mask, settings.taxi_desired_mask},
         command_context);
-    if (connected && (changing_profile || settings.profile != applied_profile || settings.profile_request != applied_profile_request ||
-                      session_epoch != applied_session_epoch)) {
+    if (connected && settings.enabled &&
+        (changing_profile || connection.started || connection.generation != applied_connection || settings.profile != applied_profile ||
+         settings.profile_request != applied_profile_request || session_epoch != applied_session_epoch)) {
       if (!changing_profile || settings.profile != pending_profile || settings.profile_request != pending_profile_request ||
-          session_epoch != pending_session_epoch) {
+          session_epoch != pending_session_epoch || connection.generation != pending_connection) {
+        const bool full_reset =
+            pending_full_reset || (applied_profile && (settings.profile != applied_profile || session_epoch != applied_session_epoch));
         win::set_target_mask(0);
         win::set_calibration(0, settings.calibration_budget);
         win::set_graphics_observation_demand(false);
@@ -144,22 +188,42 @@ DWORD run_impl() {
         scene_runtime::manager().stop_source_tracking();
         scene_handoff().stop_scene();
         scene_runtime::reset_feed(key);
+        if (full_reset) {
+          // Forget discovery and completed frames, but keep every outstanding
+          // GPU lease on its existing fence. Native retirement is observer-only.
+          win::reset_display_session();
+          pending_gpu_generation = scene_runtime::reset_session(key);
+        }
+        pending_full_reset = full_reset;
         pending_profile = settings.profile;
         pending_profile_request = settings.profile_request;
         pending_session_epoch = session_epoch;
+        pending_connection = connection.generation;
         transition_token = 0;
+        pending_telemetry_selected = false;
         changing_profile = true;
         requested = failed = false;
         route_request = 0;
       }
       native_camera::suspend_scene_rendering(true);
+      if (pending_full_reset && !pending_gpu_generation)
+        pending_gpu_generation = scene_runtime::reset_session(key);
       if (!transition_token)
-        transition_token = native_camera::request_scene_profile_transition(pending_profile);
+        transition_token = pending_full_reset ? native_camera::request_scene_session_reset(pending_profile)
+                                              : native_camera::request_scene_profile_transition(pending_profile);
       const auto transition = native_camera::scene_snapshot();
       const bool ready = transition_token && transition.profile_transition_token == transition_token &&
                          transition.profile_transition_id == pending_profile && transition.profile_transition_ready &&
                          !transition.profile_transition_pending && !transition.profile_transition_failed;
-      if (!ready) {
+      if (ready && !pending_telemetry_selected)
+        pending_telemetry_selected = native_camera::select_aircraft_profile(pending_profile);
+      const bool telemetry_ready = pending_telemetry_selected;
+      const auto transition_session = native_camera::get_aircraft_session_readiness();
+      const bool public_ready = transition_session.ready && transition_session.epoch == pending_session_epoch;
+      const bool gpu_ready =
+          ready && telemetry_ready && public_ready &&
+          (!pending_full_reset || (pending_gpu_generation && scene_runtime::resume_session(key, pending_gpu_generation)));
+      if (!ready || !telemetry_ready || !public_ready || !gpu_ready) {
         const auto identity = native_camera::get_aircraft_identity();
         const auto graphics = win::graphics_status();
         win::Status pending{};
@@ -174,25 +238,32 @@ DWORD run_impl() {
         pending.identity_sample_ms = identity.fresh ? identity.sample_ms : 0;
         std::memcpy(pending.aircraft_type, identity.type.data(), sizeof(pending.aircraft_type));
         std::memcpy(pending.aircraft_path, identity.path.data(), sizeof(pending.aircraft_path));
-        std::snprintf(pending.message, sizeof(pending.message), "%s", camera_transition_message(transition));
+        std::snprintf(pending.message, sizeof(pending.message), "%s",
+                      !ready             ? camera_transition_message(transition)
+                      : !telemetry_ready ? "Waiting for aircraft telemetry to stop."
+                      : !public_ready    ? "Waiting for the flight to finish loading and fresh camera telemetry."
+                                         : "Waiting for camera GPU session reset.");
         if (mailbox.lock()) {
           mailbox.data()->status = pending;
           mailbox.unlock();
         }
         if (now >= next_log) {
-          char detail[384]{};
+          char detail[512]{};
           std::snprintf(detail, sizeof(detail),
                         "Aircraft transition waiting: token=%llu session=%llu profile=%u failed=%u request_pending=%u "
-                        "creation_pending=%u entries=%llu/%llu created_total=%llu",
+                        "creation_pending=%u telemetry_pending=%u entries=%llu/%llu created_total=%llu "
+                        "full_reset=%u gpu_generation=%llu public_ready=%u loading=%u flow_subscribed=%u flow=%u reason=%s",
                         static_cast<unsigned long long>(transition_token), static_cast<unsigned long long>(session_epoch), pending_profile,
                         transition.profile_transition_failed, transition.pair.request_pending, transition.pair.creation_pending,
-                        static_cast<unsigned long long>(transition.pair.owned_ids[0]),
+                        ready && !telemetry_ready, static_cast<unsigned long long>(transition.pair.owned_ids[0]),
                         static_cast<unsigned long long>(transition.pair.owned_ids[1]),
-                        static_cast<unsigned long long>(transition.created_total));
+                        static_cast<unsigned long long>(transition.created_total), pending_full_reset,
+                        static_cast<unsigned long long>(pending_gpu_generation), public_ready, transition_session.loading,
+                        transition_session.flow_subscribed, transition_session.last_flow_event, transition_session.error);
           log_status(pending, detail);
           next_log = now + 5000;
         }
-        scene_runtime::service();
+        service_scene();
         if (now >= next_telemetry) {
           native_camera::initialize_body_pose_provider();
           next_telemetry = now + 2000;
@@ -200,24 +271,23 @@ DWORD run_impl() {
         Sleep(25);
         continue;
       }
-      if (!native_camera::select_aircraft_profile(pending_profile)) {
-        Sleep(25);
-        continue;
-      }
       win::set_aircraft_profile(pending_profile);
-      if (applied_session_epoch != pending_session_epoch) {
-        prewarm = {};
-        warmup_startup = {};
-      }
+      prewarm = {};
+      warmup_startup = {};
+      rate = feeds = 0;
       applied_profile = pending_profile;
       applied_profile_request = pending_profile_request;
       applied_session_epoch = pending_session_epoch;
-      char transition_detail[256]{};
-      std::snprintf(transition_detail, sizeof(transition_detail),
-                    "Aircraft transition: token=%llu session=%llu profile=%u retained_entries=%llu/%llu",
-                    static_cast<unsigned long long>(transition_token), static_cast<unsigned long long>(applied_session_epoch),
-                    applied_profile, static_cast<unsigned long long>(transition.pair.owned_ids[0]),
-                    static_cast<unsigned long long>(transition.pair.owned_ids[1]));
+      applied_connection = pending_connection;
+      char transition_detail[384]{};
+      std::snprintf(
+          transition_detail, sizeof(transition_detail),
+          "Aircraft transition: token=%llu session=%llu profile=%u entries=%llu/%llu connection=%llu full_reset=%u gpu_generation=%llu "
+          "public_ready=%u loading=%u flow_subscribed=%u flow=%u",
+          static_cast<unsigned long long>(transition_token), static_cast<unsigned long long>(applied_session_epoch), applied_profile,
+          static_cast<unsigned long long>(transition.pair.owned_ids[0]), static_cast<unsigned long long>(transition.pair.owned_ids[1]),
+          static_cast<unsigned long long>(applied_connection), pending_full_reset, static_cast<unsigned long long>(pending_gpu_generation),
+          transition_session.ready, transition_session.loading, transition_session.flow_subscribed, transition_session.last_flow_event);
       log_status(status, transition_detail);
       applied_mounts = {};
       intent = {};
@@ -228,16 +298,20 @@ DWORD run_impl() {
       next_inventory = 0;
       inventory.clear();
       changing_profile = false;
+      pending_full_reset = false;
+      pending_gpu_generation = 0;
     }
     if (now >= next_telemetry) {
       native_camera::initialize_body_pose_provider();
       next_telemetry = now + 2000;
     }
     if (now >= next_discovery) {
+      const auto begin = GetTickCount64();
       win::discover_pfds(settings.auto_detect != 0 ? now : 0);
+      discovery_max_ms = std::max(discovery_max_ms, GetTickCount64() - begin);
       next_discovery = now + 1000;
     }
-    if (session_settings && settings.route_request && settings.route_request != route_request) {
+    if (connected && settings.enabled && session_settings && settings.route_request && settings.route_request != route_request) {
       if (win::assign_targets(settings.left_id, settings.right_id))
         route_request = settings.route_request;
     }
@@ -250,19 +324,26 @@ DWORD run_impl() {
     const auto cutoff = native_camera::get_taxi_cutoff();
     const auto desired = intent.observe(now, buttons.valid, buttons.left_on, buttons.right_on);
     const unsigned mask =
-        connected && session_settings && settings.enabled && aircraft_matches && win::graphics_ready() && !cutoff.inhibited
+        connected && session_settings && session.ready && settings.enabled && aircraft_matches && win::graphics_ready() && !cutoff.inhibited
             ? (settings.follow_taxi && !manual_only ? desired.buttons
                : session_settings                   ? settings.manual_mask
                                                     : 0)
             : 0;
     const bool test_scene =
-        connected && session_settings && settings.enabled && aircraft_matches && settings.scene_test && !cutoff.inhibited;
+        connected && session_settings && session.ready && settings.enabled && aircraft_matches && settings.scene_test && !cutoff.inhibited;
     const auto intent_observed_ms = GetTickCount64();
     if (!mask && !test_scene && !prewarm.active())
       failed = false;
     const auto targets = win::target_ids();
     const unsigned assigned = (targets[0] ? 1u : 0u) | (targets[1] ? 2u : 0u);
     const auto speed = native_camera::get_ground_speed();
+    const auto setup_current = [&]() {
+      const auto epoch = native_camera::get_aircraft_session_epoch();
+      const auto current_session = native_camera::get_aircraft_session_readiness();
+      return current_session.ready && current_session.epoch == epoch && control.connected(GetTickCount64()) && settings.enabled &&
+             control.owner_pid() == owner_pid && connection.generation == applied_connection && settings.aircraft_session_epoch == epoch &&
+             epoch == applied_session_epoch && settings.profile == applied_profile && settings.profile_request == applied_profile_request;
+    };
     const auto warm_readiness = [&]() {
       const auto sampled_now = GetTickCount64();
       const auto ground = native_camera::get_on_ground();
@@ -272,7 +353,7 @@ DWORD run_impl() {
       const auto current_epoch = native_camera::get_aircraft_session_epoch();
       return win::ScenePrewarmReadiness{
           control.connected(GetTickCount64()),
-          settings.aircraft_session_epoch == current_epoch && current_epoch == applied_session_epoch &&
+          setup_current() && settings.aircraft_session_epoch == current_epoch && current_epoch == applied_session_epoch &&
               settings.profile == applied_profile && settings.profile_request == applied_profile_request,
           settings.enabled != 0,
           native_camera::aircraft_matches_profile() && aircraft.fresh && aircraft.detected_profile == settings.profile,
@@ -284,7 +365,8 @@ DWORD run_impl() {
           ground.on_ground,
           velocity.valid,
           settings.calibration_mask != 0 || settings.single_camera != 0,
-          velocity.knots};
+          velocity.knots,
+          native_camera::get_aircraft_session_readiness().ready};
     };
     bool background_warmup = false;
     if (prewarm.pending()) {
@@ -312,8 +394,9 @@ DWORD run_impl() {
     }
     const auto demand = win::scene_demand(mask, test_scene, assigned, requested, failed, background_warmup);
     unsigned active = demand.stamp_mask;
-    const unsigned calibration =
-        connected && session_settings && settings.enabled && aircraft_matches && !cutoff.inhibited ? settings.calibration_mask : 0;
+    const unsigned calibration = connected && session_settings && session.ready && settings.enabled && aircraft_matches && !cutoff.inhibited
+                                     ? settings.calibration_mask
+                                     : 0;
     // Warmup and scene-only diagnostics need capture observation without PFD
     // writes. Settled OFF may bypass PFD state while lifetime tracking remains.
     win::set_graphics_observation_demand(!demand.suspend || calibration != 0);
@@ -354,6 +437,7 @@ DWORD run_impl() {
     native_camera::suspend_scene_rendering(demand.suspend);
     auto composition = profiles::find(applied_profile ? applied_profile : settings.profile)->composition;
     composition.speed_color = settings.speed_color;
+    composition.guide_color = settings.guide_color;
     composition.nose_dot = settings.nose_dot;
     composition.tail_upper = settings.tail_upper;
     composition.tail_corner = settings.tail_corner;
@@ -371,11 +455,20 @@ DWORD run_impl() {
       const bool prepared = scene_runtime::prepare(key);
       start_timing.prepare_end_ms = GetTickCount64();
       log_startup(status, start_timing, prepared ? "prepare_ready" : "prepare_failed");
+      // Shader preparation can outlast a Disconnect or a new companion owner.
+      // Recheck the exact setup before either warmup or manual camera creation.
+      control.refresh(mailbox);
+      if (!setup_current()) {
+        win::set_target_mask(0);
+        win::set_calibration(0, settings.calibration_budget);
+        win::set_graphics_observation_demand(false);
+        native_camera::suspend_scene_rendering(true);
+        continue;
+      }
       bool warm_start_allowed = true;
       if (background_warmup) {
         // Preparation may compile shaders. Re-read the companion and public
         // session/ground evidence before queuing any native camera creation.
-        control.refresh(mailbox);
         const auto warm_output = scene_runtime::snapshot(key);
         warm_start_allowed = prewarm.observe(GetTickCount64(), warm_readiness().eligible(), false,
                                              {false, false, warm_output.frames, warm_output.completed_frames}, !prepared);
@@ -409,7 +502,7 @@ DWORD run_impl() {
                                          light.ambient, light.sample_ms);
     scene_runtime::set_display_exposure(key, display.applied_ev);
     scene_runtime::set_ground_speed(key, static_cast<float>(speed.knots), speed.valid);
-    scene_runtime::service();
+    service_scene();
     const auto scene = native_camera::scene_snapshot();
     const auto output = scene_runtime::snapshot(key);
     if (scene.stop_sequence != last_stop_sequence) {
@@ -487,6 +580,7 @@ DWORD run_impl() {
     if (now >= next_inventory) {
       inventory = win::pfd_inventory();
       next_inventory = now + 1000;
+      win::service_live_backfill(now, inventory.size());
     }
     status.candidate_count = static_cast<UINT>(std::min<size_t>(inventory.size(), 16));
     for (UINT i = 0; i < status.candidate_count; ++i)
@@ -504,7 +598,10 @@ DWORD run_impl() {
       std::snprintf(aircraft_message, sizeof(aircraft_message), "%s Aircraft type: %.96s.",
                     identity.fresh ? "The loaded aircraft is not supported by the selected profile." : "Waiting for aircraft identity.",
                     identity.type[0] ? identity.type.data() : "unavailable");
-    const char* target_message = "Detecting display textures for the selected aircraft profile.";
+    const char* target_message = graphics.ready && inventory.empty()
+                                     ? "Waiting for cockpit displays to be drawn. They are learned on first use; Restart Flight if the "
+                                       "list stays empty."
+                                     : "Select the left and right displays, or wait for automatic assignment.";
     if (selected_profile && selected_profile->pfd_detection == profiles::PfdDetectionPolicy::ini_a380_allocation_group) {
       const auto is = [&](const char* reason) { return std::strcmp(graphics.target_detection, reason) == 0; };
       target_message = !settings.auto_detect        ? "Automatic PFD selection is off. Select the left and right displays manually."
@@ -519,11 +616,10 @@ DWORD run_impl() {
     }
     const auto stopped_camera = camera_stop_message(scene);
     const char* message =
-        !connected          ? "Waiting for Windows companion heartbeat."
-        : !settings.enabled ? "Camera service paused."
-        : !aircraft_matches ? aircraft_message
-        : cutoff.inhibited  ? (manual_only ? "Above 60 knots: camera displays inhibited." : "Above 60 knots: TAXI buttons commanded off.")
-        : failed            ? scene.message.c_str()
+        !connected || !settings.enabled ? "Disconnected. Use Connect in the Windows companion."
+        : !aircraft_matches             ? aircraft_message
+        : cutoff.inhibited ? (manual_only ? "Above 60 knots: camera displays inhibited." : "Above 60 knots: TAXI buttons commanded off.")
+        : failed           ? scene.message.c_str()
         : scene.view_waiting && scene.stop_reason == native_camera::SceneStopReason::resolution_changed ? scene.message.c_str()
         : !manual_only && !buttons.valid                                                                ? buttons.error
         : !manual_only && taxi_request_status.failed && taxi_request_status.serial == settings.taxi_request
@@ -549,6 +645,7 @@ DWORD run_impl() {
                          status.right_id != last_logged.right_id || status.speed_inhibited != last_logged.speed_inhibited ||
                          scene.stop_sequence != last_stop_sequence || output.output != last_output ||
                          scene.view_wait_count != last_view_wait_count;
+    loop_max_ms = std::max(loop_max_ms, GetTickCount64() - now);
     if (changed || now >= next_log) {
       if (!logged || status.active_profile != last_logged.active_profile || status.detected_profile != last_logged.detected_profile ||
           status.aircraft_session_epoch != last_logged.aircraft_session_epoch ||
@@ -598,11 +695,35 @@ DWORD run_impl() {
                     static_cast<unsigned long long>(graphics.clear_states),
                     scene.stop_reason == native_camera::SceneStopReason::none ? "" : scene.stop_detail.c_str());
       log_status(status, detail);
+      char selection_detail[256];
+      std::snprintf(selection_detail, sizeof(selection_detail),
+                    "PFD selection: automatic=%u candidates=%zu last_result=%s requested=%llu/%llu", settings.auto_detect, inventory.size(),
+                    graphics.target_detection, static_cast<unsigned long long>(settings.left_id),
+                    static_cast<unsigned long long>(settings.right_id));
+      log_status(status, selection_detail);
+      char control_detail[256];
+      std::snprintf(control_detail, sizeof(control_detail),
+                    "Control loop timing: discovery_max_ms=%llu service_max_ms=%llu observed_loop_max_ms=%llu",
+                    static_cast<unsigned long long>(discovery_max_ms), static_cast<unsigned long long>(service_max_ms),
+                    static_cast<unsigned long long>(loop_max_ms));
+      log_status(status, control_detail);
+      char candidate_detail[1024] = "PFD candidate activity (id:draws/completions):";
+      std::size_t candidate_used = std::strlen(candidate_detail);
+      for (std::size_t i = 0; i < std::min<std::size_t>(inventory.size(), 16); ++i) {
+        const int written =
+            std::snprintf(candidate_detail + candidate_used, sizeof(candidate_detail) - candidate_used, " %llu:%llu/%llu",
+                          static_cast<unsigned long long>(inventory[i].id), static_cast<unsigned long long>(inventory[i].draws),
+                          static_cast<unsigned long long>(inventory[i].submission_activity));
+        if (written < 0 || static_cast<std::size_t>(written) >= sizeof(candidate_detail) - candidate_used)
+          break;
+        candidate_used += static_cast<std::size_t>(written);
+      }
+      log_status(status, candidate_detail);
       char pfd_detail[640];
       std::snprintf(pfd_detail, sizeof(pfd_detail),
                     "PFD copy admission: selected_draws=%llu rt_metadata=%llu rt_callbacks=%llu pending_matches=%llu "
                     "view_resolved=%llu view_rejected=%llu attempts=%llu rejected=%llu state_skips=%llu "
-                    "boundary_batches_refused=%llu boundary_passes_refused=%llu reason=%s",
+                    "boundary_batches_refused=%llu boundary_passes_refused=%llu queue_plans=%llu queue_copies=%llu reason=%s",
                     static_cast<unsigned long long>(graphics.selected_draws),
                     static_cast<unsigned long long>(graphics.selected_rt_metadata),
                     static_cast<unsigned long long>(graphics.selected_rt_callbacks),
@@ -611,8 +732,32 @@ DWORD run_impl() {
                     static_cast<unsigned long long>(graphics.selected_view_rejected),
                     static_cast<unsigned long long>(graphics.copy_attempts), static_cast<unsigned long long>(graphics.copy_rejected),
                     static_cast<unsigned long long>(output.state_skips), static_cast<unsigned long long>(boundaries.batch_refusals),
-                    static_cast<unsigned long long>(boundaries.pass_refusals), graphics.copy_error);
+                    static_cast<unsigned long long>(boundaries.pass_refusals), static_cast<unsigned long long>(graphics.queue_patch_plans),
+                    static_cast<unsigned long long>(output.capture.display_copies), graphics.copy_error);
       log_status(status, pfd_detail);
+      // Fixed-size counters only on submission threads; formatting and bounded
+      // rotating-file output stay on this existing five-second control cadence.
+      const auto log_counters = [&](const char* label, const auto& counters, const auto& name) {
+        char detail[1280];
+        auto used = static_cast<std::size_t>(std::snprintf(detail, sizeof(detail), "%s close_verified=%u proof_flags=%u:", label,
+                                                           graphics.queue_close_verified, graphics.queue_last_proof_flags));
+        for (unsigned i = 0; i < counters.size() && used < sizeof(detail); ++i) {
+          if (!counters[i])
+            continue;
+          const auto written =
+              std::snprintf(detail + used, sizeof(detail) - used, " %s=%llu", name(i), static_cast<unsigned long long>(counters[i]));
+          if (written < 0 || static_cast<std::size_t>(written) >= sizeof(detail) - used)
+            break;
+          used += static_cast<std::size_t>(written);
+        }
+        log_status(status, detail);
+      };
+      log_counters("PFD queue admission", graphics.queue_outcomes,
+                   [](unsigned i) { return win::display_submission_outcome_name(static_cast<win::DisplaySubmissionOutcome>(i)); });
+      log_counters("PFD queue proof refusals", graphics.queue_proof_refusals,
+                   [](unsigned i) { return win::PfdSubmissionProof::refusal_name(static_cast<win::PfdSubmissionProof::Refusal>(i)); });
+      log_counters("PFD prefix blocking commands", graphics.queue_prefix_blockers,
+                   [](unsigned i) { return win::pfd_gpu_operation_name(i); });
       char scopes[896]{};
       std::size_t used = 0;
       for (unsigned i = 0; i < graphics.selected_exit_scopes.size(); ++i) {
@@ -644,13 +789,15 @@ DWORD run_impl() {
           static_cast<unsigned long long>(graphics.fallback_state_refused), static_cast<unsigned long long>(graphics.recording_end_draws),
           static_cast<unsigned long long>(graphics.shader_deferred), static_cast<unsigned long long>(graphics.close_forward_refused));
       log_status(status, draw_detail);
-      char retention_detail[256];
+      char retention_detail[384];
       std::snprintf(
           retention_detail, sizeof(retention_detail),
-          "Camera retention: created_total=%llu snapshot_bytes=%llu quarantined=%llu prewarm=%s patch_requests=%u patch_draws=%llu",
+          "Camera retention: created_total=%llu snapshot_bytes=%llu quarantined=%llu prewarm=%s patch_requests=%u patch_draws=%llu "
+          "retirement_deferrals=%llu retirement_waiting=%u retirement_status=%s retirement_queues=%u/%u",
           static_cast<unsigned long long>(scene.created_total), static_cast<unsigned long long>(output.capture.bytes),
           static_cast<unsigned long long>(output.capture.quarantined), prewarm.name(), output.patch_requests,
-          static_cast<unsigned long long>(output.patch_draws));
+          static_cast<unsigned long long>(output.patch_draws), static_cast<unsigned long long>(scene.retirement_deferrals),
+          scene.retirement_waiting, scene.retirement_status, scene.retirement_queue_counts[0], scene.retirement_queue_counts[1]);
       log_status(status, retention_detail);
       if (graphics_diagnostics) {
         char graphics_detail[512];
