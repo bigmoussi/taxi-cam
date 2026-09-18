@@ -1082,7 +1082,10 @@ void after_draw(void*, ID3D12GraphicsCommandList* native, std::uint64_t id, bool
     return;
   // Mark damage only. Compositing between individual HTML/glyph draws both
   // multiplies fill cost and unnecessarily disturbs the application's state.
-  list->pfd_dirty = allowed && list->count == 1 && list->depth_known;
+  // TAA/DLSS resolve often binds the PFD as one of several RTs; those draws
+  // must still schedule a later overlay so an earlier stamp cannot lose to a
+  // temporal mix of the native instrument.
+  list->pfd_dirty = allowed && list->depth_known && list->count >= 1;
   list->pfd_transition = false;
 }
 // Stage only actual typed RTVs established by a nonzero native draw.
@@ -1093,18 +1096,20 @@ void stage_pfd(ID3D12GraphicsCommandList* native, std::uint64_t id) noexcept {
   if (!registry().ready || !list || list->id != id || !list->ready || !list->pfd_dirty || !recording_observed(*list))
     return;
   list->pfd_dirty = false;
-  if (list->count != 1 || !list->depth_known)
+  if (!list->depth_known || !list->count || list->count > 8)
     return;
   auto& r = registry();
-  const auto& view = list->targets[0];
-  if (!view.resource || !view.resource->alive || view.mip)
-    return;
   const std::lock_guard lock(r.mutex);
-  if (!profiles::matches_display(*r.profile, static_cast<UINT>(view.resource->desc.Width), view.resource->desc.Height,
-                                 view.resource->desc.MipLevels, static_cast<UINT>(view.resource->desc.Format)))
-    return;
-  for (unsigned side = 0; side < 2; ++side)
-    if (r.routes.targets[side] == view.resource->id && ((r.active_mask | r.calibration_mask) & (1u << side))) {
+  for (UINT slot = 0; slot < list->count; ++slot) {
+    const auto& view = list->targets[slot];
+    if (!view.resource || !view.resource->alive || view.mip)
+      continue;
+    if (!profiles::matches_display(*r.profile, static_cast<UINT>(view.resource->desc.Width), view.resource->desc.Height,
+                                   view.resource->desc.MipLevels, static_cast<UINT>(view.resource->desc.Format)))
+      continue;
+    for (unsigned side = 0; side < 2; ++side) {
+      if (r.routes.targets[side] != view.resource->id || !((r.active_mask | r.calibration_mask) & (1u << side)))
+        continue;
       list->pending_pfds[side] = view;
       list->pending_rt[side] = !list->pfd_transition && list->raw_om_known && list->snapshot_rtvs;
       if (view.recovered && list->copy_proof.mode({reinterpret_cast<std::uint64_t>(view.resource->native), view.resource->id}) ==
@@ -1130,7 +1135,7 @@ void stage_pfd(ID3D12GraphicsCommandList* native, std::uint64_t id) noexcept {
           const OwnedWork owned;
           r.device->CreateRenderTargetView(view.resource->native, &desc, retained);
         } else
-          r.device->CopyDescriptorsSimple(1, retained, list->raw_rtvs[0], D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+          r.device->CopyDescriptorsSimple(1, retained, list->raw_rtvs[slot], D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
       }
       // A nonzero native draw established this bound RTV as render-target data.
       // Clear-only calibration needs no guessed legacy/enhanced transition and
@@ -1147,6 +1152,7 @@ void stage_pfd(ID3D12GraphicsCommandList* native, std::uint64_t id) noexcept {
           ++r.calibration_clears;
       }
     }
+  }
 }
 void drain_pfds(ID3D12GraphicsCommandList* native, std::uint64_t id, bool recording_end = false) noexcept {
   if (!observation_enabled())

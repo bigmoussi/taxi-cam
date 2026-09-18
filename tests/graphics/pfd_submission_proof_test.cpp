@@ -287,10 +287,16 @@ void leading_exit_prefix() {
       proof.close(1, true);
       const Proof::Recording batch[]{{&proof, 1}};
       const auto prefix = proof.prefix_candidate(left, 1);
-      require(Proof::batch_allows(batch, 1) && prefix && prefix.key == left && prefix.recording == 1 && prefix.first_before == rt,
+      const bool common_after = after == D3D12_RESOURCE_STATE_COMMON;
+      // COMMON promotes to RT on the first write. A prefix overlay would then
+      // be replaced by the native instrument for that stamp frame.
+      require(Proof::batch_allows(batch, 1) && !proof.candidate(left, 1) && !proof.prefix_candidate(right, 1),
+              "Later GPU work accidentally relaxed existing tail admission");
+      require(static_cast<bool>(prefix) == !common_after &&
+                  (!prefix || (prefix.key == left && prefix.recording == 1 && prefix.first_before == rt)),
               "Leading full RT exit followed by GPU work lost exact prefix restoration state");
-      require(!proof.candidate(left, 1), "Later GPU work accidentally relaxed existing tail admission");
-      require(!proof.prefix_candidate(right, 1), "Leading RT entry became an RT exit prefix");
+      if (common_after)
+        continue;
       const auto indexed = proof.prefix_candidate(1u, 1);
       require(indexed && indexed.key == left && !proof.prefix_candidate(Proof::maximum_resources, 1),
               "Indexed prefix lookup lost identity or exceeded resource bounds");
@@ -422,15 +428,22 @@ void state_disjoint_prefix_work() {
   mixed.state_disjoint_work(53);
   mixed.observe_legacy(left, rt, psr, 0);
   mixed.gpu_work(48);  // Later drawing/clearing does not precede the proved first exit.
+  mixed.close(1, true);
+  const auto sample_only = mixed.prefix_candidate(left, 1);
+  require(sample_only && sample_only.first_before == rt && sample_only.state_after == psr && !mixed.candidate(left, 1),
+          "Later sample-only GPU work revoked a leading RT-exit prefix");
+  mixed.reset(2, true);
+  mixed.state_disjoint_work(53);
+  mixed.observe_legacy(left, rt, psr, 0);
+  mixed.gpu_work(48);
   mixed.observe_legacy(left, psr, rt, 0);
   mixed.observe_legacy(left, rt, D3D12_RESOURCE_STATE_COMMON, 0);
-  mixed.close(1, true);
-  const auto prefix = mixed.prefix_candidate(left, 1);
-  require(prefix && prefix.first_before == rt && prefix.state_after == D3D12_RESOURCE_STATE_COMMON && !mixed.candidate(left, 1),
-          "Later valid work/transition chain changed prefix restoration or enabled a tail");
+  mixed.close(2, true);
+  require(!mixed.prefix_candidate(left, 2) && !mixed.candidate(left, 2),
+          "Later writable return to RT kept a prefix overlay that the instrument can overwrite");
   require(mixed.first_gpu_work() == 53 && mixed.prefix_blocker() == 48, "Later RT writer diagnostic was lost");
   mixed.state_disjoint_work(14);
-  require(!mixed.complete(1) && !mixed.prefix_candidate(left, 1) && mixed.refusal() == Proof::Refusal::closed_mutation,
+  require(!mixed.complete(2) && !mixed.prefix_candidate(left, 2) && mixed.refusal() == Proof::Refusal::closed_mutation,
           "State-disjoint work after Close retained immutable recording permission");
   for (unsigned uncertainty = 0; uncertainty < 7; ++uncertainty) {
     Proof proof;

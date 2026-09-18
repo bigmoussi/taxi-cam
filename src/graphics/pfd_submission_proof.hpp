@@ -13,6 +13,9 @@ namespace taxi_camera::standalone {
 // Comparison-only metadata for adding an owned copy list immediately before
 // a proven leading RT exit, or after a barrier-only exit list, inside the SAME ExecuteCommandLists
 // call. Never split the application's batch into separate Execute calls.
+// A prefix is revoked if the same display later becomes writable again: the
+// overlay would run first and the native instrument (or TAA/DLSS history) would
+// show through for that stamp frame.
 //
 // The caller observes every recording from a real successful Reset through
 // successful Close, reports every GPU command and pass, and invalidates omitted
@@ -148,6 +151,14 @@ class PfdSubmissionProof {
       prefix_interference_ = true;
       if (prefix_blocker_ == UINT_MAX)
         prefix_blocker_ = operation;
+      // COMMON promotes to RT on the first write in the Execute. A prefix
+      // overlay copied before that promotion is then replaced by the instrument.
+      for (auto& slot : slots_)
+        if (slot.prefix_exit && slot.seen && slot.after == D3D12_RESOURCE_STATE_COMMON) {
+          slot.prefix_exit = false;
+          if (slot.prefix_blocker == UINT_MAX)
+            slot.prefix_blocker = operation;
+        }
     }
   }
   void state_disjoint_work(UINT operation) noexcept { gpu_work(operation, false); }
@@ -218,6 +229,9 @@ class PfdSubmissionProof {
     // The first explicit RT exit, before any work able to access RT, proves the state at
     // list entry. A submission-time prefix copy can restore RT before the
     // original list starts, including when that list later samples the display.
+    // A later writable transition of the same base mip (TAA/DLSS resolve, a
+    // second instrument pass) overwrites that overlay; revoke it so the native
+    // instrument cannot flash through a stamp that already ran.
     // Close and the whole-batch pass proof must still succeed before insertion.
     if (!slot->seen && before == D3D12_RESOURCE_STATE_RENDER_TARGET && copy_restorable(after)) {
       slot->prefix_exit = !prefix_interference_;
@@ -227,6 +241,11 @@ class PfdSubmissionProof {
     slot->after = after;
     slot->subresource = subresource;
     slot->exit = before == D3D12_RESOURCE_STATE_RENDER_TARGET && copy_restorable(after);
+    if (slot->prefix_exit && writable_gpu_state(after)) {
+      slot->prefix_exit = false;
+      if (slot->prefix_blocker == UINT_MAX)
+        slot->prefix_blocker = 26;
+    }
   }
 
   bool complete(std::uint64_t generation) const noexcept {
@@ -294,6 +313,11 @@ class PfdSubmissionProof {
     // https://learn.microsoft.com/en-us/windows/win32/direct3d12/using-resource-barriers-to-synchronize-resource-states-in-direct3d-12
     constexpr UINT mask = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
     return !(static_cast<UINT>(state) & ~mask);
+  }
+  static bool writable_gpu_state(D3D12_RESOURCE_STATES state) noexcept {
+    constexpr UINT mask = D3D12_RESOURCE_STATE_RENDER_TARGET | D3D12_RESOURCE_STATE_UNORDERED_ACCESS |
+                          D3D12_RESOURCE_STATE_COPY_DEST | D3D12_RESOURCE_STATE_RESOLVE_DEST;
+    return (static_cast<UINT>(state) & mask) != 0;
   }
   bool open() noexcept {
     if (!known_ || closed_) {
