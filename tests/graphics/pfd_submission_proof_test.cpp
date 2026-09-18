@@ -295,6 +295,9 @@ void leading_exit_prefix() {
       require(static_cast<bool>(prefix) == !common_after &&
                   (!prefix || (prefix.key == left && prefix.recording == 1 && prefix.first_before == rt)),
               "Leading full RT exit followed by GPU work lost exact prefix restoration state");
+      require(static_cast<bool>(proof.activity_candidate(left, 1)) &&
+                  proof.activity_candidate(left, 1).first_before == rt,
+              "Later overwrite revoked prefix insertion and also lost leading-exit activity");
       if (common_after)
         continue;
       const auto indexed = proof.prefix_candidate(1u, 1);
@@ -439,7 +442,7 @@ void state_disjoint_prefix_work() {
   mixed.observe_legacy(left, psr, rt, 0);
   mixed.observe_legacy(left, rt, D3D12_RESOURCE_STATE_COMMON, 0);
   mixed.close(2, true);
-  require(!mixed.prefix_candidate(left, 2) && !mixed.candidate(left, 2),
+  require(!mixed.prefix_candidate(left, 2) && !mixed.candidate(left, 2) && mixed.activity_candidate(left, 2),
           "Later writable return to RT kept a prefix overlay that the instrument can overwrite");
   require(mixed.first_gpu_work() == 53 && mixed.prefix_blocker() == 48, "Later RT writer diagnostic was lost");
   mixed.state_disjoint_work(14);

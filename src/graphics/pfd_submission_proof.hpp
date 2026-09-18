@@ -234,6 +234,7 @@ class PfdSubmissionProof {
     // instrument cannot flash through a stamp that already ran.
     // Close and the whole-batch pass proof must still succeed before insertion.
     if (!slot->seen && before == D3D12_RESOURCE_STATE_RENDER_TARGET && copy_restorable(after)) {
+      slot->leading_exit = true;
       slot->prefix_exit = !prefix_interference_;
       slot->prefix_blocker = prefix_interference_ ? prefix_blocker_ : UINT_MAX;
     }
@@ -283,6 +284,24 @@ class PfdSubmissionProof {
     }
     return {};
   }
+  // A later writable return revokes prefix insertion, but the leading RT exit
+  // still proves this display completed. Autodetect activity uses that evidence
+  // without stamping before TAA/DLSS or a second instrument pass.
+  Candidate activity_candidate(Key key, std::uint64_t generation) const noexcept {
+    if (complete(generation))
+      for (const auto& slot : slots_)
+        if (slot.key == key && slot.seen && slot.leading_exit)
+          return {slot.key, generation, slot.first_before, slot.after, slot.subresource};
+    return {};
+  }
+  Candidate activity_candidate(std::size_t index, std::uint64_t generation) const noexcept {
+    if (index < slots_.size() && complete(generation)) {
+      const auto& slot = slots_[index];
+      if (slot.seen && slot.leading_exit)
+        return {slot.key, generation, slot.first_before, slot.after, slot.subresource};
+    }
+    return {};
+  }
   static bool batch_allows(const Recording* batch, std::size_t count) noexcept {
     if (!batch || !count || count > maximum_batch)
       return false;
@@ -303,7 +322,7 @@ class PfdSubmissionProof {
     D3D12_RESOURCE_STATES first_before{}, after{};
     UINT subresource{};
     UINT prefix_blocker = UINT_MAX;
-    bool seen{}, exit{}, prefix_exit{};
+    bool seen{}, exit{}, prefix_exit{}, leading_exit{};
   };
   static bool copy_restorable(D3D12_RESOURCE_STATES state) noexcept {
     // COMMON is exact only because an explicit full RT exit established it and

@@ -1529,9 +1529,10 @@ void plan_display_submission(void*,
     for (std::size_t slot = 0; slot < PfdSubmissionProof::maximum_resources; ++slot) {
       auto exit = batch[i].proof->candidate(slot, batch[i].generation);
       bool before = false;
+      bool insert = bool(exit);
       if (!exit) {
         exit = batch[i].proof->prefix_candidate(slot, batch[i].generation);
-        before = bool(exit);
+        before = insert = bool(exit);
       }
       if (!exit) {
         const auto refusal = batch[i].proof->prefix_refusal(slot, batch[i].generation);
@@ -1540,8 +1541,10 @@ void plan_display_submission(void*,
           if (target != r.resources.end() && target->second->id == refusal.key.generation && display_item(r, *target->second))
             r.queue_prefix_blockers[refusal.operation].fetch_add(1, std::memory_order_relaxed);
         }
-        continue;
+        exit = batch[i].proof->activity_candidate(slot, batch[i].generation);
       }
+      if (!exit)
+        continue;
       auto* native = reinterpret_cast<ID3D12Resource*>(exit.key.resource);
       const auto found = r.resources.find(native);
       if (found == r.resources.end() || !found->second->alive || found->second->id != exit.key.generation ||
@@ -1551,6 +1554,8 @@ void plan_display_submission(void*,
       // A submitted, identity-qualified RT completion is independent of camera
       // demand. Keep this distinct from actual draws and preserve side ordering.
       found->second->submission_activity.fetch_add(1, std::memory_order_relaxed);
+      if (!insert)
+        continue;
       for (unsigned side = 0; side < 2; ++side)
         if (patches.ready_mask & (1u << side))
           if (r.selected_resources[side] == found->second) {
