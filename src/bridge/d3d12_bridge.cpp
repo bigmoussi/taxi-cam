@@ -2149,6 +2149,18 @@ void pass_targets(void*,
   item->queries.invalidate();
   item->pending_rt = {};
   Targets::record(*item, count, handles.data(), FALSE, depth ? &depth->cpuDescriptor : nullptr, false);
+  // A pass can clear or discard the selected display without a draw and without
+  // a new barrier. The queue copy would stay on the previous list, then this
+  // pass replaces it with the clear colour. Record the write so the copy follows.
+  for (UINT i = 0; i < count && i < item->count; ++i) {
+    const auto access = targets[i].BeginningAccess.Type;
+    if (access != D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_CLEAR && access != D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_DISCARD)
+      continue;
+    const auto& view = item->targets[i];
+    if (view.rtv != handles[i].ptr || view.mip || !view.resource || !view.resource->alive || !maybe_selected(view.resource->native))
+      continue;
+    item->submission_proof.note_render_target_write({reinterpret_cast<std::uint64_t>(view.resource->native), view.resource->id}, 68);
+  }
 }
 struct SamplePositions {
   static void apply(List& l, UINT samples, UINT pixels, D3D12_SAMPLE_POSITION* positions) {
@@ -2190,14 +2202,34 @@ struct GpuWork {
   }
 };
 struct ClearRenderTarget {
+  static void note(List& l, const View& view) {
+    if (view.mip || !view.resource || !view.resource->alive || !maybe_selected(view.resource->native))
+      return;
+    l.submission_proof.note_render_target_write({reinterpret_cast<std::uint64_t>(view.resource->native), view.resource->id}, 48);
+  }
+  // ClearRenderTargetView does not require the target to be bound. A clear of
+  // a selected display whose descriptor is only in the RTV map still runs after
+  // a queue copy placed on the previous list, and the frame is the clear colour.
   static void apply(List& l, D3D12_CPU_DESCRIPTOR_HANDLE handle, const FLOAT*, UINT, const D3D12_RECT*) {
     l.submission_proof.gpu_work(48);
+    if (!handle.ptr)
+      return;
     for (UINT i = 0; i < l.count; ++i) {
-      const auto& view = l.targets[i];
-      if (view.rtv != handle.ptr || view.mip || !view.resource || !view.resource->alive || !maybe_selected(view.resource->native))
+      if (l.targets[i].rtv != handle.ptr)
         continue;
-      l.submission_proof.note_render_target_write({reinterpret_cast<std::uint64_t>(view.resource->native), view.resource->id}, 48);
+      note(l, l.targets[i]);
+      return;
     }
+    View view{};
+    {
+      auto& r = registry();
+      const std::lock_guard lock(r.mutex);
+      const auto it = r.rtvs.find(handle.ptr);
+      if (it == r.rtvs.end())
+        return;
+      view = it->second;
+    }
+    note(l, view);
   }
 };
 // ClearUAV names the resource. A clear that keeps UAV from an earlier list

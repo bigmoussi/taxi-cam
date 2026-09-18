@@ -718,6 +718,62 @@ void inventory_checks() {
   for (const auto& item : resources)
     r.resources.erase(item->native);
 }
+void unbound_clear_suffix_checks() {
+  namespace win = taxi_camera::standalone;
+  using Proof = win::PfdSubmissionProof;
+  auto& r = win::registry();
+  const auto old_ready = r.ready.load();
+  const auto old_mask = r.selected_mask.load();
+  const auto old_native = r.selected_native[0].load();
+  r.ready = true;
+  auto list = std::make_shared<win::List>();
+  list->native = reinterpret_cast<ID3D12GraphicsCommandList*>(0x993000);
+  list->id = 993;
+  list->ready = true;
+  r.lists[list->native] = list;
+  auto resource = std::make_shared<win::Resource>();
+  resource->native = reinterpret_cast<ID3D12Resource*>(0xa20000);
+  resource->id = 21000;
+  const SIZE_T handle = 0x441000;
+  win::View view;
+  view.resource = resource;
+  view.rtv = handle;
+  r.rtvs[handle] = view;
+  r.selected_native[0].store(resource->native);
+  r.selected_mask.store(1);
+  const Proof::Key key{reinterpret_cast<std::uint64_t>(resource->native), resource->id};
+  const auto clear_generation = ++list->recording;
+  list->submission_proof.reset(clear_generation, true);
+  list->count = 0;
+  using Hook = win::StateHook<48, decltype(&ID3D12GraphicsCommandList::ClearRenderTargetView), win::ClearRenderTarget>;
+  Hook::invoke([](ID3D12GraphicsCommandList*, D3D12_CPU_DESCRIPTOR_HANDLE, const FLOAT*, UINT, const D3D12_RECT*) {}, list->native,
+               D3D12_CPU_DESCRIPTOR_HANDLE{handle}, nullptr, 0u, nullptr);
+  list->submission_proof.close(clear_generation, true);
+  require(list->submission_proof.suffix_candidate(key, clear_generation).state_after == D3D12_RESOURCE_STATE_RENDER_TARGET,
+          "Unbound ClearRenderTargetView of a selected display did not become a suffix");
+  const auto pass_generation = ++list->recording;
+  list->submission_proof.reset(pass_generation, true);
+  D3D12_RENDER_PASS_RENDER_TARGET_DESC target{};
+  target.cpuDescriptor = {handle};
+  target.BeginningAccess.Type = D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_CLEAR;
+  target.EndingAccess.Type = D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_PRESERVE;
+  win::pass_targets(nullptr, list->native, list->id, 1, &target, nullptr);
+  list->submission_proof.close(pass_generation, true);
+  require(list->submission_proof.suffix_candidate(key, pass_generation).state_after == D3D12_RESOURCE_STATE_RENDER_TARGET,
+          "Render-pass clear of a selected display did not become a suffix");
+  const auto preserve_generation = ++list->recording;
+  list->submission_proof.reset(preserve_generation, true);
+  target.BeginningAccess.Type = D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_PRESERVE;
+  win::pass_targets(nullptr, list->native, list->id, 1, &target, nullptr);
+  list->submission_proof.close(preserve_generation, true);
+  require(!list->submission_proof.suffix_candidate(key, preserve_generation),
+          "A preserving render pass invented a suffix for the selected display");
+  r.rtvs.erase(handle);
+  r.lists.erase(list->native);
+  r.selected_mask.store(old_mask);
+  r.selected_native[0].store(old_native);
+  r.ready = old_ready;
+}
 }  // namespace
 int main() {
   namespace win = taxi_camera::standalone;
@@ -728,6 +784,7 @@ int main() {
     submission_close_endpoint_checks();
     submission_profile_filter_checks();
     submission_gpu_classification_checks();
+    unbound_clear_suffix_checks();
     known_list_and_idle_checks();
     display_session_reset_checks();
     inventory_checks();
