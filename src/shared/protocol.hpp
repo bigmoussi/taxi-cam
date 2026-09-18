@@ -11,7 +11,7 @@
 #include "version.hpp"
 
 namespace taxi_camera::standalone {
-constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 8;
+constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 9;
 constexpr const wchar_t* Version = TAXI_CAM_VERSION_WIDE;
 struct Settings {
   std::uint32_t enabled = 1, camera_rate = kDefaultCameraRate, automatic_exposure = 1;
@@ -23,6 +23,7 @@ struct Settings {
   std::uint32_t taxi_selected_mask{}, taxi_desired_mask{};
   std::uint32_t auto_profile = 1;
   std::array<float, 3> speed_color = profiles::A380.composition.speed_color;
+  std::array<float, 3> guide_color = profiles::A380.composition.guide_color;
   // Normalized left-side guide positions; the right side mirrors X. These are
   // visual alignment settings, not calibrated ground-clearance measurements.
   std::array<float, 2> nose_dot = profiles::A380.composition.nose_dot;
@@ -34,6 +35,7 @@ struct Settings {
   std::array<std::array<double, 6>, 2> mounts = profiles::A380.mounts;
 };
 inline void reset_guide_settings(Settings& settings, const profiles::AircraftProfile& profile) noexcept {
+  settings.guide_color = profile.composition.guide_color;
   settings.nose_dot = profile.composition.nose_dot;
   settings.tail_upper = profile.composition.tail_upper;
   settings.tail_corner = profile.composition.tail_corner;
@@ -68,9 +70,10 @@ inline bool valid_settings(const Settings& s) noexcept {
     if (!std::isfinite(position[0]) || !std::isfinite(position[1]) || position[0] < 0 || position[0] > 0.5f || position[1] < 0 ||
         position[1] > 1)
       return false;
-  for (const float c : s.speed_color)
-    if (!std::isfinite(c) || c < 0 || c > 1)
-      return false;
+  for (const auto& color : {s.speed_color, s.guide_color})
+    for (const float c : color)
+      if (!std::isfinite(c) || c < 0 || c > 1)
+        return false;
   if (s.auto_profile > 1 || !profiles::find(s.profile) || s.follow_taxi > 1 || s.auto_detect > 1 || s.single_camera > 1 ||
       s.scene_test > 1 || s.manual_mask > 3 || s.calibration_mask > 3 || s.calibration_budget < 64 || s.calibration_budget > 16384)
     return false;

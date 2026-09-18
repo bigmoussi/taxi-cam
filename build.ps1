@@ -37,7 +37,7 @@ $common += @('-I', $generated)
 $graphics = @(
  'src/bridge/d3d12_bridge.cpp',
  'src/graphics/scene_handoff.cpp','src/graphics/scene_capture_d3d12.cpp','src/graphics/scene_capture_manager.cpp','src/graphics/scene_source_state.cpp',
- 'src/graphics/scene_frame_output.cpp','src/graphics/scene_runtime.cpp','src/graphics/pfd_stamp_state.cpp','src/graphics/pfd_stamp_d3d12.cpp',
+ 'src/graphics/scene_frame_output.cpp','src/graphics/scene_runtime.cpp','src/graphics/pfd_submission_pool.cpp','src/graphics/pfd_stamp_state.cpp','src/graphics/pfd_stamp_d3d12.cpp',
  'src/hooks/queue_submit_observer.cpp','src/hooks/pfd_state_observer.cpp','src/hooks/render_boundary_observer.cpp'
 )
 $engine = @(
@@ -81,6 +81,15 @@ if ($Validate) {
     if ($LASTEXITCODE -ne 0) { throw 'Native device identity regression failed.' }
     & $deviceIdentityTest --warp
     if ($LASTEXITCODE -ne 0) { throw 'WARP native device identity regression failed.' }
+    $lateConnect = Join-Path $out 'late-connect-rendering-test.exe'
+    & $compiler @common (Join-Path $taskRoot 'tests/graphics/late_connect_rendering_test.cpp') @($objects | Select-Object -First $graphics.Count) @libs '-o' $lateConnect
+    if ($LASTEXITCODE -ne 0) { throw 'Active-rendering late Connect compilation failed.' }
+    & $lateConnect --warp
+    if ($LASTEXITCODE -ne 0) { throw 'WARP active-rendering late Connect failed.' }
+    if (-not $WarpOnly) {
+        & $lateConnect
+        if ($LASTEXITCODE -ne 0) { throw 'Hardware active-rendering late Connect failed.' }
+    }
     $iconTest = Join-Path $out 'application-icon-test.exe'
     & $compiler @common '-municode' (Join-Path $taskRoot 'tests/app/application_icon_test.cpp') '-lshell32' '-lgdi32' '-o' $iconTest
     if ($LASTEXITCODE -ne 0) { throw 'Application icon validation compilation failed.' }
@@ -140,6 +149,11 @@ if ($Validate) {
     if ($LASTEXITCODE -ne 0) { throw 'Bridge metadata batching regression compilation failed.' }
     & $metadataTest
     if ($LASTEXITCODE -ne 0) { throw 'Bridge metadata batching regression failed.' }
+    $lateAttachTest = Join-Path $out 'late-attach-test.exe'
+    & $compiler @common (Join-Path $taskRoot 'tests/graphics/late_attach_test.cpp') @metadataObjects @libs '-o' $lateAttachTest
+    if ($LASTEXITCODE -ne 0) { throw 'Late-attach regression compilation failed.' }
+    & $lateAttachTest
+    if ($LASTEXITCODE -ne 0) { throw 'Late-attach regression failed.' }
     $sourceObservationTest = Join-Path $out 'source-observation-test.exe'
     & $compiler @common '-fno-access-control' (Join-Path $taskRoot 'tests/graphics/source_observation_test.cpp') @metadataObjects @libs '-o' $sourceObservationTest
     if ($LASTEXITCODE -ne 0) { throw 'Source observation regression compilation failed.' }
@@ -216,6 +230,53 @@ if ($Validate) {
         }
     }
 
+    $runtimeContention = Join-Path $out 'scene-runtime-contention-test.exe'
+    $runtimeContentionObjects = @($objects | Select-Object -First $graphics.Count | Where-Object { (Split-Path -Leaf $_) -ne 'src_graphics_scene_runtime.cpp.o' })
+    & $compiler @common '-fno-access-control' (Join-Path $taskRoot 'tests/graphics/scene_runtime_contention_test.cpp') @runtimeContentionObjects @libs '-o' $runtimeContention
+    if ($LASTEXITCODE -ne 0) { throw 'Camera service contention regression compilation failed.' }
+    & $runtimeContention --warp
+    if ($LASTEXITCODE -ne 0) { throw 'WARP camera service contention regression failed.' }
+    if (-not $WarpOnly) {
+        & $runtimeContention
+        if ($LASTEXITCODE -ne 0) { throw 'Hardware camera service contention regression failed.' }
+    }
+    $queuePatchTest = Join-Path $out 'queue-patch-snapshot-test.exe'
+    & $compiler @common '-fno-access-control' (Join-Path $taskRoot 'tests/graphics/queue_patch_snapshot_test.cpp') @runtimeContentionObjects @libs '-o' $queuePatchTest
+    if ($LASTEXITCODE -ne 0) { throw 'Queue patch snapshot compilation failed.' }
+    $splitSubmissionTest = Join-Path $out 'pfd-split-submission-test.exe'
+    & $compiler @common (Join-Path $taskRoot 'tests/graphics/pfd_split_submission_test.cpp') @($objects | Select-Object -First $graphics.Count) @libs '-o' $splitSubmissionTest
+    if ($LASTEXITCODE -ne 0) { throw 'Split-list display submission compilation failed.' }
+    $displayPoolTest = Join-Path $out 'pfd-submission-pool-test.exe'
+    & $compiler @common (Join-Path $taskRoot 'tests/graphics/pfd_submission_pool_test.cpp') (Join-Path $taskRoot 'src/graphics/pfd_submission_pool.cpp') (Join-Path $taskRoot 'src/hooks/queue_submit_observer.cpp') @libs '-o' $displayPoolTest
+    if ($LASTEXITCODE -ne 0) { throw 'Display submission pool compilation failed.' }
+    foreach ($displayAdapter in @('warp','hardware')) {
+        if ($WarpOnly -and $displayAdapter -eq 'hardware') { continue }
+        $displayArgs = @()
+        if ($displayAdapter -eq 'warp') { $displayArgs += '--warp' }
+        & $queuePatchTest @displayArgs
+        if ($LASTEXITCODE -ne 0) { throw "Queue patch snapshot failed: $displayAdapter" }
+        & $queuePatchTest @displayArgs --a350
+        if ($LASTEXITCODE -ne 0) { throw "A350 queue patch snapshot failed: $displayAdapter" }
+        foreach ($displayProfile in @('ini','fbw','fbw-three')) {
+            foreach ($displayState in @('srv','common')) {
+                foreach ($displayPlacement in @('separate','mixed-exit','first-list')) {
+                    $splitArgs = @($displayArgs)
+                    if ($displayProfile -ne 'ini') { $splitArgs += "--$displayProfile" }
+                    if ($displayState -eq 'common') { $splitArgs += '--common' }
+                    if ($displayPlacement -ne 'separate') { $splitArgs += "--$displayPlacement" }
+                    & $splitSubmissionTest @splitArgs
+                    if ($LASTEXITCODE -ne 0) { throw "Display submission failed: $displayAdapter / $displayProfile / $displayState / $displayPlacement" }
+                }
+            }
+        }
+        & $displayPoolTest @displayArgs
+        if ($LASTEXITCODE -ne 0) { throw "Display submission pool failed: $displayAdapter" }
+        & $displayPoolTest @displayArgs --common
+        if ($LASTEXITCODE -ne 0) { throw "COMMON display submission pool failed: $displayAdapter" }
+        & $displayPoolTest @displayArgs --before
+        if ($LASTEXITCODE -ne 0) { throw "Before-list display submission pool failed: $displayAdapter" }
+    }
+
     $compositor = Join-Path $out 'compositor-validation.exe'
     & $compiler @common '-municode' (Join-Path $taskRoot 'tests/graphics/compositor_main.cpp') @libs '-o' $compositor
     if ($LASTEXITCODE -ne 0) { throw 'Compositor validation compilation failed.' }
@@ -237,6 +298,11 @@ if ($Validate) {
     if ($LASTEXITCODE -ne 0) { throw 'Native smoke compilation failed.' }
     & $smoke (Join-Path $out 'taxi-camera-bridge.dll')
     if ($LASTEXITCODE -ne 0) { throw 'Exact native DLL smoke failed.' }
+    $logTest = Join-Path $out 'rotating-log-test.exe'
+    & $compiler @common '-municode' (Join-Path $taskRoot 'tests/app/rotating_log_test.cpp') '-o' $logTest
+    if ($LASTEXITCODE -ne 0) { throw 'Runtime log rotation compilation failed.' }
+    & $logTest
+    if ($LASTEXITCODE -ne 0) { throw 'Runtime log rotation regression failed.' }
     foreach ($entry in @(
         @{Name='native-launcher-path'; Sources=@('tests/app/launcher_path_test.cpp')},
         @{Name='connection-recoverability'; Sources=@('tests/app/connection_recoverability_test.cpp')},
@@ -261,6 +327,7 @@ if ($Validate) {
         @{Name='sample-positions-abi'; Sources=@('tests/graphics/sample_positions_abi_test.cpp')},
         @{Name='native-query-scope'; Sources=@('tests/graphics/query_scope_test.cpp')},
         @{Name='pfd-copy-proof'; Sources=@('tests/graphics/pfd_copy_proof_test.cpp')},
+        @{Name='pfd-submission-proof'; Sources=@('tests/graphics/pfd_submission_proof_test.cpp')},
         @{Name='metadata-batch-cache'; Sources=@('tests/graphics/metadata_batch_cache_test.cpp')},
         @{Name='taxi-routes'; Sources=@('tests/graphics/taxi_button_routes_test.cpp')},
         @{Name='target-assignment'; Sources=@('tests/graphics/target_assignment_test.cpp')},
@@ -279,6 +346,10 @@ if ($Validate) {
         if ($LASTEXITCODE -ne 0) { throw "Native test compilation failed: $($entry.Name)" }
         & $exe
         if ($LASTEXITCODE -ne 0) { throw "Native test failed: $($entry.Name)" }
+        if ($entry.Name -eq 'queue-submit') {
+            & $exe augment
+            if ($LASTEXITCODE -ne 0) { throw 'Queue submission augmentation failed.' }
+        }
     }
     $diagnosticsTest = Join-Path $out 'companion-diagnostics-test.exe'
     & $compiler @common (Join-Path $taskRoot 'tests/app/companion_diagnostics_test.cpp') (Join-Path $taskRoot 'src/app/updater.cpp') '-lgdi32' '-lbcrypt' '-lshell32' '-lcomctl32' '-lcomdlg32' '-ladvapi32' '-ldwmapi' '-luxtheme' '-o' $diagnosticsTest
@@ -317,6 +388,12 @@ if ($Validate) {
             throw "Non-native runtime dependency found in $name."
         }
         $imports | Set-Content -LiteralPath (Join-Path $out ($name+'.imports.txt'))
+        $symbols = & $readobj '--symbols' $path
+        if ($LASTEXITCODE -ne 0) { throw "Symbol audit failed: $name" }
+        if ((($imports + $symbols) -join "`n") -match '(?i)(SuspendThread|ResumeThread|(?:Nt|Zw)(?:Suspend|Resume)(?:Thread|Process)|D3D11On12CreateDevice|\bMH_)') {
+            throw "$name includes a forbidden D3D11On12 bootstrap or thread-suspending hook dependency."
+        }
+        $symbols | Set-Content -LiteralPath (Join-Path $out ($name+'.symbols.txt'))
         $hashes[$name] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
     }
     $closure = @()
@@ -324,7 +401,8 @@ if ($Validate) {
         if ($source.EndsWith('.S')) { continue }
         $dependencyList = & $compiler @common '-MM' (Join-Path $taskRoot $source)
         if ($LASTEXITCODE -ne 0) { throw "Native dependency audit failed: $source" }
-        if (($dependencyList -join ' ') -match '(?i)[\\/]build[\\/]deps[\\/]') { throw "Unexpected external header dependency: $source" }
+        $dependencyText = ($dependencyList -join ' ').Replace('\', '/')
+        if ($dependencyText -match '(?i)/build/deps/') { throw "Unexpected external header dependency: $source" }
         $closure += $dependencyList
     }
     $closure | Set-Content -LiteralPath (Join-Path $out 'native-dependencies.txt')
@@ -334,10 +412,13 @@ if ($Validate) {
         passed=$true; version=$version; buildNumber=$buildNumber; createdUtc=[DateTime]::UtcNow.ToString('o'); files=$hashes;
         dynamicGraphicsStateTests=@($dynamicStateResults)
         samplePositionTests=@($sampleResults)
-        tests=@($gpuTests + @('pre-existing graphics objects','terminal command-list PFD drawing without application root replay','textured gray alpha and mip preservation with terminal PFD draws and repeated submissions','scoped barrier metadata lookup caching','descriptor heap filtering and retained device identity','unrelated submission bypass and discovery lock ordering','per-recording PFD copy evidence and draw fallback','preferred OM/Close copy pixel and query preservation','dynamic graphics-state replay and ABI','programmable sample-pattern normalization and restoration','isolated graphics-state regression coverage','lazy typed patch demand, discard and cross-profile replay','fractional ground-speed truncation and raw-speed cutoff','camera border and inset composition','antialiased GS glyphs and two-character spacing','ClearState pipeline preservation','native render-pass state preservation','private PFD patch copies','selected PFD copies in large barrier batches','PFD exits across command lists','typed PFD view evidence','application occlusion-query preservation','query-aware PFD drawing and OM restoration','calibration OM and Close delivery','retained camera dimension recovery','retained native aircraft transitions and request tokens','current-process memory query equivalence','close-only activation inspection','bounded memory query reuse','shared read-only inspection transaction with fresh endpoint validation','early camera preparation and activation timings','bounded grounded prewarm and retained foreground takeover','idle camera inspection scheduling','large barrier batches and changing camera frames','exact DLL smoke',
+        tests=@($gpuTests + @('pre-existing graphics objects','late Connect during active native rendering, Present and CPU work','exact bridge rejects D3D11On12 bootstrap and thread-suspending hook dependencies','per-profile marking colour persistence, IPC and GPU pixel isolation','launcher phase timing and distinct wait outcomes','terminal command-list PFD drawing without application root replay','textured gray alpha and mip preservation with terminal PFD draws and repeated submissions','scoped barrier metadata lookup caching','descriptor heap filtering and retained device identity','unrelated submission bypass and discovery lock ordering','per-recording PFD copy evidence and draw fallback','preferred OM/Close copy pixel and query preservation','dynamic graphics-state replay and ABI','programmable sample-pattern normalization and restoration','isolated graphics-state regression coverage','lazy typed patch demand, discard and cross-profile replay','fractional ground-speed truncation and raw-speed cutoff','camera border and inset composition','antialiased GS glyphs and two-character spacing','ClearState pipeline preservation','native render-pass state preservation','private PFD patch copies','selected PFD copies in large barrier batches','PFD exits across command lists','typed PFD view evidence','application occlusion-query preservation','query-aware PFD drawing and OM restoration','calibration OM and Close delivery','retained camera dimension recovery','retained native aircraft transitions and request tokens','current-process memory query equivalence','close-only activation inspection','bounded memory query reuse','shared read-only inspection transaction with fresh endpoint validation','early camera preparation and activation timings','bounded grounded prewarm and retained foreground takeover','idle camera inspection scheduling','large barrier batches and changing camera frames','exact DLL smoke',
             'settings persistence and IPC','per-user first-launch Settings visibility, failure retry and preview isolation','per-aircraft reference-guide persistence','live reference-guide GPU updates','scene demand and retained camera ownership','companion contention and watchdog','configurable global camera shortcuts, native conflict recovery, hidden-window dispatch, preview isolation and manual-only controls','launcher file identity','native COM slots','TAXI routing','profile-switch target reacquisition','active-feed A380-A350-A380 transitions with retained sources','manual and automatic target selection','PFD detector','exposure','calibration','write budget',
             'compositor formats and exposure','scene handoff and resource state','camera ownership','bug report URL encoding, bounds and diagnostic privacy','relocatable native instruction discovery and static RTTI identity','complete camera contract on relocated synthetic PE images and refusal controls','queue submit','PFD state observer lifecycle','render boundary','engine hook','camera telemetry and lifecycle','aircraft layout compatibility','exe.xml preservation and rename migration',
             'bounded weak command-list lookup reuse and idle observation epochs','continuous source-state observation with idle capture suppression','optional fenced GPU timestamps on owned recordings','5-60 camera activation limits and low-rate scheduling',
+            'bounded rotating runtime logs, oversized history and concurrent writers','bounded renderer-fault retention with active-record preservation',
+            'nonblocking telemetry shutdown with retained worker ownership','private composition contention retry with retained leases and GPU pixels','nonblocking helper refusal and retained GPU submission ordering',
+            'same-submit iniBuilds and FBW camera/calibration pixels after barrier-only lists and before mixed exit/consumer lists including first-list insertion, replay and subsequent native overwrite','exact RT exit proof including COMMON and SRV, pass and generation refusal','bounded display copy packets with fence-held source/target lifetime and mip preservation','prepared camera/calibration patches with nonblocking snapshots and manager timeline ordering','late display submission activity with unchanged automatic side ordering',
             'native imports and header dependency closure','embedded multi-resolution application icon and Windows shell extraction','release selection, download integrity and updater handoff guards'));
         gpuValidation=[ordered]@{hardware=$(if ($WarpOnly) { 'not-run' } else { 'passed' });warp='passed'};
         simulatorVerified=$false

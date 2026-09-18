@@ -143,6 +143,9 @@ inline bool load_settings(Settings& s, const std::wstring& installation, std::ui
   constexpr const wchar_t* color_keys[]{L"speed_red", L"speed_green", L"speed_blue"};
   for (unsigned c = 0; c < 3; ++c)
     value.speed_color[c] = static_cast<float>(read(L"display", color_keys[c], value.speed_color[c]));
+  constexpr const wchar_t* guide_color_keys[]{L"guide_red", L"guide_green", L"guide_blue"};
+  for (unsigned c = 0; c < 3; ++c)
+    value.guide_color[c] = static_cast<float>(read(L"guides", guide_color_keys[c], value.guide_color[c]));
   auto guide = [&](std::array<float, 2>& position, const wchar_t* x_key, const wchar_t* y_key) {
     position[0] = static_cast<float>(read(L"guides", x_key, position[0]));
     position[1] = static_cast<float>(read(L"guides", y_key, position[1]));
@@ -176,19 +179,20 @@ inline bool save_settings(const Settings& s) {
   wchar_t text[4096];
   const auto& n = s.mounts[0];
   const auto& t = s.mounts[1];
-  const int count =
-      std::swprintf(text, 4096,
-                    L"[service]\r\nenabled=%u\r\nfollow_taxi=%u\r\nauto_detect=%u\r\n"
-                    L"[display]\r\ncamera_rate=%u\r\nsingle_camera=%u\r\nautomatic_exposure=%u\r\nexposure=%.9g\r\nnight_boost=%."
-                    L"9g\r\nnight_boost_revision=%u\r\ncalibration_budget=%u\r\nspeed_red=%.9g\r\nspeed_green=%.9g\r\nspeed_blue=%.9g\r\n"
-                    L"[guides]\r\nnose_dot_x=%.9g\r\nnose_dot_y=%.9g\r\ntail_upper_x=%.9g\r\ntail_upper_y=%.9g\r\n"
-                    L"tail_corner_x=%.9g\r\ntail_corner_y=%.9g\r\ntail_inner_x=%.9g\r\ntail_inner_y=%.9g\r\n"
-                    L"[nose]\r\nright=%.12g\r\nup=%.12g\r\nforward=%.12g\r\npitch=%.12g\r\nyaw=%.12g\r\nlens=%.12g\r\n"
-                    L"[tail]\r\nright=%.12g\r\nup=%.12g\r\nforward=%.12g\r\npitch=%.12g\r\nyaw=%.12g\r\nlens=%.12g\r\n",
-                    s.enabled, s.follow_taxi, s.auto_detect, s.camera_rate, s.single_camera, s.automatic_exposure, s.exposure,
-                    s.night_boost, kNightBoostPreferenceRevision, s.calibration_budget, s.speed_color[0], s.speed_color[1],
-                    s.speed_color[2], s.nose_dot[0], s.nose_dot[1], s.tail_upper[0], s.tail_upper[1], s.tail_corner[0], s.tail_corner[1],
-                    s.tail_inner[0], s.tail_inner[1], n[0], n[1], n[2], n[3], n[4], n[5], t[0], t[1], t[2], t[3], t[4], t[5]);
+  const int count = std::swprintf(
+      text, 4096,
+      L"[service]\r\nenabled=%u\r\nfollow_taxi=%u\r\nauto_detect=%u\r\n"
+      L"[display]\r\ncamera_rate=%u\r\nsingle_camera=%u\r\nautomatic_exposure=%u\r\nexposure=%.9g\r\nnight_boost=%."
+      L"9g\r\nnight_boost_revision=%u\r\ncalibration_budget=%u\r\nspeed_red=%.9g\r\nspeed_green=%.9g\r\nspeed_blue=%.9g\r\n"
+      L"[guides]\r\nguide_red=%.9g\r\nguide_green=%.9g\r\nguide_blue=%.9g\r\n"
+      L"nose_dot_x=%.9g\r\nnose_dot_y=%.9g\r\ntail_upper_x=%.9g\r\ntail_upper_y=%.9g\r\n"
+      L"tail_corner_x=%.9g\r\ntail_corner_y=%.9g\r\ntail_inner_x=%.9g\r\ntail_inner_y=%.9g\r\n"
+      L"[nose]\r\nright=%.12g\r\nup=%.12g\r\nforward=%.12g\r\npitch=%.12g\r\nyaw=%.12g\r\nlens=%.12g\r\n"
+      L"[tail]\r\nright=%.12g\r\nup=%.12g\r\nforward=%.12g\r\npitch=%.12g\r\nyaw=%.12g\r\nlens=%.12g\r\n",
+      s.enabled, s.follow_taxi, s.auto_detect, s.camera_rate, s.single_camera, s.automatic_exposure, s.exposure, s.night_boost,
+      kNightBoostPreferenceRevision, s.calibration_budget, s.speed_color[0], s.speed_color[1], s.speed_color[2], s.guide_color[0],
+      s.guide_color[1], s.guide_color[2], s.nose_dot[0], s.nose_dot[1], s.tail_upper[0], s.tail_upper[1], s.tail_corner[0],
+      s.tail_corner[1], s.tail_inner[0], s.tail_inner[1], n[0], n[1], n[2], n[3], n[4], n[5], t[0], t[1], t[2], t[3], t[4], t[5]);
   if (count <= 0)
     return false;
   HANDLE file = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);

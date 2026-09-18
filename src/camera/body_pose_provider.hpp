@@ -47,6 +47,8 @@ struct LightingSample {
 };
 // Public SimConnect worker only. Call lifecycle functions outside DllMain and
 // private engine callbacks. Never acquires or changes the simulator camera.
+// Returns false while the previous worker is stopping; retry without changing
+// the active profile or starting another worker.
 bool select_aircraft_profile(std::uint32_t id) noexcept;
 AircraftIdentitySample get_aircraft_identity() noexcept;
 // Changes only when the flight/aircraft session changes. Selecting the
@@ -54,7 +56,9 @@ AircraftIdentitySample get_aircraft_identity() noexcept;
 std::uint64_t get_aircraft_session_epoch() noexcept;
 bool aircraft_matches_profile() noexcept;
 bool initialize_body_pose_provider() noexcept;
-void shutdown_body_pose_provider() noexcept;
+// Signal stop and poll completion without waiting for SimConnect. False keeps
+// the worker, event and caches owned until a later lifecycle call observes exit.
+bool shutdown_body_pose_provider() noexcept;
 void reset_body_pose_calibration() noexcept;
 // The caller supplies a freshly validated current-camera ECEF position/FOV.
 // Matches public CameraGet WORLD before accepting a local vertical correction.
@@ -88,6 +92,13 @@ TaxiCutoffStatus get_taxi_cutoff() noexcept;
 LightingSample get_lighting() noexcept;
 #ifdef TAXI_BODY_POSE_PROVIDER_TESTING
 namespace body_pose_provider_testing {
+struct LifecycleSnapshot {
+  std::uintptr_t worker{}, stop{};
+  std::uint32_t profile{};
+};
+// Duplicates the supplied handles; the fixture retains its originals.
+bool install_worker(void* worker, void* stop) noexcept;
+LifecycleSnapshot lifecycle_snapshot() noexcept;
 bool accept_session_packet(const void* packet, std::uint32_t bytes) noexcept;
 bool accept_identity_packet(const void* packet, std::uint32_t bytes, std::uint64_t sample_ms) noexcept;
 bool accept_aircraft_packet(const void* packet, std::uint32_t bytes, std::uint64_t sample_ms) noexcept;

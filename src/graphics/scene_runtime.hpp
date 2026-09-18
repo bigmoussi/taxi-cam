@@ -5,6 +5,35 @@
 #include "scene_capture_manager.hpp"
 
 namespace taxi_camera::scene_runtime {
+// Control-thread demand for prepared queue-injected display copies. Formats
+// describe OUR output encoding; they are not inferred application RTV evidence.
+struct QueuePatchConfig {
+  std::uint64_t generation = 0;
+  std::uint32_t profile = 0;
+  unsigned camera_mask = 0, calibration_mask = 0;
+  std::array<DXGI_FORMAT, 2> formats{DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN};
+  bool operator==(const QueuePatchConfig&) const = default;
+};
+struct QueuePatch {
+  ID3D12Resource* buffer = nullptr;  // Borrowed, retained for process lifetime.
+  D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+  D3D12_RECT destination{}, content{};
+  bool calibration = false;
+};
+struct QueuePatchSnapshot {
+  std::uint64_t generation = 0;
+  std::uint32_t profile = 0;
+  unsigned ready_mask = 0;
+  std::array<QueuePatch, 2> sides{};
+};
+// Metadata only; allocation/recording/submission happens in service(). An empty
+// config disables snapshots immediately without freeing replayable buffers.
+bool configure_queue_patches(std::uint64_t device_key, const QueuePatchConfig&);
+// Call BEFORE the manager's submission lock. No COM, allocation, or blocking
+// synchronization; false/empty on contention, mismatched generation, or cold
+// output. Every actual consumer must join the SAME manager timeline, and the
+// bridge must revalidate its target/config generation before queue admission.
+bool try_snapshot_queue_patches(std::uint64_t device_key, std::uint64_t expected_generation, QueuePatchSnapshot&) noexcept;
 // Profile configuration changes only future private patch recordings.
 bool set_patch_profile(std::uint64_t device_key, std::uint32_t profile);
 // Exact, positively observed native RT-exit boundary only. Never infer a

@@ -222,8 +222,10 @@ bool Updater::begin(const std::wstring& installation, bool manual) {
                GetTickCount64() - start < 180000) {}
         DWORD code = 1;
         if (wait != WAIT_OBJECT_0) {
-          TerminateProcess(process.hProcess, ERROR_CANCELLED);
-          WaitForSingleObject(process.hProcess, INFINITE);
+          // Cancellation must not hold companion shutdown indefinitely if the
+          // helper cannot finish terminating (for example, pending OS I/O).
+          if (TerminateProcess(process.hProcess, ERROR_CANCELLED))
+            WaitForSingleObject(process.hProcess, 2000);
         } else
           GetExitCodeProcess(process.hProcess, &code);
         CloseHandle(process.hProcess);

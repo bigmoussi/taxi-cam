@@ -18,6 +18,9 @@ struct Device {
   std::uint64_t key = 0;
   ID3D12Device* native = nullptr;
   SceneFrameOutput output;
+  SceneFrameOutput calibration_output;
+  QueuePatchConfig queue_config;
+  QueuePatchSnapshot queue_snapshot;
   std::array<PfdStampD3D12, Formats.size() * DepthFormats.size()> stamps;
   std::array<bool, Formats.size() * DepthFormats.size()> stamp_ready{};
   std::array<SceneCaptureManager::Frame, 2> pending;
@@ -61,7 +64,95 @@ void discard(Device& item) {
 bool current_output(const Device& item) {
   return item.status.output && scene_handoff().is_current(item.committed[0]) && scene_handoff().is_current(item.committed[1]);
 }
+
+D3D12_RECT native_rect(const profiles::DisplayRect& rect) {
+  return {static_cast<LONG>(rect.left), static_cast<LONG>(rect.top), static_cast<LONG>(rect.right), static_cast<LONG>(rect.bottom)};
+}
+bool valid_queue_config(const Device& item, const QueuePatchConfig& config) {
+  if (!config.generation)
+    return config == QueuePatchConfig{};
+  const auto* profile = profiles::find(config.profile);
+  if (!profile || config.profile != item.patch_profile || ((config.camera_mask | config.calibration_mask) & ~3u))
+    return false;
+  for (unsigned side = 0; side < 2; ++side)
+    if (((config.camera_mask | config.calibration_mask) & (1u << side)) &&
+        (std::find(Formats.begin(), Formats.end(), config.formats[side]) == Formats.end() ||
+         !profiles::matches_display(*profile, profile->width, profile->height, profile->mips ? profile->mips : 1,
+                                    static_cast<UINT>(config.formats[side]))))
+      return false;
+  return true;
+}
+bool request_queue_patches(Device& item) {
+  const auto& config = item.queue_config;
+  const auto* profile = profiles::find(config.profile);
+  if (!config.generation || !profile || config.profile != item.patch_profile)
+    return true;
+  if (config.calibration_mask &&
+      (!item.calibration_output.initialize(item.native, true) || !item.calibration_output.set_patch_profile(config.profile)))
+    return false;
+  for (unsigned side = 0; side < 2; ++side) {
+    const auto outer = profiles::display_rect(*profile, side), inner = profiles::display_content_rect(*profile, side);
+    const D3D12_RECT local{static_cast<LONG>(inner.left - outer.left), static_cast<LONG>(inner.top - outer.top),
+                           static_cast<LONG>(inner.right - outer.left), static_cast<LONG>(inner.bottom - outer.top)};
+    if ((config.camera_mask & (1u << side)) &&
+        !item.output.request_patch(config.formats[side], outer.right - outer.left, outer.bottom - outer.top, local))
+      return false;
+    if ((config.calibration_mask & (1u << side)) &&
+        !item.calibration_output.request_patch(config.formats[side], outer.right - outer.left, outer.bottom - outer.top, local))
+      return false;
+  }
+  return true;
+}
+void publish_queue_patches(Device& item) {
+  auto& snapshot = item.queue_snapshot;
+  snapshot = {};
+  const auto& config = item.queue_config;
+  const auto* profile = profiles::find(config.profile);
+  if (item.status.failed || !config.generation || !profile || config.profile != item.patch_profile)
+    return;
+  snapshot.generation = config.generation;
+  snapshot.profile = config.profile;
+  const bool camera_ready = current_output(item);
+  for (unsigned side = 0; side < 2; ++side) {
+    const bool calibration = (config.calibration_mask & (1u << side)) != 0;
+    if (!calibration && (!(config.camera_mask & (1u << side)) || !camera_ready))
+      continue;
+    const auto outer = profiles::display_rect(*profile, side), inner = profiles::display_content_rect(*profile, side);
+    const D3D12_RECT local{static_cast<LONG>(inner.left - outer.left), static_cast<LONG>(inner.top - outer.top),
+                           static_cast<LONG>(inner.right - outer.left), static_cast<LONG>(inner.bottom - outer.top)};
+    const auto patch = (calibration ? item.calibration_output : item.output)
+                           .patch(config.formats[side], outer.right - outer.left, outer.bottom - outer.top, local);
+    if (!patch.buffer)
+      continue;
+    snapshot.sides[side] = {patch.buffer, patch.footprint, native_rect(outer), native_rect(inner), calibration};
+    snapshot.ready_mask |= 1u << side;
+  }
+}
 }  // namespace
+
+bool configure_queue_patches(std::uint64_t key, const QueuePatchConfig& config) {
+  const std::lock_guard lock(runtime().mutex);
+  auto* item = find(key);
+  if (!item || item->status.failed || !valid_queue_config(*item, config))
+    return false;
+  if (item->queue_config != config) {
+    item->queue_config = config;
+    item->queue_snapshot = {};
+  }
+  return true;
+}
+bool try_snapshot_queue_patches(std::uint64_t key, std::uint64_t generation, QueuePatchSnapshot& result) noexcept {
+  result = {};
+  const std::unique_lock lock(runtime().mutex, std::try_to_lock);
+  if (!lock.owns_lock())
+    return false;
+  const auto* item = find(key);
+  if (!item || item->status.failed || !generation || item->queue_snapshot.generation != generation ||
+      item->queue_snapshot.profile != item->patch_profile || !item->queue_snapshot.ready_mask)
+    return false;
+  result = item->queue_snapshot;
+  return true;
+}
 
 SceneCaptureManager& manager() {
   static auto* const instance = new SceneCaptureManager(scene_handoff());
@@ -98,6 +189,7 @@ void destroy_device(std::uint64_t key) {
     discard(*item);
     item->status.failed = true;
     item->status.output = false;
+    item->queue_snapshot = {};
     item->status.message = "Device destroyed; GPU resources retained for recorded command lists.";
   }
   manager().destroy_device(key);
@@ -172,6 +264,8 @@ bool set_patch_profile(std::uint64_t key, std::uint32_t profile) {
       return false;
     if (item->patch_profile != profile)
       item->status.output = false;
+    item->queue_snapshot = {};
+    item->queue_config = {};
     item->patch_profile = profile;
     return true;
   }
@@ -267,6 +361,7 @@ void reset_feed(std::uint64_t key) {
   if (auto* item = find(key); item && !item->status.failed) {
     discard(*item);
     item->status.output = false;
+    item->queue_snapshot = {};
     item->committed = {};
     item->status.message = "Waiting for the first completed images from both camera views.";
   }
@@ -290,6 +385,7 @@ void set_ground_speed(std::uint64_t key, float knots, bool valid) {
 }
 void service() {
   const standalone::OwnedWork owned_work_guard;
+  manager().service_display_submissions();
   const std::lock_guard lock(runtime().mutex);
   std::array<SceneCaptureManager::Frame, SceneCaptureManager::MaximumPackets> incoming{};
   const auto count = manager().poll_completed_frames(incoming.data(), incoming.size());
@@ -315,10 +411,43 @@ void service() {
     previous = frame;
   }
   for (auto& item : runtime().devices) {
+    item.queue_snapshot = {};
+    if (!item.key || item.status.failed)
+      continue;
     if (item.status.output && !current_output(item)) {
       item.status.output = false;
       item.status.message = "Scene output identity changed; waiting for fresh completed camera images.";
     }
+    if (!request_queue_patches(item)) {
+      item.status.failed = true;
+      item.status.message = "Preparing the queued display output failed.";
+      continue;
+    }
+    if (item.queue_config.calibration_mask && item.calibration_output.idle()) {
+      if (!item.calibration_output.prepare_calibration(GetTickCount64() / 16)) {
+        item.status.failed = true;
+        item.status.message = item.calibration_output.error();
+        continue;
+      }
+      const auto calibration = manager().begin_private_submission(item.key, item.calibration_output.queue());
+      if (!calibration.receipt) {
+        const bool discarded = item.calibration_output.discard_prepared();
+        if (!calibration.deferred || !discarded) {
+          item.status.failed = true;
+          item.status.message = "Calibration output queue ordering failed.";
+          continue;
+        }
+      } else {
+        const bool submitted = item.calibration_output.submit();
+        const bool ordered = manager().end_private_submission(calibration.receipt);
+        if (!submitted || !ordered) {
+          item.status.failed = true;
+          item.status.message = "Calibration output submission failed.";
+          continue;
+        }
+      }
+    }
+    publish_queue_patches(item);
     if (!item.key || !item.status.initialized || item.status.failed || !item.output.idle())
       continue;
     for (auto& frame : item.pending) {
@@ -345,7 +474,14 @@ void service() {
     }
     const auto submission = manager().begin_private_submission(item.key, item.output.queue());
     if (!submission.receipt) {
-      if (item.output.discard_prepared())
+      const bool discarded = item.output.discard_prepared();
+      if (submission.deferred && discarded) {
+        // Nothing reached the GPU. Keep both leases and the last good output;
+        // the next service call can record this pair again after contention.
+        item.status.message = "Waiting to update the camera image.";
+        continue;
+      }
+      if (discarded)
         discard(item);
       item.status.failed = true;
       item.status.message = "Camera output queue ordering failed.";
@@ -364,6 +500,7 @@ void service() {
     item.pending = {};
     item.status.output = true;
     ++item.status.frames;
+    publish_queue_patches(item);
     item.status.message = "Live camera composition available: inset upper PFD, lower trim area preserved.";
   }
 }
@@ -386,6 +523,7 @@ Snapshot snapshot(std::uint64_t key) {
     }
   }
   result.capture = manager().statistics();
+  result.stamps += result.capture.display_copies;
   return result;
 }
 bool stamp_at_recording_end(ID3D12GraphicsCommandList* list,

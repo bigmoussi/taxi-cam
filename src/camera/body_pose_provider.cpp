@@ -716,13 +716,50 @@ LightingSample lighting_locked(std::uint64_t now) noexcept {
   }
   return out;
 }
+// The lifecycle lock owns these handles. A blocked SDK call must never make a
+// control-thread stop/profile request wait, and must retain its live state.
+bool stop_provider_locked() noexcept {
+  if (state.worker) {
+    SetEvent(state.stop);
+    if (WaitForSingleObject(state.worker, 0) != WAIT_OBJECT_0)
+      return false;
+    CloseHandle(state.worker);
+    CloseHandle(state.stop);
+    state.worker = nullptr;
+    state.stop = nullptr;
+  }
+  AcquireSRWLockExclusive(&state.lock);
+  state.aircraft_ms = state.camera_ms = 0;
+  state.identity = {};
+  state.ground_speed_ms = 0;
+  state.ground_speed_error = "not_initialized";
+  state.on_ground_ms = 0;
+  state.on_ground_error = "not_initialized";
+  state.taxi_ms = 0;
+  state.taxi_error = "not_initialized";
+  state.lighting_ms = 0;
+  state.lighting_error = "not_initialized";
+  state.taxi_left = state.taxi_right = false;
+  state.speed_cutoff = {};
+  state.button_commands.reset_session();
+  state.cutoff_status = "below_speed_limit";
+  state.calibrated = false;
+  state.calibration_samples = 0;
+  state.calibration_camera_ms = 0;
+  state.error = "not_initialized";
+  ReleaseSRWLockExclusive(&state.lock);
+  return true;
+}
 }  // namespace
 bool select_aircraft_profile(std::uint32_t id) noexcept {
   if (!profiles::find(id))
     return false;
-  shutdown_body_pose_provider();
-  profile_id.store(id);
-  return true;
+  AcquireSRWLockExclusive(&lifecycle);
+  const bool stopped = stop_provider_locked();
+  if (stopped)
+    profile_id.store(id);
+  ReleaseSRWLockExclusive(&lifecycle);
+  return stopped;
 }
 AircraftIdentitySample get_aircraft_identity() noexcept {
   AcquireSRWLockShared(&state.lock);
@@ -751,8 +788,9 @@ bool initialize_body_pose_provider() noexcept {
     state.stop = nullptr;
   }
   if (state.worker) {
+    const bool ready = WaitForSingleObject(state.stop, 0) == WAIT_TIMEOUT;
     ReleaseSRWLockExclusive(&lifecycle);
-    return true;
+    return ready;
   }
   // Automatic EFIS telemetry can start before any native hook pins the addon.
   // FROM_ADDRESS also works for the standalone test executable's main image.
@@ -775,37 +813,11 @@ bool initialize_body_pose_provider() noexcept {
   ReleaseSRWLockExclusive(&lifecycle);
   return ready;
 }
-void shutdown_body_pose_provider() noexcept {
+bool shutdown_body_pose_provider() noexcept {
   AcquireSRWLockExclusive(&lifecycle);
-  if (state.worker) {
-    SetEvent(state.stop);
-    WaitForSingleObject(state.worker, INFINITE);
-    CloseHandle(state.worker);
-    CloseHandle(state.stop);
-    state.worker = nullptr;
-    state.stop = nullptr;
-  }
-  AcquireSRWLockExclusive(&state.lock);
-  state.aircraft_ms = state.camera_ms = 0;
-  state.identity = {};
-  state.ground_speed_ms = 0;
-  state.ground_speed_error = "not_initialized";
-  state.on_ground_ms = 0;
-  state.on_ground_error = "not_initialized";
-  state.taxi_ms = 0;
-  state.taxi_error = "not_initialized";
-  state.lighting_ms = 0;
-  state.lighting_error = "not_initialized";
-  state.taxi_left = state.taxi_right = false;
-  state.speed_cutoff = {};
-  state.button_commands.reset_session();
-  state.cutoff_status = "below_speed_limit";
-  state.calibrated = false;
-  state.calibration_samples = 0;
-  state.calibration_camera_ms = 0;
-  state.error = "not_initialized";
-  ReleaseSRWLockExclusive(&state.lock);
+  const bool stopped = stop_provider_locked();
   ReleaseSRWLockExclusive(&lifecycle);
+  return stopped;
 }
 void reset_body_pose_calibration() noexcept {
   AcquireSRWLockExclusive(&state.lock);
@@ -931,6 +943,31 @@ TaxiCutoffStatus get_taxi_cutoff() noexcept {
 }
 #ifdef TAXI_BODY_POSE_PROVIDER_TESTING
 namespace body_pose_provider_testing {
+bool install_worker(void* worker_handle, void* stop_handle) noexcept {
+  AcquireSRWLockExclusive(&lifecycle);
+  bool installed = false;
+  if (!state.worker && !state.stop && worker_handle && stop_handle) {
+    const auto process = GetCurrentProcess();
+    HANDLE worker_copy{}, stop_copy{};
+    if (DuplicateHandle(process, worker_handle, process, &worker_copy, 0, FALSE, DUPLICATE_SAME_ACCESS) &&
+        DuplicateHandle(process, stop_handle, process, &stop_copy, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
+      state.worker = worker_copy;
+      state.stop = stop_copy;
+      installed = true;
+    } else if (worker_copy) {
+      CloseHandle(worker_copy);
+    }
+  }
+  ReleaseSRWLockExclusive(&lifecycle);
+  return installed;
+}
+LifecycleSnapshot lifecycle_snapshot() noexcept {
+  AcquireSRWLockShared(&lifecycle);
+  const LifecycleSnapshot result{reinterpret_cast<std::uintptr_t>(state.worker), reinterpret_cast<std::uintptr_t>(state.stop),
+                                 profile_id.load()};
+  ReleaseSRWLockShared(&lifecycle);
+  return result;
+}
 bool accept_on_ground_packet(const void* packet, std::uint32_t bytes, std::uint64_t sample_ms) noexcept {
   return ::taxi_camera::native_camera::accept_on_ground_packet(packet, bytes, sample_ms);
 }

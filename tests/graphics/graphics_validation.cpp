@@ -1,5 +1,5 @@
-#include <algorithm>
 #include <d3d11on12.h>
+#include <algorithm>
 #include "../../src/bridge/d3d12_bridge.hpp"
 #include "../../src/bridge/native_hooks.hpp"
 #include "../../src/graphics/native_device_identity.hpp"
@@ -921,6 +921,7 @@ void native_case(bool warp,
     device->QueryInterface(IID_PPV_ARGS(messages.put()));
   // These common graphics objects predate exe.xml companion startup.
   GradientGenerator generator(device.get());
+  ClearStatePipeline preexisting_srgb(device.get(), false, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB);
   D3D12_COMMAND_QUEUE_DESC qd{};
   qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
   Reference<ID3D12CommandQueue> queue;
@@ -930,47 +931,86 @@ void native_case(bool warp,
   check(device->CreateCommandAllocator(qd.Type, IID_PPV_ARGS(allocator.put())), "Pre-existing allocator");
   check(device->CreateCommandList(0, qd.Type, allocator.get(), nullptr, IID_PPV_ARGS(list.put())), "Pre-existing list");
   check(list->Close(), "Close pre-existing list");
-  // Display textures and views exist before late companion attach.
-  std::array<Reference<ID3D12Resource>, 4> textures;
+  // The complete ini allocation group and its typed application views exist
+  // before late companion attach. Other profiles retain their two-PFD fixture.
+  const UINT display_count = ini_a380 ? 8u : 2u;
+  std::array<Reference<ID3D12Resource>, 10> textures;
   D3D12_DESCRIPTOR_HEAP_DESC hd{};
   hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-  hd.NumDescriptors = 16;
+  hd.NumDescriptors = 24;
   Reference<ID3D12DescriptorHeap> heap;
   check(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(heap.put())), "RTV heap");
   const auto stride = device->GetDescriptorHandleIncrementSize(hd.Type);
   const auto base = heap->GetCPUDescriptorHandleForHeapStart();
-  std::array<D3D12_CPU_DESCRIPTOR_HANDLE, 4> rtvs;
-  for (UINT i = 2; i < 4; ++i) {
-    auto d = texture_description(display_width, 1024, DXGI_FORMAT_R8G8B8A8_UNORM);
+  std::array<D3D12_CPU_DESCRIPTOR_HANDLE, 10> rtvs{};
+  const auto preexisting_format = [](UINT i) { return i >= 4 && i % 2 ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM; };
+  for (UINT i = 2; i < display_count + 2; ++i) {
+    auto d = texture_description(display_width, 1024, ini_a380 ? DXGI_FORMAT_R8G8B8A8_TYPELESS : DXGI_FORMAT_R8G8B8A8_UNORM);
     d.MipLevels = profile.mips ? profile.mips : 1;
     create_texture(device.get(), d, textures[i].put());
     D3D12_RENDER_TARGET_VIEW_DESC view{};
-    view.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    view.Format = preexisting_format(i);
     view.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
-    rtvs[i] = {base.ptr + SIZE_T{i} * stride};
+    rtvs[i] = {base.ptr + SIZE_T{i < 4 ? i : 16 + i - 4} * stride};
     device->CreateRenderTargetView(textures[i].get(), &view, rtvs[i]);
   }
   require(win::initialize_graphics(device.get()), win::graphics_status().error);
   require(win::graphics_status().device == reinterpret_cast<std::uint64_t>(native_device.get()), "Bridge owns the resolved device");
   require(win::initialize_graphics(native_device.get()) && win::initialize_graphics(device.get()),
           "Repeated initialization shares one native registry through either interface");
-  win::set_aircraft_profile(profile.id);
+  win::set_aircraft_profile(ini_a380 ? taxi_camera::profiles::A380.id : profile.id);
   check(list->Reset(allocator.get(), nullptr), "Observe first actual Reset of pre-existing list");
   require(win::pfd_inventory().empty(), "Late attach starts with no pre-existing inventory");
-  for (UINT i = 2; i < 4; ++i) {
+  if (ini_a380) {
+    for (UINT i = 2; i < 4; ++i) {
+      transition(list.get(), textures[i].get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+      transition(list.get(), textures[i].get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+      list->OMSetRenderTargets(1, &rtvs[i], FALSE, nullptr);
+    }
+    require(win::pfd_inventory().empty(), "Initial FBW profile excludes already-observed ini display resources");
+    win::set_aircraft_profile(profile.id);
+    require(win::pfd_inventory().size() == 2, "Profile switch admits resources first observed under FBW");
+  }
+  constexpr std::array<UINT, 8> first_use_order{2, 3, 7, 4, 9, 5, 8, 6};
+  for (UINT observed = 0; observed < display_count; ++observed) {
+    const UINT i = first_use_order[observed];
     transition(list.get(), textures[i].get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     transition(list.get(), textures[i].get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
     list->OMSetRenderTargets(1, &rtvs[i], FALSE, nullptr);
+    if (ini_a380) {
+      if (preexisting_format(i) == DXGI_FORMAT_R8G8B8A8_UNORM)
+        generator.record(list.get(), rtvs[i], display_width, 1024, false, 0, 0);
+      else {
+        list->SetPipelineState(preexisting_srgb.pipeline.get());
+        list->SetGraphicsRootSignature(preexisting_srgb.root.get());
+        const UINT constants[]{64, 64, 0, 0};
+        list->SetGraphicsRoot32BitConstants(0, 4, constants, 0);
+        const D3D12_VIEWPORT viewport{0, 0, 1, 1, 0, 1};
+        const D3D12_RECT scissor{0, 0, 1, 1};
+        list->RSSetViewports(1, &viewport);
+        list->RSSetScissorRects(1, &scissor);
+        list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        list->DrawInstanced(3, 1, 0, 0);
+      }
+    }
   }
-  require(win::pfd_inventory().size() == 2, "Learn-on-use admits pre-existing display textures");
+  require(win::pfd_inventory().size() == display_count, "Learn-on-use admits every pre-existing display texture");
+  if (ini_a380)
+    for (const auto& item : win::pfd_inventory())
+      require(item.draws != 0, "All eight pre-existing typeless displays recover their actual application RTV association");
   win::discover_pfds(GetTickCount64());
   const auto learned_pair = win::target_ids();
   if (profile.pfd_detection == taxi_camera::profiles::PfdDetectionPolicy::dominant_activity) {
     require(learned_pair[0] && learned_pair[1] && learned_pair[0] != learned_pair[1],
             "Exactly two learned displays adopt so ready and calibration have targets");
   } else {
-    require(learned_pair[0] == 0 && learned_pair[1] == 0,
-            "Allocation-group profiles do not adopt a partial two-texture list");
+    std::array<std::uint64_t, 8> learned_ids{};
+    const auto learned = win::pfd_inventory();
+    for (std::size_t i = 0; i < learned.size(); ++i)
+      learned_ids[i] = learned[i].id;
+    std::sort(learned_ids.begin(), learned_ids.end());
+    require(learned_pair == std::array<std::uint64_t, 2>{learned_ids[7], learned_ids[5]},
+            "Complete late-discovered ini group retains automatic last and third-last selection");
   }
   const auto key = win::graphics_status().device;
   const auto successful_copies = [] {
@@ -1003,25 +1043,43 @@ void native_case(bool warp,
                           {reinterpret_cast<std::uint64_t>(textures[0].get()), reinterpret_cast<std::uint64_t>(textures[1].get())}),
           "Native source creation identities published");
   const auto inventory = win::pfd_inventory();
-  require(inventory.size() == 2, "Two native PFD candidates");
-  // IDs are monotonically assigned at creation, but unordered inventory order
-  // is not a side label. Bind the first created PFD to the left for this oracle.
-  const auto first = std::min(inventory[0].id, inventory[1].id);
-  const auto second = std::max(inventory[0].id, inventory[1].id);
+  require(inventory.size() == display_count, "Complete native display inventory");
+  // Late discovery IDs follow first use, so explicitly choose the two original
+  // UNORM views for the complete camera and calibration pixel oracle below.
+  std::vector<std::uint64_t> display_ids;
+  for (const auto& item : inventory)
+    display_ids.push_back(item.id);
+  std::sort(display_ids.begin(), display_ids.end());
+  const auto first = display_ids[0], second = display_ids[1];
   require(win::assign_targets(first, second), "Explicit PFD pair");
   require(!win::assign_targets(inventory[0].id, inventory[0].id), "Reject duplicate PFD identity");
   win::set_aircraft_profile(profile.id);
   require(win::target_ids() == std::array<std::uint64_t, 2>{}, "Same-aircraft session clears old display bindings");
-  require(win::pfd_inventory().size() == 2, "Same-aircraft session preserves live resource incarnations");
+  require(win::pfd_inventory().size() == display_count, "Same-aircraft session preserves live resource incarnations");
   require(win::assign_targets(first, second), "Same-aircraft session reacquires existing displays");
   win::set_aircraft_profile(a350 ? taxi_camera::profiles::A380.id : taxi_camera::profiles::A359.id);
   require(win::target_ids() == std::array<std::uint64_t, 2>{} && win::pfd_inventory().empty(),
           "Other aircraft profile releases bindings and rejects previous display dimensions");
   require(!win::assign_targets(first, second), "Previous aircraft display IDs cannot bind the other profile");
   win::set_aircraft_profile(profile.id);
-  require(win::target_ids() == std::array<std::uint64_t, 2>{} && win::pfd_inventory().size() == 2,
+  require(win::target_ids() == std::array<std::uint64_t, 2>{} && win::pfd_inventory().size() == display_count,
           "Profile round trip returns to unbound eligible displays");
   require(win::assign_targets(first, second), "Profile round trip reacquires existing displays");
+  for (const auto& item : win::pfd_inventory())
+    require(item.draws == 0, "Reconnect starts display discovery with fresh activity");
+  // Reconnect discarded the old late-bind evidence. Observe each original
+  // opaque descriptor again through native RT entry and OM binding before
+  // switching to the copied, creation-proven descriptors below.
+  for (UINT observed = 0; observed < display_count; ++observed) {
+    const UINT i = first_use_order[observed];
+    transition(list.get(), textures[i].get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    transition(list.get(), textures[i].get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    const D3D12_CPU_DESCRIPTOR_HANDLE original{base.ptr + SIZE_T{i < 4 ? i : 16 + i - 4} * stride};
+    list->OMSetRenderTargets(1, &original, FALSE, nullptr);
+  }
+  const D3D12_CPU_DESCRIPTOR_HANDLE original_left{base.ptr + 2 * stride}, original_right{base.ptr + 3 * stride};
+  device->CopyDescriptorsSimple(1, rtvs[2], original_left, hd.Type);
+  device->CopyDescriptors(1, &rtvs[3], nullptr, 1, &original_right, nullptr, hd.Type);
 
   auto submit = [&] {
     check(list->Close(), "Close application recording");
@@ -1075,9 +1133,19 @@ void native_case(bool warp,
     const auto delivered = win::graphics_status();
     require(delivered.preferred_copy_stamps == cold.preferred_copy_stamps &&
                 delivered.recording_end_draws == cold.recording_end_draws + 1 && runtime::snapshot(key).stamps == before_cold.stamps + 1,
-            "Absent private patch preserves terminal Close fallback");
+            "Recovered target with current-record RT entry receives an owned terminal camera draw when its private patch is cold");
     win::set_target_mask(0);
     reset();
+  }
+  // The broad graphics-state regressions below intentionally exercise normal
+  // typed-view Close fallback without a resource transition. Observe actual
+  // application descriptor creation for these copied handles; retain the
+  // untouched original handles for recovered-view safety and calibration.
+  for (UINT side = 0; side < 2; ++side) {
+    D3D12_RENDER_TARGET_VIEW_DESC view{};
+    view.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    view.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+    device->CreateRenderTargetView(textures[side + 2].get(), &view, rtvs[side + 2]);
   }
   const auto delivery_baseline = runtime::snapshot(key).stamps;
   // OBS Game Capture uses D3D11On12 to copy the swap-chain backbuffer on the
@@ -1621,6 +1689,7 @@ void native_case(bool warp,
     if (!side)
       reference_patch.assign(data, data + bytes);
     std::uint64_t border_pixels = 0, gs_padding_pixels = 0, gs_label_pixels = 0, guide_pixels = 0, tail_guide_pixels = 0;
+    unsigned square_corner_mask = 0;
     for (UINT y = 0; y < 1024; ++y)
       for (UINT x = 0; x < display_width; ++x) {
         const auto* pixel = data + SIZE_T{y} * footprint.Footprint.RowPitch + 4 * x;
@@ -1678,17 +1747,22 @@ void native_case(bool warp,
           }
           // These pixels verify configured coordinates, not alignment to aircraft geometry.
           if (a350 && (working_x == 199 || working_x == 568) && working_y == 697) {
-            require(pixel[0] > 250 && pixel[1] > 135 && pixel[1] < 145 && pixel[2] < 3,
-                    "Configured A350 lower bracket corners render on both sides");
+            require(pixel[0] > 250 && pixel[1] < 3 && pixel[2] > 250, "Configured A350 lower bracket corners render on both sides");
             ++tail_guide_pixels;
           }
           if (a350 && ((working_x == 234 && working_y == 637) || ((working_x == 207 || working_x == 560) && working_y == 728)))
             require(pixel[2] >= 202 && pixel[2] <= 206, "Old A350 bracket position is camera imagery");
           if (working_x >= 106 && working_x <= 109 && working_y >= 121 && working_y <= 123) {
-            require(pixel[0] > 250 && (a350 ? pixel[1] > 135 && pixel[1] < 145 && pixel[2] < 3 : pixel[2] > 250),
-                    "Aircraft reference marker scales with inset content in both axes");
+            require(pixel[0] > 250 && pixel[1] < 3 && pixel[2] > 250, "Aircraft reference marker scales with inset content in both axes");
             ++guide_pixels;
           }
+          constexpr std::array<std::array<unsigned, 2>, 4> square_corners{{{102, 116}, {113, 127}, {654, 116}, {665, 127}}};
+          for (unsigned corner = 0; corner < square_corners.size(); ++corner)
+            if (working_x == square_corners[corner][0] && working_y == square_corners[corner][1]) {
+              require(pixel[0] > 250 && pixel[1] < 3 && pixel[2] > 250,
+                      "Both default magenta nose squares retain corners outside the former circle radius");
+              square_corner_mask |= 1u << corner;
+            }
         }
         if (y >= 763) {
           const UINT blue = side ? 153 : 51;
@@ -1697,7 +1771,7 @@ void native_case(bool warp,
         ++pixels;
       }
     require(border_pixels == (a350 ? 33704u : 33248u), "Exact black border coverage on each PFD");
-    require(gs_padding_pixels && gs_label_pixels && guide_pixels && (!a350 || tail_guide_pixels >= 2),
+    require(gs_padding_pixels && gs_label_pixels && guide_pixels && square_corner_mask == 15 && (!a350 || tail_guide_pixels >= 2),
             "Inset GS/guide pixel checks were not exercised");
     const D3D12_RANGE none{0, 0};
     readbacks[side]->Unmap(0, &none);
@@ -2181,6 +2255,7 @@ void native_case(bool warp,
   adjusted.tail_upper = {.18f, .30f};
   adjusted.tail_corner = {.16f, .55f};
   adjusted.tail_inner = {.26f, .56f};
+  adjusted.guide_color = {32.f / 255, 174.f / 255, 224.f / 255};
   runtime::set_composition(key, adjusted);
   const auto frames_before_guides = runtime::snapshot(key).frames;
   Sleep(20);  // Next permitted capture opportunity, without recreating either source.
@@ -2205,7 +2280,7 @@ void native_case(bool warp,
                  status.capture.captures, status.capture.completed, status.capture.tail_status, status.message);
   }
   require(runtime::snapshot(key).output && runtime::snapshot(key).frames > frames_before_guides,
-          "Changed guide layout reaches a fresh running composition");
+          "Changed guide layout and color reach a fresh running composition");
   const auto source_after = handoff.observe_copy(key, source_handles[0], source_handles[1]);
   for (const auto& pair :
        {std::pair{source_before.source, source_after.source}, std::pair{source_before.destination, source_after.destination}})
@@ -2263,7 +2338,7 @@ void native_case(bool warp,
     check(readbacks[side]->Map(0, &range, &mapped), "Map live guide adjustment pixels");
     const auto* data = static_cast<const unsigned char*>(mapped);
     const UINT left = a350 && side ? 838u : 0u, width = a350 ? 806u : 768u, inner_left = left + 16, inner_width = width - 32;
-    unsigned new_mask = 0, old_mask = 0;
+    unsigned new_mask = 0, old_mask = 0, preserved_gs_pixels = 0;
     for (UINT y = 0; y < 1024; ++y)
       for (UINT x = 0; x < display_width; ++x) {
         const auto* pixel = data + SIZE_T{y} * footprint.Footprint.RowPitch + 4 * x;
@@ -2281,10 +2356,15 @@ void native_case(bool warp,
         if (inner) {
           const double wx = std::floor((x - inner_left + .5) * 768 / inner_width) + .5;
           const double wy = std::floor((y - 12 + .5) * 763 / 751) + .5;
+          if (wx >= 16 && wx < 128 && wy >= 12 && wy < 48) {
+            const auto* original = reference_patch.data() + SIZE_T{y} * footprint.Footprint.RowPitch + 4 * (x - left);
+            require(std::equal(original, original + 4, pixel), "Live guide color leaves the complete GS panel and glyph colors unchanged");
+            ++preserved_gs_pixels;
+          }
           for (unsigned mark = 0; mark < new_points.size(); ++mark) {
             if (std::abs(wx - new_points[mark][0]) < 1 && std::abs(wy - new_points[mark][1]) < 1) {
-              require(pixel[0] > 250 && (a350 ? pixel[1] > 135 && pixel[1] < 145 && pixel[2] < 3 : pixel[1] < 3 && pixel[2] > 250),
-                      "Every adjusted nose dot and mirrored L endpoint appears at its new position");
+              require(std::abs(int(pixel[0]) - 32) <= 1 && std::abs(int(pixel[1]) - 174) <= 1 && std::abs(int(pixel[2]) - 224) <= 1,
+                      "Every adjusted nose square and mirrored L endpoint receives the selected RGB guide color");
               new_mask |= 1u << mark;
             }
             if (std::abs(wx - old_points[mark][0]) < 1 && std::abs(wy - old_points[mark][1]) < 1) {
@@ -2296,19 +2376,51 @@ void native_case(bool warp,
         }
         ++pixels;
       }
-    require(new_mask == 255 && old_mask == 255, "Live adjustment checks every old and new mirrored endpoint on each PFD");
+    require(new_mask == 255 && old_mask == 255 && preserved_gs_pixels > 3500,
+            "Live adjustment checks every old/new mirrored endpoint and unchanged GS panel on each PFD");
     readbacks[side]->Unmap(0, &none);
   }
   runtime::set_composition(key, profile.composition);
   win::set_target_mask(0);
   reset();
+  // Return to the original opaque application descriptors. Their recovered
+  // association cannot itself authorize a write without current RT evidence.
+  rtvs[2] = {base.ptr + 2 * stride};
+  rtvs[3] = {base.ptr + 3 * stride};
+  const auto no_entry_stamps = runtime::snapshot(key).stamps;
+  const auto no_entry_clears = win::graphics_status().calibration_clears;
+  win::set_target_mask(3);
+  for (UINT side = 0; side < 2; ++side)
+    generator.record(list.get(), rtvs[side + 2], display_width, 1024, false, 0, 0);
+  submit();
+  require(runtime::snapshot(key).stamps == no_entry_stamps && win::graphics_status().calibration_clears == no_entry_clears,
+          "Recovered OM handles without current-record RT entry cannot authorize terminal camera writes");
+  win::set_target_mask(0);
+  reset();
+  win::set_calibration(3, 4096);
+  for (UINT side = 0; side < 2; ++side) {
+    generator.record(list.get(), rtvs[side + 2], display_width, 1024, false, 0, 0);
+    if (!side)
+      list->OMSetRenderTargets(1, &clear_rtv, FALSE, nullptr);
+  }
+  submit();
+  require(runtime::snapshot(key).stamps == no_entry_stamps && win::graphics_status().calibration_clears == no_entry_clears,
+          "Recovered OM handles without current-record RT entry cannot authorize calibration at OM or Close");
+  win::set_calibration(0, 4096);
+  reset();
+  for (UINT side = 0; side < 2; ++side)
+    transition(list.get(), textures[side + 2].get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+  submit();
+  reset();
   // Calibration is clear-only on the actual draw recording, so it remains
-  // available when its later RT exit is recorded on a separate barrier list.
+  // available without a later RT exit in that recording. One complete RT entry
+  // before each draw proves the recovered resource is currently writable.
   win::set_calibration(3, 4096);
   const auto calibration_before = win::graphics_status().calibration_clears;
   const auto copies_before_calibration = runtime::snapshot(key).stamps;
   const float calibration_background[]{.125f, .25f, .5f, 1};
   for (UINT side = 0; side < 2; ++side) {
+    transition(list.get(), textures[side + 2].get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
     list->ClearRenderTargetView(rtvs[side + 2], calibration_background, 0, nullptr);
     list->SetPipelineState(cleared.pipeline.get());
     list->SetGraphicsRootSignature(cleared.root.get());
@@ -2390,6 +2502,14 @@ void native_case(bool warp,
   }
   require(errors == 0, "D3D12 validation errors");
   if (ini_a380) {
+    // This separate probe needs an ordinary creation-order group, independent
+    // of the pre-existing resources whose IDs were assigned on first use.
+    for (UINT i = 2; i < display_count + 2; ++i) {
+      textures[i].get()->Release();
+      *textures[i].put() = nullptr;
+    }
+    win::discover_pfds(GetTickCount64());
+    require(win::pfd_inventory().empty(), "Retire late-discovered group before creation-order detection probe");
     win::set_aircraft_profile(profile.id);
     require(win::assign_targets(0, 0), "Clear explicit sides before the complete allocation-group probe");
     check(allocator->Reset(), "Allocator Reset for allocation-group probe");
@@ -2421,17 +2541,18 @@ void native_case(bool warp,
     const auto complete_pair = win::target_ids();
     require(complete_pair[0] == group_ids[7] && complete_pair[1] == group_ids[5],
             "Complete idle allocation group adopts last/third-last so ready and calibration have targets");
-    require(win::assign_targets(group_ids[0], 0), "Stale singleton that is not a PFD side");
+    require(win::assign_targets(group_ids[0], 0), "Explicit singleton outside the automatic ranked pair");
     win::discover_pfds(GetTickCount64());
     const auto recovered = win::target_ids();
-    require(recovered[0] == group_ids[7] && recovered[1] == group_ids[5],
-            "assigned_ singleton that is not last/third-last is replaced by the allocation pair");
+    require(recovered[0] == group_ids[0] && recovered[1] == 0,
+            "Explicit singleton remains selected while the unassigned side waits for compatible automatic evidence");
   }
   std::printf(
       "PASS native %s: private patch copies, legacy/enhanced boundaries, replay, profile-admitted typed formats, query OFF==ON, exact "
       "black borders, "
       "inset "
-      "GS/guides, live guide adjustment on retained sources, A350 gutter/ND, lower trim, descriptor copies, "
+      "GS/guides, live guide position/color adjustment on retained sources, unchanged GS color, A350 gutter/ND, lower trim, descriptor "
+      "copies, "
       "OFF, D3D11On12 capture coexistence, ClearState and active-render-pass state pixels, predicate guards; %llu pixels; debug=%d "
       "errors=%llu\n",
       warp ? "WARP" : "hardware", static_cast<unsigned long long>(pixels), debug_enabled, static_cast<unsigned long long>(errors));

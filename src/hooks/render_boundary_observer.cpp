@@ -129,7 +129,9 @@ struct MetadataScope {
   void* context;
   void (*end)(void*, ID3D12GraphicsCommandList*, std::uint64_t) noexcept;
   MetadataScope(ID3D12GraphicsCommandList* value, std::uint64_t id) noexcept
-      : list(value), generation(id), context(callbacks.context),
+      : list(value),
+        generation(id),
+        context(callbacks.context),
         end(callbacks.metadata_begin && callbacks.metadata_end ? callbacks.metadata_end : nullptr) {
     if (end)
       callbacks.metadata_begin(context, list, generation);
@@ -402,6 +404,7 @@ void STDMETHODCALLTYPE begin(ID3D12GraphicsCommandList4* list,
   }
   const Guard guard;
   const auto identity = lookup(list);
+  bool ordinary_access = false;
   if (identity.generation) {
     const Lock lock(registry_lock, true);
     const auto it = identities.find(list);
@@ -414,14 +417,15 @@ void STDMETHODCALLTYPE begin(ID3D12GraphicsCommandList4* list,
       // PRESERVE_LOCAL passes permit state setup between passes, but no added
       // GPU operations. Refuse their entire recording rather than inferring a
       // resource's local-access lifetime from later barrier state alone.
-      if (count > 8 || (count && !targets))
-        value.invalid = true;
-      else
+      ordinary_access = count <= 8 && (!count || targets);
+      if (ordinary_access)
         for (UINT n = 0; n < count; ++n)
           if (static_cast<UINT>(targets[n].BeginningAccess.Type) > 3 || static_cast<UINT>(targets[n].EndingAccess.Type) > 3)
-            value.invalid = true;
+            ordinary_access = false;
       if (depth && (static_cast<UINT>(depth->DepthBeginningAccess.Type) > 3 || static_cast<UINT>(depth->DepthEndingAccess.Type) > 3 ||
                     static_cast<UINT>(depth->StencilBeginningAccess.Type) > 3 || static_cast<UINT>(depth->StencilEndingAccess.Type) > 3))
+        ordinary_access = false;
+      if (!ordinary_access)
         value.invalid = true;
       // A resuming pass can continue another command list. Only its completed,
       // nonsuspending End permits capture again; no intervening copy is added.
@@ -431,6 +435,8 @@ void STDMETHODCALLTYPE begin(ID3D12GraphicsCommandList4* list,
       value.suspended = (flags & D3D12_RENDER_PASS_FLAG_SUSPENDING_PASS) != 0;
     }
   }
+  if (identity.generation && callbacks.pass_began)
+    callbacks.pass_began(callbacks.context, list, identity.generation, flags, ordinary_access);
   if (identity.generation && callbacks.pass_targets)
     callbacks.pass_targets(callbacks.context, list, identity.generation, count, targets, depth);
   const auto after_begin_state = lookup(list);
@@ -536,6 +542,8 @@ void STDMETHODCALLTYPE enhanced(ID3D12GraphicsCommandList7* list, UINT count, co
   }
   const Guard guard;
   const auto identity = lookup(list);
+  if (identity.generation && callbacks.enhanced_call)
+    callbacks.enhanced_call(callbacks.context, list, identity.generation);
   if (identity.generation)
     ++enhanced_calls;
   auto uncertainty = scope_invalidation(identity);
@@ -700,7 +708,8 @@ bool same_callbacks(const Callbacks& a, const Callbacks& b) noexcept {
          a.observe_legacy == b.observe_legacy && a.observe_enhanced == b.observe_enhanced &&
          a.after_copy_resource == b.after_copy_resource && a.after_copy_texture == b.after_copy_texture && a.after_draw == b.after_draw &&
          a.recording_invalidated == b.recording_invalidated && a.pass_targets == b.pass_targets && a.pass_ended == b.pass_ended &&
-         a.selected_legacy_targets == b.selected_legacy_targets && a.metadata_begin == b.metadata_begin && a.metadata_end == b.metadata_end;
+         a.selected_legacy_targets == b.selected_legacy_targets && a.metadata_begin == b.metadata_begin &&
+         a.metadata_end == b.metadata_end && a.pass_began == b.pass_began && a.enhanced_call == b.enhanced_call;
 }
 bool install_active_end(ID3D12GraphicsCommandList4* list) noexcept {
   {

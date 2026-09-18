@@ -15,6 +15,9 @@ struct PfdTargetObservation {
   std::uint32_t height = 0;
   std::uint32_t levels = 0;
   std::uint32_t format = 0;
+  // Completed, fully proven RT-exit submissions; never reported as native draws.
+  // The caller excludes stale/aliased/unproven resource incarnations.
+  std::uint64_t submission_activity = 0;
 };
 
 enum class PfdTargetConfidence { none, stabilizing, confirmed };
@@ -49,6 +52,7 @@ class PfdTargetDetector {
   void reset() noexcept {
     previous_count_ = 0;
     baseline_valid_ = false;
+    submission_mode_ = false;
     clear("warming_up");
   }
 
@@ -66,6 +70,18 @@ class PfdTargetDetector {
       clear("incomplete_inventory", true);
       return detection_;
     }
+    bool has_draws = false, has_submission_activity = false;
+    for (std::size_t i = 0; i < count; ++i) {
+      const auto& value = observations[i];
+      if (profiles::matches_display(*profile_, value.width, value.height, value.levels, value.format)) {
+        has_draws |= value.draws != 0;
+        has_submission_activity |= value.submission_activity != 0;
+      }
+    }
+    // Keep ordinary zero-to-first-draw startup on its existing baseline. Once
+    // submitted exits become the only evidence, retain that counter source
+    // through an all-zero rollback so the existing reset guard can detect it.
+    const bool submission_mode = !has_draws && (has_submission_activity || submission_mode_);
     std::size_t current_count = 0;
     for (std::size_t i = 0; i < count; ++i) {
       const auto& value = observations[i];
@@ -76,7 +92,7 @@ class PfdTargetDetector {
         clear("invalid_input", true);
         return detection_;
       }
-      current_[current_count++] = {value.id, value.draws, value.format};
+      current_[current_count++] = {value.id, submission_mode ? value.submission_activity : value.draws, value.format};
     }
     std::sort(current_.begin(), current_.begin() + current_count, [](const Counter& a, const Counter& b) { return a.id < b.id; });
     for (std::size_t i = 1; i < current_count; ++i) {
@@ -85,6 +101,13 @@ class PfdTargetDetector {
         clear("duplicate_id", true);
         return detection_;
       }
+    }
+    const bool changed_source = baseline_valid_ && submission_mode != submission_mode_;
+    submission_mode_ = submission_mode;
+    if (changed_source) {
+      clear("activity_source_changed", profile_->pfd_detection == profiles::PfdDetectionPolicy::ini_a380_allocation_group);
+      seed(current_count, now_ms);
+      return detection_;
     }
     if (profile_->pfd_detection == profiles::PfdDetectionPolicy::ini_a380_allocation_group)
       return observe_allocation_group(current_count, now_ms);
@@ -133,7 +156,11 @@ class PfdTargetDetector {
       clear("incomparable_rates");
       return detection_;
     }
-    if (busiest[1].draws <= busiest[2].draws || busiest[1].draws - busiest[2].draws <= busiest[2].draws / 2) {
+    // A350 power-up has a third active display close behind both PFDs. Its
+    // measured activity breaks the FBW 50% lead despite a stable leading pair.
+    // Require a 25% lead for A350, retaining three stable windows and ID sides.
+    const unsigned lead_divisor = profile_->id == profiles::A359.id || profile_->id == profiles::A35K.id ? 4u : 2u;
+    if (busiest[1].draws <= busiest[2].draws || busiest[1].draws - busiest[2].draws <= busiest[2].draws / lead_divisor) {
       clear("ambiguous_activity");
       return detection_;
     }
@@ -235,6 +262,7 @@ class PfdTargetDetector {
   std::size_t previous_count_ = 0;
   std::uint64_t baseline_ms_ = 0;
   bool baseline_valid_ = false;
+  bool submission_mode_ = false;
   std::array<std::uint64_t, 2> pending_{};
   PfdTargetDetection detection_{};
 };

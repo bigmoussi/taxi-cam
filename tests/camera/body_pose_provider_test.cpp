@@ -10,6 +10,61 @@
 using namespace taxi_camera::native_camera;
 namespace {
 #ifdef TAXI_BODY_POSE_PROVIDER_TESTING
+template <class Check>
+void blocked_worker_lifecycle(Check check) {
+  namespace testing = body_pose_provider_testing;
+  struct BlockedWorker {
+    HANDLE entered{}, release{}, stop{};
+    static DWORD WINAPI run(void* opaque) {
+      const auto& self = *static_cast<BlockedWorker*>(opaque);
+      SetEvent(self.entered);
+      // Model an SDK call that does not respond to the provider's stop event.
+      // Its independent deadline bounds this test even if shutdown regresses.
+      return WaitForSingleObject(self.release, 5000) == WAIT_OBJECT_0 && WaitForSingleObject(self.stop, 0) == WAIT_OBJECT_0 ? 0 : 1;
+    }
+  } blocked;
+  check(select_aircraft_profile(1));
+  blocked.entered = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+  blocked.release = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+  blocked.stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+  check(blocked.entered && blocked.release && blocked.stop);
+  const auto worker = CreateThread(nullptr, 0, BlockedWorker::run, &blocked, 0, nullptr);
+  check(worker && WaitForSingleObject(blocked.entered, 2000) == WAIT_OBJECT_0);
+  check(testing::install_worker(worker, blocked.stop));
+  const auto before = testing::lifecycle_snapshot();
+  check(before.worker && before.stop && before.profile == 1);
+  check(initialize_body_pose_provider());
+  const auto began = GetTickCount64();
+  check(!shutdown_body_pose_provider());
+  check(GetTickCount64() - began < 250 && WaitForSingleObject(worker, 0) == WAIT_TIMEOUT);
+  check(WaitForSingleObject(blocked.stop, 0) == WAIT_OBJECT_0);
+  for (unsigned attempt = 0; attempt < 8; ++attempt) {
+    check(!initialize_body_pose_provider());
+    check(!select_aircraft_profile(2));
+    check(!select_aircraft_profile(1));
+    check(!shutdown_body_pose_provider());
+    const auto pending = testing::lifecycle_snapshot();
+    check(pending.worker == before.worker && pending.stop == before.stop && pending.profile == before.profile);
+  }
+  check(GetTickCount64() - began < 250);
+  // Even while shutdown is pending, snapshots/cache reads and the independent
+  // worker remain available. No new-profile commit or replacement worker ran.
+  DWORD flags{};
+  check(GetHandleInformation(reinterpret_cast<HANDLE>(before.worker), &flags) != FALSE);
+  check(GetHandleInformation(reinterpret_cast<HANDLE>(before.stop), &flags) != FALSE);
+  check(SetEvent(blocked.release) != FALSE && WaitForSingleObject(worker, 2000) == WAIT_OBJECT_0);
+  DWORD result = 1;
+  check(GetExitCodeThread(worker, &result) != FALSE && result == 0);
+  check(select_aircraft_profile(2));
+  const auto stopped = testing::lifecycle_snapshot();
+  check(!stopped.worker && !stopped.stop && stopped.profile == 2);
+  check(shutdown_body_pose_provider() && shutdown_body_pose_provider());
+  check(select_aircraft_profile(1));
+  CloseHandle(worker);
+  CloseHandle(blocked.entered);
+  CloseHandle(blocked.release);
+  CloseHandle(blocked.stop);
+}
 int offline_tests() {
   unsigned checks = 0;
   const auto check = [&](bool good) {
@@ -19,6 +74,7 @@ int offline_tests() {
       std::exit(1);
     }
   };
+  blocked_worker_lifecycle(check);
   namespace testing = body_pose_provider_testing;
   std::array<unsigned char, 96> packet{};
   const std::array<DWORD, 10> header{96, 0, 8, 1, 0, 1, 0, 0, 1, 7};
@@ -325,6 +381,15 @@ int offline_tests() {
   return 0;
 }
 #endif
+bool stop_live_provider() {
+  const auto began = GetTickCount64();
+  do {
+    if (shutdown_body_pose_provider())
+      return true;
+    Sleep(1);
+  } while (GetTickCount64() - began < 2000);
+  return false;
+}
 int live_ground_speed() {
   if (!initialize_body_pose_provider())
     return 1;
@@ -347,8 +412,7 @@ int live_ground_speed() {
     std::printf("null");
   std::printf(",\"error\":\"%s\",\"body_uncalibrated\":%s,\"body_calibration_required\":%s,\"body_error\":\"%s\"}\n", speed.error,
               uncalibrated ? "true" : "false", body.calibration_required ? "true" : "false", body.error);
-  shutdown_body_pose_provider();
-  return good ? 0 : 1;
+  return stop_live_provider() && good ? 0 : 1;
 }
 int live_lighting() {
   if (!initialize_body_pose_provider())
@@ -370,8 +434,7 @@ int live_lighting() {
   const bool good = light.valid && count >= 3 && get_ground_speed().valid;
   std::printf("{\"passed\":%s,\"samples\":%u,\"ambient\":%.17g,\"brightness\":%.17g,\"error\":\"%s\"}\n", good ? "true" : "false", count,
               light.valid ? light.ambient : -1, light.valid ? light.brightness : -1, light.error);
-  shutdown_body_pose_provider();
-  return good ? 0 : 1;
+  return stop_live_provider() && good ? 0 : 1;
 }
 }  // namespace
 int main(int argc, char** argv) {
@@ -434,7 +497,6 @@ int main(int argc, char** argv) {
       sample.pose.up[2], sample.pose.forward[0], sample.pose.forward[1], sample.pose.forward[2]);
   reset_body_pose_calibration();
   good = good && !sample_body_pose(GetTickCount64()).valid;
-  shutdown_body_pose_provider();
-  good = good && !sample_body_pose(GetTickCount64()).valid;
+  good = stop_live_provider() && good && !sample_body_pose(GetTickCount64()).valid;
   return good ? 0 : 1;
 }

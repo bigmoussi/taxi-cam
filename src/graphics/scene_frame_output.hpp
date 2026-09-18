@@ -33,7 +33,7 @@ class SceneFrameOutput {
   // Intentionally retain GPU objects after publication: application recordings
   // may replay the stable buffer until process exit, beyond our own fence.
   ~SceneFrameOutput() = default;
-  bool initialize(ID3D12Device* device) noexcept;
+  bool initialize(ID3D12Device* device, bool calibration_only = false) noexcept;
   void set_gpu_timing_enabled(bool enabled) noexcept { gpu_timing_enabled_ = enabled; }
   // Composition, output-buffer copy, all requested patch draws/copies. These
   // never include native simulator scene rendering or application PFD copies.
@@ -59,6 +59,9 @@ class SceneFrameOutput {
   Patch patch(DXGI_FORMAT format, UINT width, UINT height, const D3D12_RECT& content) const noexcept;
   float display_exposure() const noexcept;
   bool prepare(ID3D12Resource* nose, DXGI_FORMAT nose_format, ID3D12Resource* tail, DXGI_FORMAT tail_format) noexcept;
+  // Separate retained output instance: no camera inputs or compositor shaders.
+  // Uses the same private submission lifetime and manager timeline contract.
+  bool prepare_calibration(std::uint64_t frame) noexcept;
   // Discard a closed prepared list which was NEVER submitted (e.g. the manager
   // refused a private transaction). Reset discards its command/descriptor uses
   // before later prepare may replace compositor input references.
@@ -75,7 +78,7 @@ class SceneFrameOutput {
 
  private:
   bool fail(const char* error) noexcept;
-  bool prepare_patches() noexcept;
+  bool prepare_patches(std::uint64_t calibration_frame = 0) noexcept;
   bool valid_patch_request(DXGI_FORMAT, UINT width, UINT height, const D3D12_RECT& content) const noexcept;
   struct PatchStorage {
     Patch view;
@@ -102,6 +105,7 @@ class SceneFrameOutput {
   D3D12_GPU_VIRTUAL_ADDRESS address_ = 0;
   std::uint64_t submitted_ = 0;
   bool prepared_ = false;
+  bool calibration_only_ = false;
   bool gpu_timing_enabled_ = false;
   OwnedGpuTiming<3> gpu_timing_;
   bool failed_ = false;

@@ -173,7 +173,8 @@ inline std::wstring read_small_text_file(const std::wstring& path) {
   if (bytes.size() >= 3 && static_cast<unsigned char>(bytes[0]) == 0xEF && static_cast<unsigned char>(bytes[1]) == 0xBB &&
       static_cast<unsigned char>(bytes[2]) == 0xBF)
     start = 3;
-  const int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, bytes.data() + start, static_cast<int>(bytes.size() - start), nullptr, 0);
+  const int n =
+      MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, bytes.data() + start, static_cast<int>(bytes.size() - start), nullptr, 0);
   if (n <= 0)
     return {};
   std::wstring text(static_cast<size_t>(n), L'\0');
@@ -349,11 +350,42 @@ struct LaunchResult {
   // begun, every result remains terminal for this companion session.
   bool retry_before_load = false;
 };
+struct LoaderWaitResult {
+  DWORD result = WAIT_TIMEOUT, error = ERROR_SUCCESS;
+  bool observed = false, cancelled = false;
+};
 struct LaunchDiagnostics {
   const wchar_t* phase = L"preflight";
   DWORD module_error = 0, loader_thread_result = 0, loader_result_error = 0;
+  DWORD loader_thread_id = 0, start_thread_id = 0, start_thread_result = 0, start_result_error = 0;
+  LoaderWaitResult loader_wait{}, start_wait{};
+  std::uint64_t started_ms{}, elapsed_ms{}, preflight_ms{}, load_create_ms{}, load_wait_ms{}, post_load_ms{}, export_ms{},
+      start_create_ms{}, start_wait_ms{};
   unsigned module_attempts = 0;
   bool load_started = false;
+};
+class LaunchTiming {
+ public:
+  explicit LaunchTiming(LaunchDiagnostics& trace) noexcept : trace_(trace), elapsed_(&trace.preflight_ms) {
+    phase_started_ = trace_.started_ms = GetTickCount64();
+  }
+  ~LaunchTiming() {
+    const auto now = GetTickCount64();
+    *elapsed_ += now - phase_started_;
+    trace_.elapsed_ms = now - trace_.started_ms;
+  }
+  void phase(const wchar_t* name, std::uint64_t& elapsed) noexcept {
+    const auto now = GetTickCount64();
+    *elapsed_ += now - phase_started_;
+    phase_started_ = now;
+    elapsed_ = &elapsed;
+    trace_.phase = name;
+  }
+
+ private:
+  LaunchDiagnostics& trace_;
+  std::uint64_t* elapsed_;
+  std::uint64_t phase_started_{};
 };
 class LaunchRetry {
  public:
@@ -393,14 +425,36 @@ class LaunchRetry {
   unsigned recoveries_{};
   std::uint64_t next_{};
 };
-inline DWORD wait_for_loader(HANDLE thread, const std::atomic<bool>* running) {
-  const auto deadline = GetTickCount64() + 30000;
-  while ((!running || running->load()) && GetTickCount64() < deadline) {
-    const auto result = WaitForSingleObject(thread, 100);
-    if (result != WAIT_TIMEOUT)
-      return result;
+inline LoaderWaitResult wait_for_loader(HANDLE thread, const std::atomic<bool>* running, DWORD timeout_ms = 30000) {
+  LoaderWaitResult wait;
+  const auto started = GetTickCount64();
+  for (;;) {
+    if (running && !running->load()) {
+      wait.cancelled = true;
+      return wait;
+    }
+    if (GetTickCount64() - started >= timeout_ms)
+      return wait;
+    wait.result = WaitForSingleObject(thread, 100);
+    wait.observed = true;
+    if (wait.result == WAIT_FAILED)
+      wait.error = GetLastError();
+    if (wait.result != WAIT_TIMEOUT)
+      return wait;
   }
-  return WAIT_TIMEOUT;
+}
+inline LaunchResult loader_wait_failure(const LoaderWaitResult& wait, bool starting_bridge) {
+  if (wait.cancelled)
+    return {false, ERROR_CANCELLED,
+            starting_bridge ? L"Stopped waiting for native bridge startup; startup may still finish."
+                            : L"Stopped waiting for bridge loading; the Windows load may still finish."};
+  if (wait.result == WAIT_TIMEOUT)
+    return {false, WAIT_TIMEOUT,
+            starting_bridge ? L"Native bridge startup is pending."
+                            : L"Bridge loading is still pending; no second load will be attempted this session."};
+  return {false, wait.error ? wait.error : ERROR_GEN_FAILURE,
+          starting_bridge ? L"Windows could not wait for native bridge startup. See launcher.log."
+                          : L"Windows could not wait for bridge loading. See launcher.log."};
 }
 inline LaunchResult load_bridge(DWORD pid,
                                 const std::wstring& expected_exe,
@@ -411,6 +465,7 @@ inline LaunchResult load_bridge(DWORD pid,
   LaunchDiagnostics local_diagnostics;
   auto& trace = diagnostics ? *diagnostics : local_diagnostics;
   trace = {};
+  LaunchTiming timing(trace);
   constexpr DWORD rights =
       PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ | SYNCHRONIZE;
   HANDLE process = OpenProcess(rights, FALSE, pid);
@@ -458,23 +513,26 @@ inline LaunchResult load_bridge(DWORD pid,
       VirtualFreeEx(process, memory, 0, MEM_RELEASE);
       return {false, e, L"Could not write the bridge path."};
     }
-    HANDLE thread = CreateRemoteThread(process, nullptr, 0, reinterpret_cast<LPTHREAD_START_ROUTINE>(loader), memory, 0, nullptr);
+    timing.phase(L"windows_loader_create", trace.load_create_ms);
+    HANDLE thread =
+        CreateRemoteThread(process, nullptr, 0, reinterpret_cast<LPTHREAD_START_ROUTINE>(loader), memory, 0, &trace.loader_thread_id);
     if (!thread) {
       const DWORD e = GetLastError();
       VirtualFreeEx(process, memory, 0, MEM_RELEASE);
       return {false, e, L"Windows refused to load the camera bridge."};
     }
     trace.load_started = true;
-    trace.phase = L"windows_loader";
-    const DWORD wait = wait_for_loader(thread, running);
-    if (wait == WAIT_OBJECT_0 && !GetExitCodeThread(thread, &trace.loader_thread_result))
+    timing.phase(L"windows_loader", trace.load_wait_ms);
+    trace.loader_wait = wait_for_loader(thread, running);
+    if (trace.loader_wait.observed && trace.loader_wait.result == WAIT_OBJECT_0 && !GetExitCodeThread(thread, &trace.loader_thread_result))
       trace.loader_result_error = GetLastError();
     CloseHandle(thread);
-    // The loader may still own this argument on timeout. Keep it until process exit.
-    if (wait != WAIT_OBJECT_0)
-      return {false, WAIT_TIMEOUT, L"Bridge loading is still pending; no second load will be attempted this session."};
+    // A pending, cancelled or failed wait cannot prove the loader released its
+    // argument. Keep it until process exit, without issuing another load.
+    if (trace.loader_wait.cancelled || !trace.loader_wait.observed || trace.loader_wait.result != WAIT_OBJECT_0)
+      return loader_wait_failure(trace.loader_wait, false);
     VirtualFreeEx(process, memory, 0, MEM_RELEASE);
-    trace.phase = L"after_load_module_scan";
+    timing.phase(L"after_load_module_scan", trace.post_load_ms);
     inventory = modules(pid, &trace.module_error, &trace.module_attempts);
     if (trace.module_error)
       return {false, trace.module_error, L"Windows finished the load attempt, but the bridge module check failed. See launcher.log."};
@@ -487,7 +545,7 @@ inline LaunchResult load_bridge(DWORD pid,
   // LoadLibraryW returns an HMODULE; its thread exit code retains only the low
   // 32 bits. Record it as a diagnostic, never use it as a module address or a
   // remote GetLastError value. Full module identity remains the authority.
-  trace.phase = L"bridge_export";
+  timing.phase(L"bridge_export", trace.export_ms);
   HMODULE local = LoadLibraryExW(dll.c_str(), nullptr, DONT_RESOLVE_DLL_REFERENCES);
   if (!local)
     return {false, GetLastError(), L"Cannot read the bridge's exported entry point."};
@@ -496,18 +554,24 @@ inline LaunchResult load_bridge(DWORD pid,
   FreeLibrary(local);
   if (offset >= bridge.bytes || !amd64_image(process, bridge))
     return {false, ERROR_INVALID_ADDRESS, L"Invalid native bridge entry point."};
-  HANDLE thread =
-      CreateRemoteThread(process, nullptr, 0, reinterpret_cast<LPTHREAD_START_ROUTINE>(bridge.base + offset), nullptr, 0, nullptr);
+  timing.phase(L"bridge_start_create", trace.start_create_ms);
+  HANDLE thread = CreateRemoteThread(process, nullptr, 0, reinterpret_cast<LPTHREAD_START_ROUTINE>(bridge.base + offset), nullptr, 0,
+                                     &trace.start_thread_id);
   if (!thread)
     return {false, GetLastError(), L"Cannot start the loaded bridge."};
-  trace.phase = L"bridge_start";
-  const DWORD wait = wait_for_loader(thread, running);
+  timing.phase(L"bridge_start", trace.start_wait_ms);
+  trace.start_wait = wait_for_loader(thread, running);
   DWORD result = ERROR_GEN_FAILURE;
-  if (wait == WAIT_OBJECT_0)
-    GetExitCodeThread(thread, &result);
+  if (trace.start_wait.observed && trace.start_wait.result == WAIT_OBJECT_0) {
+    if (!GetExitCodeThread(thread, &result))
+      trace.start_result_error = GetLastError();
+    trace.start_thread_result = result;
+  }
   CloseHandle(thread);
-  if (wait != WAIT_OBJECT_0)
-    return {false, WAIT_TIMEOUT, L"Native bridge startup is pending."};
+  if (trace.start_wait.cancelled || !trace.start_wait.observed || trace.start_wait.result != WAIT_OBJECT_0)
+    return loader_wait_failure(trace.start_wait, true);
+  if (trace.start_result_error)
+    return {false, trace.start_result_error, L"Cannot read the native bridge startup result. See launcher.log."};
   if (result)
     return {false, result, L"The native bridge refused startup."};
   trace.phase = L"complete";

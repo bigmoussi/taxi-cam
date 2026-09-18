@@ -55,6 +55,10 @@ struct Evidence {
   std::uint32_t invalid_reasons = 0;
   bool draw_allowed = false, nested_draw = false, retire_draw = false, invalidation_reentered = false, reenter_invalidation = false;
   unsigned active_ends = 0;
+  unsigned pass_metadata = 0, metadata_invalidations_seen = 0, metadata_begins_seen = 0;
+  unsigned enhanced_notifications = 0, enhanced_originals_seen = 0;
+  bool ordinary_pass_access = false;
+  D3D12_RENDER_PASS_FLAGS metadata_pass_flags = D3D12_RENDER_PASS_FLAG_NONE;
   unsigned raw_legacy = 0, raw_enhanced = 0, copy_resources = 0, copy_textures = 0, after_resources = 0, after_textures = 0;
   std::uint32_t raw_scope = 0;
   D3D12_RESOURCE_STATES raw_before = D3D12_RESOURCE_STATE_COMMON;
@@ -221,7 +225,11 @@ void callback_enhanced(void*, ID3D12GraphicsCommandList7* list, std::uint64_t ge
   if (evidence.retire)
     obs::unregister_list(list, generation);
 }
-void raw_legacy(void*, ID3D12GraphicsCommandList* list, std::uint64_t generation, const D3D12_RESOURCE_BARRIER& barrier, std::uint32_t flags) noexcept {
+void raw_legacy(void*,
+                ID3D12GraphicsCommandList* list,
+                std::uint64_t generation,
+                const D3D12_RESOURCE_BARRIER& barrier,
+                std::uint32_t flags) noexcept {
   if (metadata_depth != 1)
     ++metadata_errors;
   if (retire_metadata)
@@ -293,8 +301,27 @@ void invalidated(void*, ID3D12GraphicsCommandList* list, std::uint64_t generatio
     evidence.invalidation_reentered = true;
   }
 }
-const obs::Callbacks callbacks{nullptr,        callback_legacy, callback_enhanced, raw_legacy, raw_enhanced,
-                               after_resource, after_texture,   after_draw,        invalidated, nullptr, nullptr, nullptr, metadata_begin, metadata_end};
+void pass_began(void*,
+                ID3D12GraphicsCommandList* list,
+                std::uint64_t generation,
+                D3D12_RENDER_PASS_FLAGS flags,
+                bool ordinary_access) noexcept {
+  // This observer query takes the registry lock: the callback must be unlocked.
+  (void)obs::recording_allows_injection(list, generation);
+  ++evidence.pass_metadata;
+  evidence.metadata_invalidations_seen = evidence.invalidations;
+  evidence.metadata_begins_seen = evidence.begins;
+  evidence.metadata_pass_flags = flags;
+  evidence.ordinary_pass_access = ordinary_access;
+}
+void enhanced_call(void*, ID3D12GraphicsCommandList* list, std::uint64_t generation) noexcept {
+  (void)obs::recording_allows_injection(list, generation);
+  ++evidence.enhanced_notifications;
+  evidence.enhanced_originals_seen = evidence.enhanced;
+}
+const obs::Callbacks callbacks{nullptr,        callback_legacy, callback_enhanced, raw_legacy,   raw_enhanced, after_resource,
+                               after_texture,  after_draw,      invalidated,       nullptr,      nullptr,      nullptr,
+                               metadata_begin, metadata_end,    pass_began,        enhanced_call};
 D3D12_RESOURCE_BARRIER legacy_transition(ID3D12Resource* resource) {
   D3D12_RESOURCE_BARRIER value{};
   value.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -394,6 +421,12 @@ int main() {
     auto changed_callbacks = callbacks;
     changed_callbacks.context = &object;
     require(!obs::register_list(list, 1, changed_callbacks).ready, "Changed callback context accepted");
+    changed_callbacks = callbacks;
+    changed_callbacks.pass_began = nullptr;
+    require(!obs::register_list(list, 1, changed_callbacks).ready, "Changed pass metadata callback accepted");
+    changed_callbacks = callbacks;
+    changed_callbacks.enhanced_call = nullptr;
+    require(!obs::register_list(list, 1, changed_callbacks).ready, "Changed enhanced call callback accepted");
     auto other_table = table;
     Fake other_object{other_table.data()};
     require(!obs::register_list(reinterpret_cast<ID3D12GraphicsCommandList*>(&other_object), 1, callbacks).ready,
@@ -634,16 +667,30 @@ int main() {
     groups[0].Type = D3D12_BARRIER_TYPE_GLOBAL;
     groups[0].pGlobalBarriers = &global;
     check_enhanced(2, groups.data(), 1, "Global barrier incorrectly changes layout proof");
+    auto notifications_before = evidence.enhanced_notifications;
+    auto enhanced_originals_before = evidence.enhanced;
+    check_enhanced(1, groups.data(), 0, "Global-only barrier unexpectedly captured a texture");
+    require(evidence.enhanced_notifications == notifications_before + 1 && evidence.enhanced_originals_seen == enhanced_originals_before,
+            "Global-only enhanced call omitted pre-forward metadata");
     groups[0].pGlobalBarriers = nullptr;
     check_enhanced(2, groups.data(), 0, "Null global array accepted");
     D3D12_BUFFER_BARRIER buffer{};
     groups[0].Type = D3D12_BARRIER_TYPE_BUFFER;
     groups[0].pBufferBarriers = &buffer;
     check_enhanced(2, groups.data(), 1, "Buffer barrier incorrectly changes texture layout");
+    notifications_before = evidence.enhanced_notifications;
+    enhanced_originals_before = evidence.enhanced;
+    check_enhanced(1, groups.data(), 0, "Buffer-only barrier unexpectedly captured a texture");
+    require(evidence.enhanced_notifications == notifications_before + 1 && evidence.enhanced_originals_seen == enhanced_originals_before,
+            "Buffer-only enhanced call omitted pre-forward metadata");
     groups[0].pBufferBarriers = nullptr;
     check_enhanced(2, groups.data(), 0, "Null buffer array accepted");
     groups[0].Type = static_cast<D3D12_BARRIER_TYPE>(99);
     check_enhanced(2, groups.data(), 0, "Unknown group type accepted");
+    notifications_before = evidence.enhanced_notifications;
+    check_enhanced(1, nullptr, 0, "Null enhanced batch unexpectedly captured");
+    check_enhanced(0, nullptr, 0, "Empty enhanced batch unexpectedly captured");
+    require(evidence.enhanced_notifications == notifications_before + 2, "Malformed/empty enhanced call omitted notification");
     group.NumBarriers = 1;
     group.pTextureBarriers = &texture;
     evidence.nested = true;
@@ -905,10 +952,15 @@ int main() {
     require(evidence.after_draws == after_draw_before, "Unknown/bypassed draw notified staged sources");
     auto invalid_before = evidence.invalidations;
     auto begins_before = evidence.begins;
+    auto pass_metadata_before = evidence.pass_metadata;
     extended->BeginRenderPass(0, nullptr, nullptr, D3D12_RENDER_PASS_FLAG_NONE);
     require(evidence.invalidations == invalid_before + 1 && evidence.invalid_reasons == obs::InvalidationPassBegin &&
                 evidence.invalid_begins_seen == begins_before,
             "Ordinary pass did not report its distinct reason before original Begin");
+    require(evidence.pass_metadata == pass_metadata_before + 1 && evidence.ordinary_pass_access &&
+                evidence.metadata_pass_flags == D3D12_RENDER_PASS_FLAG_NONE && evidence.metadata_invalidations_seen == invalid_before &&
+                evidence.metadata_begins_seen == begins_before,
+            "Ordinary pass metadata was not delivered before invalidation/native Begin");
     list->DrawInstanced(3, 1, 0, 0);
     require(!evidence.draw_allowed && evidence.invalidations == invalid_before + 1,
             "An unrelated ordinary active-pass draw globally invalidated source models");
@@ -916,6 +968,20 @@ int main() {
     obs::successful_reset(list, 2);
     extended->BeginRenderPass(9, nullptr, nullptr, D3D12_RENDER_PASS_FLAG_NONE);
     require((evidence.invalid_reasons & obs::InvalidationPassState) != 0, "Malformed pass omitted global uncertainty");
+    require(!evidence.ordinary_pass_access, "Malformed pass metadata claimed ordinary access");
+    extended->EndRenderPass();
+    for (const auto pass_flags : {D3D12_RENDER_PASS_FLAG_SUSPENDING_PASS, D3D12_RENDER_PASS_FLAG_RESUMING_PASS}) {
+      obs::successful_reset(list, 2);
+      extended->BeginRenderPass(0, nullptr, nullptr, pass_flags);
+      require(evidence.metadata_pass_flags == pass_flags && evidence.ordinary_pass_access,
+              "Exact suspended/resuming flags lost from pass metadata");
+      extended->EndRenderPass();
+    }
+    obs::successful_reset(list, 2);
+    D3D12_RENDER_PASS_RENDER_TARGET_DESC local_access{};
+    local_access.BeginningAccess.Type = static_cast<D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE>(4);
+    extended->BeginRenderPass(1, &local_access, nullptr, D3D12_RENDER_PASS_FLAG_NONE);
+    require(!evidence.ordinary_pass_access, "PRESERVE_LOCAL/unknown access metadata claimed ordinary pass");
     extended->EndRenderPass();
     obs::successful_reset(list, 2);
     auto uncertain = transition;

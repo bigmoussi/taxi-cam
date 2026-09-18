@@ -25,6 +25,122 @@ LRESULT CALLBACK host(HWND h, UINT m, WPARAM w, LPARAM l) {
 void command(int id) {
   procedure(window, WM_COMMAND, MAKEWPARAM(id, BN_CLICKED), 0);
 }
+void marking_controls_tests() {
+  for (const auto* profile : {&profiles::A359, &profiles::A35K}) {
+    current = {};
+    current.profile = profile->id;
+    current.auto_profile = 0;
+    current.mounts = profile->mounts;
+    current.mounts[0][1] += 0.125;
+    current.speed_color = {0.25f, 0.5f, 0.75f};
+    win::reset_guide_settings(current, *profile);
+    page = 5;
+    build_controls();
+    wchar_t label[64]{};
+    GetDlgItemTextW(window, 372, label, 64);
+    require(GetDlgItem(window, 370) && GetDlgItem(window, 371) && GetDlgItem(window, 372) && !GetDlgItem(window, 231) &&
+                std::wstring(label) == L"Marking colour",
+            "Reference guides offers a separate Marking colour picker beside Apply and Reset");
+    RECT marking{}, reset{}, client{};
+    GetWindowRect(GetDlgItem(window, 372), &marking);
+    GetWindowRect(GetDlgItem(window, 371), &reset);
+    MapWindowPoints(nullptr, window, reinterpret_cast<POINT*>(&marking), 2);
+    MapWindowPoints(nullptr, window, reinterpret_cast<POINT*>(&reset), 2);
+    GetClientRect(window, &client);
+    require(marking.left >= reset.right && marking.right <= client.right && marking.bottom <= client.bottom,
+            "Marking colour control fits without overlapping Reset");
+    SetDlgItemTextW(window, 360, L"25");
+    SetDlgItemTextW(window, 361, L"50");
+    require(apply(false), "Colour selection applies pending guide coordinates first");
+    const auto before = current;
+    const COLORREF marking_color = RGB(51, 102, 204);
+    // Exercise the production picker completion without opening a modal dialog.
+    require(apply_color_selection(before, true, marking_color), "Marking picker result applies to its opening profile session");
+    require(current.guide_color == std::array<float, 3>{51 / 255.f, 102 / 255.f, 204 / 255.f} && dirty &&
+                current.speed_color == before.speed_color && current.nose_dot == before.nose_dot &&
+                current.tail_corner == before.tail_corner && current.mounts == before.mounts,
+            "Marking selection updates the live draft and preserves ground-speed colour and calibration");
+    const auto dc = CreateCompatibleDC(nullptr);
+    BITMAPINFO bitmap_info{};
+    bitmap_info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bitmap_info.bmiHeader.biWidth = 1055;
+    bitmap_info.bmiHeader.biHeight = -750;
+    bitmap_info.bmiHeader.biPlanes = 1;
+    bitmap_info.bmiHeader.biBitCount = 32;
+    void* pixels{};
+    const auto bitmap = CreateDIBSection(dc, &bitmap_info, DIB_RGB_COLORS, &pixels, nullptr, 0);
+    require(dc && bitmap && pixels, "Create an offscreen surface for the own-window marking preview");
+    const auto old_bitmap = SelectObject(dc, bitmap);
+    draw_page(dc);
+    bool matching = true;
+    for (const bool right : {false, true}) {
+      const int x = 817 + static_cast<int>(std::lround((right ? 1 - current.nose_dot[0] : current.nose_dot[0]) * 172));
+      const int y = 191 + static_cast<int>(std::lround(current.nose_dot[1] * 45));
+      // The corner is inside a square and outside the former circular marker.
+      matching = matching && GetPixel(dc, x, y) == marking_color && GetPixel(dc, x + 6, y + 6) == marking_color;
+    }
+    SelectObject(dc, old_bitmap);
+    DeleteObject(bitmap);
+    DeleteDC(dc);
+    require(matching, "Both A350 nose previews draw squares in the selected marking colour");
+    command(500);
+    win::Settings loaded;
+    require(win::load_settings(loaded, L"", profile->id) && loaded.guide_color == current.guide_color &&
+                loaded.nose_dot == current.nose_dot && loaded.speed_color == before.speed_color && loaded.mounts == before.mounts,
+            "Save retains per-aircraft marking colour and pending coordinates independently of ground-speed colour");
+    const auto chosen_markings = current.guide_color;
+    command(102);
+    GetDlgItemTextW(window, 231, label, 64);
+    require(GetDlgItem(window, 231) && !GetDlgItem(window, 372) && std::wstring(label) == L"Ground-speed colour",
+            "Display keeps its own ground-speed colour picker");
+    require(apply_color_selection(draft(), false, RGB(204, 153, 51)), "Ground-speed picker result applies to its opening profile session");
+    require(current.speed_color == std::array<float, 3>{204 / 255.f, 153 / 255.f, 51 / 255.f} && current.guide_color == chosen_markings,
+            "Ground-speed selection leaves the selected marking colour unchanged");
+    const auto chosen_speed = current.speed_color;
+    command(105);
+    command(371);
+    GetDlgItemTextW(window, 371, label, 64);
+    require(std::wstring(label) == L"Reset guides" && current.guide_color == profile->composition.guide_color &&
+                current.guide_color == profiles::A380.composition.guide_color && current.nose_dot == profile->composition.nose_dot &&
+                current.speed_color == chosen_speed && current.mounts == before.mounts && dirty,
+            "Reset guides restores profile positions and A380 magenta while preserving ground-speed colour and camera calibration");
+  }
+}
+void stale_color_selection_tests() {
+  for (const bool markings : {false, true}) {
+    for (const bool reconnect : {false, true}) {
+      current = {};
+      current.profile = profiles::A359.id;
+      current.profile_request = 12;
+      const auto opened = draft();
+      if (reconnect)
+        ++current.profile_request;
+      else
+        current.profile = profiles::A35K.id;
+      current.guide_color = {0.1f, 0.2f, 0.3f};
+      current.speed_color = {0.4f, 0.5f, 0.6f};
+      current.enabled = 0;
+      current.aircraft_session_epoch = 7;
+      current.mounts = profiles::A35K.mounts;
+      const auto changed = draft();
+      dirty = false;
+      notice = L"New profile session";
+      require(!apply_color_selection(opened, markings, RGB(255, 255, 255)),
+              reconnect ? "Picker result is refused after same-profile reconnect" : "Picker result is refused after aircraft switch");
+      require(current.profile == changed.profile && current.profile_request == changed.profile_request &&
+                  current.guide_color == changed.guide_color && current.speed_color == changed.speed_color &&
+                  current.mounts == changed.mounts && current.enabled == changed.enabled &&
+                  current.aircraft_session_epoch == changed.aircraft_session_epoch && !dirty && notice == L"New profile session",
+              "Stale marking or ground-speed selection leaves the new profile and its unsaved state unchanged");
+    }
+    const auto opened = draft();
+    current.enabled = 1;
+    ++current.aircraft_session_epoch;
+    require(apply_color_selection(opened, markings, RGB(51, 102, 153)) && current.enabled == 1 &&
+                current.aircraft_session_epoch == opened.aircraft_session_epoch + 1 && current.profile_request == opened.profile_request,
+            "Current-session colour selection preserves concurrent enabled and aircraft-session fields");
+  }
+}
 }  // namespace
 int main() {
   try {
@@ -44,6 +160,58 @@ int main() {
     wchar_t temporary[MAX_PATH]{};
     require(GetTempPathW(MAX_PATH, temporary) != 0, "Get isolated settings parent");
     win::settings_override = std::wstring(temporary) + L"TaxiDiagnosticsFixture-" + std::to_wstring(GetCurrentProcessId());
+    current.enabled = 0;
+    current.auto_profile = 0;
+    page = 0;
+    build_controls();
+    wchar_t connection_label[96]{};
+    GetDlgItemTextW(window, 241, connection_label, 96);
+    require(GetDlgItem(window, 241) && !GetDlgItem(window, 220) && !GetDlgItem(window, 242) && std::wstring(connection_label) == L"Connect",
+            "Overview has one Connect control without Service or Reconnect controls");
+    const auto saved_mounts = current.mounts;
+    const auto saved_auto_connect = auto_connect.load();
+    command(241);
+    GetDlgItemTextW(window, 241, connection_label, 96);
+    require(current.enabled && current.profile_request == 1 && connection_requested.load() && !connection_disconnected.load() &&
+                std::wstring(connection_label) == L"Disconnect" && connect_commands.take() == win::ConnectCommand::connect,
+            "Connect enables a legacy disabled profile and becomes Disconnect");
+    win::Mailbox fixture_mailbox;
+    require(fixture_mailbox.open(GetCurrentProcessId(), true) && exchange_control(fixture_mailbox), "Publish enabled state to own IPC");
+    require(fixture_mailbox.data()->settings.enabled && fixture_mailbox.data()->owner_heartbeat,
+            "Connected command publishes enabled settings and a live heartbeat");
+    current.manual_mask = current.calibration_mask = 3;
+    current.scene_test = 1;
+    current.taxi_request = 12;
+    current.taxi_selected_mask = 3;
+    current.taxi_desired_mask = 2;
+    simulator_pid = GetCurrentProcessId();  // The fixture owns this mailbox; no simulator is touched.
+    command(241);
+    simulator_pid = 0;
+    GetDlgItemTextW(window, 241, connection_label, 96);
+    require(!current.enabled && current.profile_request == 1 && !connection_requested.load() && connection_disconnected.load() &&
+                std::wstring(connection_label) == L"Connect" && connect_commands.take() == win::ConnectCommand::disconnect,
+            "Disconnect stops operation, suppresses retries, and restores the Connect label");
+    require(!current.manual_mask && !current.calibration_mask && !current.scene_test && !current.taxi_selected_mask &&
+                !current.taxi_desired_mask && current.mounts == saved_mounts && auto_connect.load() == saved_auto_connect,
+            "Disconnect clears temporary requests without changing calibration or Auto-connect preference");
+    require(!fixture_mailbox.data()->settings.enabled && !fixture_mailbox.data()->owner_heartbeat &&
+                !fixture_mailbox.data()->settings.manual_mask,
+            "Disconnect immediately publishes stopped output to the owned channel");
+    require(exchange_control(fixture_mailbox) && !fixture_mailbox.data()->settings.enabled && !fixture_mailbox.data()->owner_heartbeat,
+            "A subsequent worker exchange cannot revive disconnected output");
+    command(241);
+    require(current.enabled && current.profile_request == 2 && !connection_disconnected.load() &&
+                connect_commands.take() == win::ConnectCommand::connect && exchange_control(fixture_mailbox) &&
+                fixture_mailbox.data()->settings.enabled && fixture_mailbox.data()->owner_heartbeat,
+            "Reconnect restores enabled output after Disconnect");
+    auto old_disabled_profile = current;
+    old_disabled_profile.enabled = 0;
+    publish(old_disabled_profile);
+    require(current.enabled, "Loading an old disabled profile cannot override an active connection");
+    command(241);
+    connect_commands.take();
+    fixture_mailbox.close();
+    current = {};
     current.profile = 2;
     current.auto_profile = 0;
     current.mounts = profiles::A359.mounts;
@@ -119,6 +287,8 @@ int main() {
     procedure(window, WM_COMMAND, MAKEWPARAM(210, CBN_SELENDOK), 0);
     require(current.profile == 1 && !current.manual_mask && !current.calibration_mask && !current.scene_test,
             "Profile selection clears temporary camera requests");
+    marking_controls_tests();
+    stale_color_selection_tests();
     DestroyWindow(window);
     for (const auto* profile : profiles::Catalog) {
       win::Settings saved;

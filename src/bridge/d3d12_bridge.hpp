@@ -1,9 +1,90 @@
 #pragma once
 #include <cstddef>
 #include <vector>
+#include "../graphics/pfd_submission_proof.hpp"
 #include "../graphics/pfd_target_detector.hpp"
 #include "../graphics/scene_runtime.hpp"
 namespace taxi_camera::standalone {
+inline constexpr const char* pfd_gpu_operation_name(unsigned slot) noexcept {
+  switch (slot) {
+    case 0:
+      return "unknown_gpu_work";
+    case 12:
+      return "draw";
+    case 14:
+      return "dispatch";
+    case 15:
+      return "copy_buffer";
+    case 16:
+      return "copy_texture";
+    case 17:
+      return "copy_resource";
+    case 18:
+      return "copy_tiles";
+    case 19:
+      return "resolve";
+    case 47:
+      return "clear_depth";
+    case 48:
+      return "clear_render_target";
+    case 49:
+      return "clear_uav_uint";
+    case 50:
+      return "clear_uav_float";
+    case 52:
+      return "begin_query";
+    case 53:
+      return "end_query";
+    case 54:
+      return "resolve_query";
+    case 60:
+      return "atomic_copy_uint";
+    case 61:
+      return "atomic_copy_uint64";
+    case 64:
+      return "resolve_region";
+    case 66:
+      return "write_buffer";
+    case 68:
+      return "render_pass";
+    case 72:
+      return "build_raytracing";
+    case 73:
+      return "emit_raytracing";
+    case 74:
+      return "copy_raytracing";
+    case 76:
+      return "dispatch_rays";
+    case 79:
+      return "dispatch_mesh";
+    default:
+      return "unclassified_gpu_work";
+  }
+}
+enum class DisplaySubmissionOutcome : unsigned {
+  not_ready,
+  unverified_close,
+  invalid_batch,
+  registry_busy,
+  generation_changed,
+  unknown_list,
+  unclosed_list,
+  incomplete_proof,
+  no_display_exit,
+  patch_not_ready,
+  no_selected_exit,
+  unavailable_target,
+  calibration_budget,
+  planned,
+  count
+};
+inline constexpr const char* display_submission_outcome_name(DisplaySubmissionOutcome value) noexcept {
+  constexpr const char* names[]{"not_ready",        "unverified_close",   "invalid_batch",      "registry_busy",   "generation_changed",
+                                "unknown_list",     "unclosed_list",      "incomplete_proof",   "no_display_exit", "patch_not_ready",
+                                "no_selected_exit", "unavailable_target", "calibration_budget", "planned"};
+  return static_cast<unsigned>(value) < static_cast<unsigned>(DisplaySubmissionOutcome::count) ? names[static_cast<unsigned>(value)]
+                                                                                               : "invalid_outcome";
+}
 struct GraphicsStatus {
   bool ready{};
   // draws counts fully observed recordings; idle retains only per-resource
@@ -27,6 +108,12 @@ struct GraphicsStatus {
   // Opt-in hot-path diagnostics: misses equal actual registry acquisitions.
   std::uint64_t list_lookup_calls{}, list_cache_hits{}, list_registry_lookups{};
   std::uint64_t idle_state_bypasses{}, idle_callback_bypasses{};
+  std::uint64_t queue_patch_plans{};
+  bool queue_close_verified{};
+  std::array<std::uint64_t, static_cast<unsigned>(DisplaySubmissionOutcome::count)> queue_outcomes{};
+  std::array<std::uint64_t, static_cast<unsigned>(PfdSubmissionProof::Refusal::count)> queue_proof_refusals{};
+  unsigned queue_last_proof_flags{};
+  std::array<std::uint64_t, 81> queue_prefix_blockers{};
 };
 bool initialize_graphics() noexcept;
 // Resolve a reported device's optional COM proxy chain before native hooks or
@@ -42,11 +129,14 @@ void set_graphics_observation_demand(bool enabled) noexcept;
 void set_graphics_diagnostics_enabled(bool enabled) noexcept;
 GraphicsStatus graphics_status() noexcept;
 std::vector<PfdTargetObservation> pfd_inventory();
-// Control-thread only. Turns off late-attach barrier/copy/OM extras after two
-// display resources and RTVs, or after a short empty-list timeout. A filled
+// Control-thread only. Turns off late-attach barrier/copy/OM extras after the
+// profile's complete display set has distinct RTV associations, or after a short empty-list timeout. A filled
 // list keeps association a little longer so stamps/calibration can light.
 // Not called from recording hooks.
 void service_live_backfill(std::uint64_t now, std::size_t inventory_count) noexcept;
+// Control thread: configure exact display patch encoding and geometry before
+// scene_runtime::service prepares GPU work for future submission boundaries.
+void service_display_patches() noexcept;
 bool assign_targets(std::uint64_t left, std::uint64_t right) noexcept;
 void set_target_mask(unsigned mask) noexcept;
 void set_calibration(unsigned mask, unsigned budget) noexcept;

@@ -4,18 +4,19 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
-#include <vector>
 #include <memory>
 #include <mutex>
 #include <tuple>
 #include <type_traits>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 #include "../graphics/calibration_d3d12.hpp"
 #include "../graphics/d3d12_command_list9.hpp"
 #include "../graphics/metadata_batch_cache.hpp"
 #include "../graphics/native_device_identity.hpp"
 #include "../graphics/pfd_copy_proof.hpp"
+#include "../graphics/pfd_submission_proof.hpp"
 #include "../graphics/query_scope.hpp"
 #include "../graphics/taxi_button_routes.hpp"
 #include "../graphics/write_budget.hpp"
@@ -40,6 +41,7 @@ struct Resource : Metadata {
   std::uint64_t key{};
   D3D12_RESOURCE_DESC desc{};
   std::atomic<std::uint64_t> draws{};
+  std::atomic<std::uint64_t> submission_activity{};
   std::array<UINT, 4> typed_rtv_refs{};
   void retire() noexcept override {
     alive.store(false, std::memory_order_release);
@@ -55,7 +57,11 @@ struct View {
   DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
   UINT mip{};
   SIZE_T rtv{};
+  // A late bind identifies the resource, not the opaque application's format.
+  // Output to such a view uses an explicit bridge-owned typed descriptor.
+  bool recovered{};
 };
+void clear_live_bind(ID3D12GraphicsCommandList* native) noexcept;
 struct List : Metadata {
   ID3D12GraphicsCommandList* native{};
   std::atomic<std::uint64_t> recording{1};
@@ -66,6 +72,8 @@ struct List : Metadata {
   std::array<bool, 2> pending_rt{};
   QueryScope queries;
   PfdCopyProof copy_proof;
+  PfdSubmissionProof submission_proof;
+  std::atomic<std::uint64_t> closed_recording{};
   std::array<D3D12_CPU_DESCRIPTOR_HANDLE, 8> raw_rtvs{};
   D3D12_CPU_DESCRIPTOR_HANDLE raw_dsv{};
   UINT raw_rtv_count{};
@@ -86,6 +94,7 @@ struct List : Metadata {
   bool pfd_dirty = false, pfd_transition = false;
   void retire() noexcept override {
     alive.store(false, std::memory_order_release);
+    clear_live_bind(native);
     boundary::unregister_list(native, id);
     runtime::manager().destroy_command_list(native, id);
   }
@@ -148,6 +157,15 @@ struct Registry {
   std::array<std::atomic<ID3D12Resource*>, 2> selected_native{};
   std::array<std::atomic<std::uint64_t>, 2> selected_ids{};
   std::atomic<unsigned> selected_mask{};
+  std::atomic<std::uint64_t> queue_patch_generation{1};
+  std::array<std::uint64_t, 2> queue_patch_targets{};
+  unsigned queue_patch_camera{}, queue_patch_calibration{};
+  std::uint32_t queue_patch_profile{};
+  std::atomic<std::uint64_t> queue_patch_plans{};
+  std::array<std::atomic<std::uint64_t>, static_cast<unsigned>(DisplaySubmissionOutcome::count)> queue_outcomes{};
+  std::array<std::atomic<std::uint64_t>, static_cast<unsigned>(PfdSubmissionProof::Refusal::count)> queue_proof_refusals{};
+  std::atomic<unsigned> queue_last_proof_flags{};
+  std::array<std::atomic<std::uint64_t>, 81> queue_prefix_blockers{};
   std::atomic<std::uint64_t> selected_draws{}, selected_rt_metadata{}, selected_rt_callbacks{}, selected_pending_matches{};
   std::atomic<std::uint64_t> selected_view_resolved{}, selected_view_rejected{}, copy_attempts{}, copy_rejected{};
   std::atomic<const char*> copy_error{"not_attempted"};
@@ -167,6 +185,7 @@ struct Registry {
   std::atomic<bool> live_backfill{};
   std::uint64_t backfill_started_ms{};
   std::uint64_t backfill_inventory_ms{};
+  bool backfill_full_window{};
   struct SeenResources {
     static constexpr unsigned Capacity = 1024;
     static constexpr unsigned Probes = 8;
@@ -202,21 +221,26 @@ struct Registry {
   struct LiveBindHint {
     // One slot per in-flight list. A global hint was wiped by Reset/ClearState
     // on any other list, so MSFS association never survived cockpit recording.
-    static constexpr unsigned Slots = 8;
+    static constexpr unsigned Slots = 64;
+    std::mutex mutex;
     std::array<std::atomic<ID3D12GraphicsCommandList*>, Slots> lists{};
     std::array<std::atomic<ID3D12Resource*>, Slots> resources{};
     std::array<std::atomic<unsigned>, Slots> entries{};
-    void note(ID3D12GraphicsCommandList* native, ID3D12Resource* p) noexcept {
-      if (!native || !p)
+    std::array<std::uint64_t, Slots> generations{};
+    void note(ID3D12GraphicsCommandList* native, ID3D12Resource* p, std::uint64_t generation = 0) noexcept {
+      if (!native)
         return;
+      const std::lock_guard lock(mutex);
       int empty = -1;
       for (unsigned i = 0; i < Slots; ++i) {
         const auto owner = lists[i].load(std::memory_order_relaxed);
         if (owner == native) {
-          if (resources[i].load(std::memory_order_relaxed) == p)
+          if (entries[i].load(std::memory_order_relaxed) && resources[i].load(std::memory_order_relaxed) == p &&
+              generations[i] == generation)
             return;
           resources[i].store(p, std::memory_order_relaxed);
-          entries[i].fetch_add(1, std::memory_order_relaxed);
+          generations[i] = generation;
+          entries[i].store(p && !entries[i].load(std::memory_order_relaxed) ? 1u : 2u, std::memory_order_relaxed);
           return;
         }
         if (!owner && empty < 0)
@@ -229,34 +253,57 @@ struct Registry {
       if (!lists[i].compare_exchange_strong(expected, native, std::memory_order_relaxed) && expected != native)
         return;
       resources[i].store(p, std::memory_order_relaxed);
-      entries[i].store(1, std::memory_order_relaxed);
+      generations[i] = generation;
+      entries[i].store(p ? 1u : 2u, std::memory_order_relaxed);
     }
-    ID3D12Resource* take(ID3D12GraphicsCommandList* native) noexcept {
+    ID3D12Resource* take(ID3D12GraphicsCommandList* native, std::uint64_t* generation = nullptr) noexcept {
       if (!native)
         return nullptr;
+      const std::lock_guard lock(mutex);
       for (unsigned i = 0; i < Slots; ++i) {
         if (lists[i].load(std::memory_order_relaxed) != native)
           continue;
-        if (entries[i].load(std::memory_order_relaxed) != 1)
-          return nullptr;
+        auto* result = entries[i].load(std::memory_order_relaxed) == 1 ? resources[i].load(std::memory_order_relaxed) : nullptr;
+        if (generation)
+          *generation = result ? generations[i] : 0;
         entries[i].store(0, std::memory_order_relaxed);
-        return resources[i].load(std::memory_order_relaxed);
+        resources[i].store(nullptr, std::memory_order_relaxed);
+        lists[i].store(nullptr, std::memory_order_relaxed);
+        return result;
       }
       return nullptr;
     }
     void clear(ID3D12GraphicsCommandList* native) noexcept {
       if (!native)
         return;
+      const std::lock_guard lock(mutex);
       for (unsigned i = 0; i < Slots; ++i)
-        if (lists[i].load(std::memory_order_relaxed) == native)
+        if (lists[i].load(std::memory_order_relaxed) == native) {
           entries[i].store(0, std::memory_order_relaxed);
+          resources[i].store(nullptr, std::memory_order_relaxed);
+          lists[i].store(nullptr, std::memory_order_relaxed);
+        }
+    }
+    void clear_all() noexcept {
+      const std::lock_guard lock(mutex);
+      for (unsigned i = 0; i < Slots; ++i) {
+        entries[i].store(0, std::memory_order_relaxed);
+        resources[i].store(nullptr, std::memory_order_relaxed);
+        lists[i].store(nullptr, std::memory_order_relaxed);
+      }
     }
   } live_bind;
-  std::array<std::atomic<ID3D12Resource*>, 8> backfill_displays{};
+  std::array<std::atomic<ID3D12Resource*>, 64> backfill_displays{};
+  // Monotonic negative filter: retirement never clears shared bits. False
+  // positives take the exact registry lookup; a tracked display cannot vanish.
+  std::array<std::atomic<std::uint64_t>, 16> display_filter{};
 };
 Registry& registry() {
   static auto* r = new Registry;
   return *r;
+}
+void clear_live_bind(ID3D12GraphicsCommandList* native) noexcept {
+  registry().live_bind.clear(native);
 }
 bool observation_enabled() noexcept {
   return (registry().observation_epoch.load(std::memory_order_acquire) & 1u) != 0;
@@ -275,8 +322,22 @@ bool idle_callback() noexcept {
 }
 constexpr std::array<DXGI_FORMAT, 4> TypedFormats{DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, DXGI_FORMAT_B8G8R8A8_UNORM,
                                                   DXGI_FORMAT_B8G8R8A8_UNORM_SRGB};
+DXGI_FORMAT output_format(const View& view) noexcept {
+  if (!view.resource || !view.resource->alive || view.mip)
+    return DXGI_FORMAT_UNKNOWN;
+  if (!view.recovered)
+    return std::find(TypedFormats.begin(), TypedFormats.end(), view.format) != TypedFormats.end() ? view.format : DXGI_FORMAT_UNKNOWN;
+  // This is the bridge's explicit output encoding. It is never entered in the
+  // application's typed-RTV evidence, and never used with its opaque descriptor.
+  const auto format = view.resource->desc.Format;
+  if (format == DXGI_FORMAT_R8G8B8A8_TYPELESS)
+    return DXGI_FORMAT_R8G8B8A8_UNORM;
+  if (format == DXGI_FORMAT_B8G8R8A8_TYPELESS)
+    return DXGI_FORMAT_B8G8R8A8_UNORM;
+  return std::find(TypedFormats.begin(), TypedFormats.end(), format) != TypedFormats.end() ? format : DXGI_FORMAT_UNKNOWN;
+}
 void account_view(const View& view, bool add) noexcept {
-  if (!view.resource || view.mip)
+  if (!view.resource || view.mip || view.recovered)
     return;
   for (unsigned i = 0; i < TypedFormats.size(); ++i)
     if (view.format == TypedFormats[i]) {
@@ -326,6 +387,15 @@ void refresh_selected(Registry& r) {
     r.selected_ids[side].store(selected ? selected->id : 0, std::memory_order_relaxed);
   }
   r.selected_mask.store(r.active_mask | r.calibration_mask, std::memory_order_relaxed);
+  const std::array<std::uint64_t, 2> selected{r.selected_ids[0].load(), r.selected_ids[1].load()};
+  if (selected != r.queue_patch_targets || r.queue_patch_camera != r.active_mask || r.queue_patch_calibration != r.calibration_mask ||
+      r.queue_patch_profile != r.profile->id) {
+    r.queue_patch_targets = selected;
+    r.queue_patch_camera = r.active_mask;
+    r.queue_patch_calibration = r.calibration_mask;
+    r.queue_patch_profile = r.profile->id;
+    r.queue_patch_generation.fetch_add(1, std::memory_order_release);
+  }
 }
 bool maybe_selected(ID3D12Resource* native) noexcept {
   auto& r = registry();
@@ -382,6 +452,14 @@ bool relevant(const D3D12_RESOURCE_DESC& d) noexcept {
   return d.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && dimensions && d.DepthOrArraySize == 1 && d.SampleDesc.Count == 1 &&
          (d.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) != 0;
 }
+bool display_candidate_desc(const D3D12_RESOURCE_DESC& d) noexcept {
+  if (!relevant(d))
+    return false;
+  for (const auto* profile : profiles::Catalog)
+    if (profiles::matches_display(*profile, static_cast<UINT>(d.Width), d.Height, d.MipLevels, static_cast<UINT>(d.Format)))
+      return true;
+  return false;
+}
 bool same_device(ID3D12Device* device) noexcept {
   IUnknown *a{}, *b{};
   auto* expected = registry().device;
@@ -399,11 +477,13 @@ bool same_device(ID3D12Device* device) noexcept {
     b->Release();
   return equal;
 }
-constexpr unsigned LiveBackfillNeeded = 2;
 constexpr std::uint64_t LiveBackfillAdmitMs = 3000;
 constexpr std::uint64_t LiveBackfillAssociateMs = 10000;
+unsigned live_backfill_needed(const Registry& r) noexcept {
+  return r.profile->pfd_detection == profiles::PfdDetectionPolicy::ini_a380_allocation_group ? 8u : 2u;
+}
 std::array<std::uint64_t, 2> dominant_activity_pair(const profiles::AircraftProfile& profile,
-                                                   const std::vector<PfdTargetObservation>& inventory) noexcept {
+                                                    const std::vector<PfdTargetObservation>& inventory) noexcept {
   if (inventory.size() != 2 || !inventory[0].id || !inventory[1].id || inventory[0].id == inventory[1].id)
     return {};
   const auto high = std::max(inventory[0].id, inventory[1].id);
@@ -411,11 +491,10 @@ std::array<std::uint64_t, 2> dominant_activity_pair(const profiles::AircraftProf
   return profile.higher_id_left ? std::array<std::uint64_t, 2>{high, low} : std::array<std::uint64_t, 2>{low, high};
 }
 // Control-thread only. Same last / third-last mapping as the allocation-group
-// detector. Late Connect can fill the eight format-27 rows while some DUs stay
-// flat; do not wait for all eight draw counters before ready/calibration have
-// targets. A two-texture list is still incomplete.
+// detector. Preserve the complete-group automatic selection used by the
+// aircraft profile, including late discovery. A partial list is incomplete.
 std::array<std::uint64_t, 2> allocation_group_pair(const profiles::AircraftProfile& profile,
-                                                  const std::vector<PfdTargetObservation>& inventory) noexcept {
+                                                   const std::vector<PfdTargetObservation>& inventory) noexcept {
   if (profile.pfd_detection != profiles::PfdDetectionPolicy::ini_a380_allocation_group)
     return {};
   std::array<std::uint64_t, 8> ids{};
@@ -437,7 +516,7 @@ std::array<std::uint64_t, 2> allocation_group_pair(const profiles::AircraftProfi
 }
 bool display_item(const Registry& r, const Resource& item) noexcept {
   return item.alive && profiles::matches_display(*r.profile, static_cast<UINT>(item.desc.Width), item.desc.Height, item.desc.MipLevels,
-                                                static_cast<UINT>(item.desc.Format));
+                                                 static_cast<UINT>(item.desc.Format));
 }
 unsigned live_display_resources(const Registry& r) noexcept {
   unsigned n = 0;
@@ -450,15 +529,25 @@ unsigned live_display_resources(const Registry& r) noexcept {
 }
 unsigned live_display_rtvs(const Registry& r) noexcept {
   unsigned n = 0;
-  for (const auto& [_, view] : r.rtvs) {
-    (void)_;
-    if (view.resource && display_item(r, *view.resource))
-      ++n;
+  for (const auto& [native, item] : r.resources) {
+    (void)native;
+    if (!item || !display_item(r, *item))
+      continue;
+    for (const auto& [handle, view] : r.rtvs) {
+      (void)handle;
+      if (view.resource == item && !view.mip) {
+        ++n;
+        break;
+      }
+    }
   }
   return n;
 }
 void maybe_stop_live_backfill(Registry& r) noexcept {
-  if (live_display_resources(r) >= LiveBackfillNeeded && live_display_rtvs(r) >= LiveBackfillNeeded)
+  if (!r.live_backfill.load(std::memory_order_relaxed) || r.backfill_full_window)
+    return;
+  const auto resources = live_display_resources(r);
+  if (resources >= live_backfill_needed(r) && live_display_rtvs(r) == resources)
     r.live_backfill.store(false, std::memory_order_relaxed);
 }
 void remember_backfill_display(Registry& r, ID3D12Resource* native) noexcept {
@@ -473,6 +562,26 @@ bool is_backfill_display(const Registry& r, ID3D12Resource* native) noexcept {
     if (slot.load(std::memory_order_relaxed) == native)
       return true;
   return false;
+}
+void rearm_live_backfill(Registry& r) noexcept {
+  r.live_backfill.store(false, std::memory_order_relaxed);
+  r.live_bind.clear_all();
+  for (auto& slot : r.backfill_displays)
+    slot.store(nullptr, std::memory_order_relaxed);
+  for (auto& slot : r.seen_resources.slots)
+    slot.store(nullptr, std::memory_order_relaxed);
+  for (const auto& [native, item] : r.resources)
+    if (item && item->alive) {
+      r.seen_resources.remember(native);
+      if (display_item(r, *item))
+        remember_backfill_display(r, native);
+    }
+  r.backfill_started_ms = r.backfill_inventory_ms = 0;
+  // Existing typed aliases do not establish that the application's older
+  // opaque handles have returned. Give every reconnect its bounded full scan.
+  r.backfill_full_window = true;
+  r.live_backfill.store(true, std::memory_order_relaxed);
+  maybe_stop_live_backfill(r);
 }
 bool committed_readable(const void* p) noexcept {
   MEMORY_BASIC_INFORMATION memory{};
@@ -511,8 +620,16 @@ void consider_live_resource(ID3D12GraphicsCommandList* list, ID3D12Resource* nat
     if (plausible_resource(native))
       observe_safely([&] { admit_live_resource(native, initial); });
   }
-  if (is_backfill_display(r, native))
-    r.live_bind.note(list, native);
+  if (initial == source_state::Model::unknown) {
+    r.live_bind.clear(list);
+    return;
+  }
+  const std::lock_guard lock(r.mutex);
+  const auto found = r.resources.find(native);
+  if (is_backfill_display(r, native) && found != r.resources.end() && display_item(r, *found->second))
+    r.live_bind.note(list, native, found->second->id);
+  else
+    r.live_bind.note(list, nullptr);  // An unrecognized RT entry makes this bind ambiguous.
 }
 void consider_live_copy(ID3D12Resource* native) {
   auto& r = registry();
@@ -523,13 +640,14 @@ void consider_live_copy(ID3D12Resource* native) {
     observe_safely([&] { admit_live_resource(native, source_state::Model::unknown); });
 }
 bool bind_live_rtv(Registry& r, List& l, SIZE_T handle) {
-  auto* native = r.live_bind.take(l.native);
+  std::uint64_t generation{};
+  auto* native = r.live_bind.take(l.native, &generation);
   if (!native)
     return false;
   const auto found = r.resources.find(native);
-  if (found == r.resources.end() || !found->second->alive)
+  if (found == r.resources.end() || found->second->id != generation || !display_item(r, *found->second))
     return false;
-  View view{found->second, found->second->desc.Format, 0, handle};
+  View view{found->second, DXGI_FORMAT_UNKNOWN, 0, handle, true};
   replace_view(r, handle, view);
   l.targets[0] = view;
   l.targets[0].rtv = handle;
@@ -560,8 +678,14 @@ void observe_resource(ID3D12Device* device, IUnknown* object, source_state::Mode
         item->desc = desc;
         item->id = ++r.next_id;
         r.resources[native] = item;
-        if (display_item(r, *item))
-          remember_backfill_display(r, native);
+        for (const auto* profile : profiles::Catalog)
+          if (profiles::matches_display(*profile, static_cast<UINT>(desc.Width), desc.Height, desc.MipLevels,
+                                        static_cast<UINT>(desc.Format))) {
+            remember_backfill_display(r, native);
+            const auto hash = Registry::SeenResources::hash(native);
+            r.display_filter[hash / 64].fetch_or(1ull << (hash % 64), std::memory_order_release);
+            break;
+          }
         maybe_stop_live_backfill(r);
       } else
         r.pfd_inventory_complete = false;
@@ -711,11 +835,38 @@ void observe_legacy(void*,
                     const D3D12_RESOURCE_BARRIER& b,
                     std::uint32_t scope) noexcept {
   if (registry().live_backfill.load(std::memory_order_relaxed) && b.Type == D3D12_RESOURCE_BARRIER_TYPE_TRANSITION &&
-      (b.Transition.StateBefore == D3D12_RESOURCE_STATE_RENDER_TARGET ||
-       b.Transition.StateAfter == D3D12_RESOURCE_STATE_RENDER_TARGET))
+      (b.Transition.StateBefore == D3D12_RESOURCE_STATE_RENDER_TARGET || b.Transition.StateAfter == D3D12_RESOURCE_STATE_RENDER_TARGET))
     consider_live_resource(list, b.Transition.pResource,
-                           b.Transition.StateAfter == D3D12_RESOURCE_STATE_RENDER_TARGET ? source_state::Model::legacy_rt
-                                                                                         : source_state::Model::unknown);
+                           b.Transition.StateAfter == D3D12_RESOURCE_STATE_RENDER_TARGET && b.Flags == D3D12_RESOURCE_BARRIER_FLAG_NONE &&
+                                   (b.Transition.Subresource == 0 || b.Transition.Subresource == D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES) &&
+                                   !(scope & (boundary::ScopeActivePass | boundary::ScopeSuspendedPass | boundary::ScopeInvalidRecording))
+                               ? source_state::Model::legacy_rt
+                               : source_state::Model::unknown);
+  const bool invalid_submission = b.Type == D3D12_RESOURCE_BARRIER_TYPE_ALIASING || b.Flags != D3D12_RESOURCE_BARRIER_FLAG_NONE ||
+                                  (b.Type != D3D12_RESOURCE_BARRIER_TYPE_TRANSITION && b.Type != D3D12_RESOURCE_BARRIER_TYPE_UAV);
+  bool display_transition = false;
+  if (b.Type == D3D12_RESOURCE_BARRIER_TYPE_TRANSITION) {
+    const auto hash = Registry::SeenResources::hash(b.Transition.pResource);
+    display_transition = (registry().display_filter[hash / 64].load(std::memory_order_acquire) & (1ull << (hash % 64))) != 0;
+  }
+  if (invalid_submission || display_transition) {
+    std::shared_ptr<List> fallback;
+    if (auto* item = metadata_list(list, id, fallback)) {
+      if (invalid_submission)
+        item->submission_proof.invalidate(PfdSubmissionProof::Refusal::barrier_uncertainty);
+      else if (const auto target = resource(b.Transition.pResource); target && target->alive && display_candidate_desc(target->desc)) {
+        const auto subresource = b.Transition.Subresource;
+        // Exact admitted 8-bit color displays have one layer/plane. A complete
+        // transition of another valid mip cannot change the copied base mip.
+        // Split/alias uncertainty above still invalidates the whole recording.
+        if (subresource == 0 || subresource == D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES)
+          item->submission_proof.observe_legacy({reinterpret_cast<std::uint64_t>(target->native), target->id}, b.Transition.StateBefore,
+                                                b.Transition.StateAfter, subresource, b.Flags);
+        else if (subresource >= target->desc.MipLevels)
+          item->submission_proof.invalidate(PfdSubmissionProof::Refusal::invalid_transition);
+      }
+    }
+  }
   if (idle_callback()) {
     // The source layout model must remain continuous even when no capture is
     // requested: persistent born-RT sources may never emit another RT entry.
@@ -761,9 +912,17 @@ void observe_enhanced(void*,
                       std::uint32_t scope) noexcept {
   if (registry().live_backfill.load(std::memory_order_relaxed) &&
       (b.LayoutBefore == D3D12_BARRIER_LAYOUT_RENDER_TARGET || b.LayoutAfter == D3D12_BARRIER_LAYOUT_RENDER_TARGET))
-    consider_live_resource(list, b.pResource,
-                           b.LayoutAfter == D3D12_BARRIER_LAYOUT_RENDER_TARGET ? source_state::Model::enhanced_rt
-                                                                              : source_state::Model::unknown);
+    consider_live_resource(
+        list, b.pResource,
+        b.LayoutAfter == D3D12_BARRIER_LAYOUT_RENDER_TARGET && b.AccessAfter == D3D12_BARRIER_ACCESS_RENDER_TARGET &&
+                b.Flags == D3D12_TEXTURE_BARRIER_FLAG_NONE && !((b.SyncBefore | b.SyncAfter) & D3D12_BARRIER_SYNC_SPLIT) &&
+                (!b.Subresources.NumMipLevels ? b.Subresources.IndexOrFirstMipLevel == 0 || b.Subresources.IndexOrFirstMipLevel == UINT_MAX
+                                              : b.Subresources.IndexOrFirstMipLevel == 0 && b.Subresources.NumMipLevels == 1 &&
+                                                    b.Subresources.FirstArraySlice == 0 && b.Subresources.NumArraySlices == 1 &&
+                                                    b.Subresources.FirstPlane == 0 && b.Subresources.NumPlanes == 1) &&
+                !(scope & (boundary::ScopeActivePass | boundary::ScopeSuspendedPass | boundary::ScopeInvalidRecording))
+            ? source_state::Model::enhanced_rt
+            : source_state::Model::unknown);
   if (idle_callback()) {
     runtime::manager().observe_source_enhanced(list, id, b);
     return;
@@ -810,6 +969,8 @@ void copy_resource(void*,
     consider_live_copy(dest);
     consider_live_copy(src);
   }
+  if (auto item = find_list(list); item && item->id == id)
+    item->submission_proof.state_disjoint_work(17);
   if (idle_callback())
     return;
   const OwnedWork guard;
@@ -829,6 +990,8 @@ void copy_texture(void*,
     consider_live_copy(dest ? dest->pResource : nullptr);
     consider_live_copy(src ? src->pResource : nullptr);
   }
+  if (auto item = find_list(list); item && item->id == id)
+    item->submission_proof.state_disjoint_work(16);
   if (idle_callback())
     return;
   const OwnedWork guard;
@@ -836,9 +999,13 @@ void copy_texture(void*,
 }
 void invalidate(void*, ID3D12GraphicsCommandList* native, std::uint64_t id, std::uint32_t reasons) noexcept {
   const OwnedWork guard;
+  if (registry().live_backfill.load(std::memory_order_relaxed))
+    registry().live_bind.clear(native);
   auto list = find_list(native);
   if (!list || list->id != id)
     return;
+  if (reasons & ~boundary::InvalidationPassBegin)
+    list->submission_proof.invalidate(PfdSubmissionProof::Refusal::boundary_invalidation);
   if (recording_observed(*list)) {
     if (reasons & ~boundary::InvalidationSplitBarrier)
       list->copy_proof.invalidate();
@@ -874,6 +1041,7 @@ void after_draw(void*, ID3D12GraphicsCommandList* native, std::uint64_t id, bool
   auto list = find_list(native);
   if (!registry().ready || !list || list->id != id || !list->ready)
     return;
+  list->submission_proof.gpu_work(12);
   auto& r = registry();
   const bool observed = recording_observed(*list);
   // Idle keeps only candidate activity/source proof. In particular ordinary
@@ -933,10 +1101,30 @@ void stage_pfd(ID3D12GraphicsCommandList* native, std::uint64_t id) noexcept {
     if (r.routes.targets[side] == view.resource->id && ((r.active_mask | r.calibration_mask) & (1u << side))) {
       list->pending_pfds[side] = view;
       list->pending_rt[side] = !list->pfd_transition && list->raw_om_known && list->snapshot_rtvs;
+      if (view.recovered && list->copy_proof.mode({reinterpret_cast<std::uint64_t>(view.resource->native), view.resource->id}) ==
+                                PfdCopyProof::Mode::unknown) {
+        // A temporal OM association is not descriptor identity. Only an actual
+        // complete RT entry in this recording can authorize writing our owned
+        // view. A later native RT-exit callback supplies its own state proof.
+        list->pending_rt[side] = false;
+        continue;
+      }
       D3D12_CPU_DESCRIPTOR_HANDLE retained{};
       if (list->raw_om_known && list->snapshot_rtvs) {
         retained = {list->snapshot_rtvs->GetCPUDescriptorHandleForHeapStart().ptr + SIZE_T{8 + side} * r.rtv_stride};
-        r.device->CopyDescriptorsSimple(1, retained, list->raw_rtvs[0], D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+        if (view.recovered) {
+          const auto format = output_format(view);
+          if (format == DXGI_FORMAT_UNKNOWN) {
+            list->pending_rt[side] = false;
+            continue;
+          }
+          D3D12_RENDER_TARGET_VIEW_DESC desc{};
+          desc.Format = format;
+          desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
+          const OwnedWork owned;
+          r.device->CreateRenderTargetView(view.resource->native, &desc, retained);
+        } else
+          r.device->CopyDescriptorsSimple(1, retained, list->raw_rtvs[0], D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
       }
       // A nonzero native draw established this bound RTV as render-target data.
       // Clear-only calibration needs no guessed legacy/enhanced transition and
@@ -945,7 +1133,8 @@ void stage_pfd(ID3D12GraphicsCommandList* native, std::uint64_t id) noexcept {
       const auto current = r.rtvs.find(view.rtv);
       if ((r.calibration_mask & (1u << side)) && retained.ptr && !list->pfd_transition &&
           boundary::recording_allows_injection(native, id) && current != r.rtvs.end() && current->second.resource == view.resource &&
-          current->second.format == view.format && !current->second.mip && r.calibration_budget.try_acquire(0, GetTickCount64())) {
+          current->second.format == view.format && current->second.recovered == view.recovered && !current->second.mip &&
+          r.calibration_budget.try_acquire(0, GetTickCount64())) {
         const auto area = profiles::display_rect(*r.profile, side);
         const boundary::ScopedBypass bypass;
         if (record_calibration(native, retained, area.right - area.left, view.resource->desc.Height, GetTickCount64() / 16, area.left))
@@ -976,8 +1165,9 @@ void drain_pfds(ID3D12GraphicsCommandList* native, std::uint64_t id, bool record
         (r.calibration_mask & (1u << side)) || r.routes.targets[side] != view.resource->id)
       continue;
     const auto current = r.rtvs.find(view.rtv);
+    const auto format = output_format(view);
     if (current == r.rtvs.end() || current->second.resource != view.resource || current->second.format != view.format ||
-        current->second.mip || std::find(TypedFormats.begin(), TypedFormats.end(), view.format) == TypedFormats.end() ||
+        current->second.recovered != view.recovered || current->second.mip || format == DXGI_FORMAT_UNKNOWN ||
         !profiles::matches_display(*r.profile, static_cast<UINT>(view.resource->desc.Width), view.resource->desc.Height,
                                    view.resource->desc.MipLevels, static_cast<UINT>(view.resource->desc.Format))) {
       list->pending_rt[side] = false;
@@ -995,7 +1185,7 @@ void drain_pfds(ID3D12GraphicsCommandList* native, std::uint64_t id, bool record
       ++r.preferred_copy_attempts;
       // ensure_list's boundary registration has already proved identical QI7.
       auto* enhanced = model == PfdCopyProof::Mode::enhanced_rt ? static_cast<ID3D12GraphicsCommandList7*>(native) : nullptr;
-      if (runtime::copy_patch(native, r.key, view.resource->native, view.resource->desc, view.format, destination, inner, enhanced)) {
+      if (runtime::copy_patch(native, r.key, view.resource->native, view.resource->desc, format, destination, inner, enhanced)) {
         ++r.preferred_copy_stamps;
         r.preferred_copy_reason = model == PfdCopyProof::Mode::legacy_rt ? "copied_legacy" : "copied_enhanced";
         list->pending_rt[side] = false;
@@ -1036,7 +1226,7 @@ void drain_pfds(ID3D12GraphicsCommandList* native, std::uint64_t id, bool record
     ++r.fallback_attempts;
     // This is the last work recorded before native Close. Leave our bindings
     // in place: no application commands follow and no root replay is needed.
-    if (runtime::stamp_at_recording_end(native, list->graphics, r.key, view.format, static_cast<UINT>(view.resource->desc.Width),
+    if (runtime::stamp_at_recording_end(native, list->graphics, r.key, format, static_cast<UINT>(view.resource->desc.Width),
                                         view.resource->desc.Height, DXGI_FORMAT_UNKNOWN, &destination, &inner)) {
       ++r.fallback_stamps;
       ++r.recording_end_draws;
@@ -1109,9 +1299,9 @@ void copy_pending_pfd(ID3D12GraphicsCommandList* native,
       return;
     ++r.selected_rt_callbacks;
     const auto current = r.rtvs.find(pending.rtv);
-    const bool typed = std::find(TypedFormats.begin(), TypedFormats.end(), pending.format) != TypedFormats.end();
+    const bool typed = output_format(pending) != DXGI_FORMAT_UNKNOWN;
     if (pending.resource == item && !pending.mip && typed && current != r.rtvs.end() && current->second.resource == item &&
-        current->second.format == pending.format && current->second.mip == 0) {
+        current->second.format == pending.format && current->second.recovered == pending.recovered && current->second.mip == 0) {
       view = pending;
       ++r.selected_pending_matches;
     } else {
@@ -1120,6 +1310,18 @@ void copy_pending_pfd(ID3D12GraphicsCommandList* native,
         if (item->typed_rtv_refs[i]) {
           view = {item, TypedFormats[i], 0, 0};
           ++count;
+        }
+      if (!count)
+        for (const auto& [handle, recovered] : r.rtvs) {
+          (void)handle;
+          if (recovered.resource == item && recovered.recovered && !recovered.mip && output_format(recovered) != DXGI_FORMAT_UNKNOWN) {
+            // A recovered bind supplies exact resource/base-mip identity. The
+            // copy uses our explicitly chosen compatible encoding, not an
+            // inferred application RTV format or borrowed descriptor.
+            view = recovered;
+            count = 1;
+            break;
+          }
         }
       if (count != 1) {
         ++r.selected_view_rejected;
@@ -1141,7 +1343,7 @@ void copy_pending_pfd(ID3D12GraphicsCommandList* native,
   const D3D12_RECT inner{static_cast<LONG>(content.left), static_cast<LONG>(content.top), static_cast<LONG>(content.right),
                          static_cast<LONG>(content.bottom)};
   ++r.copy_attempts;
-  if (!runtime::copy_patch(native, r.key, view.resource->native, view.resource->desc, view.format, destination, inner, enhanced)) {
+  if (!runtime::copy_patch(native, r.key, view.resource->native, view.resource->desc, output_format(view), destination, inner, enhanced)) {
     ++r.copy_rejected;
     r.copy_error = "runtime_copy_rejected";
   } else
@@ -1155,6 +1357,7 @@ void pass_targets(void*,
                   const D3D12_RENDER_PASS_DEPTH_STENCIL_DESC*) noexcept;
 void pass_ended(void*, ID3D12GraphicsCommandList* native, std::uint64_t id) noexcept {
   if (auto item = find_list(native); item && item->id == id) {
+    item->submission_proof.end_pass();
     flush_pfd(native, id);
     item->pfd_dirty = false;
     item->targets = {};
@@ -1164,9 +1367,34 @@ void pass_ended(void*, ID3D12GraphicsCommandList* native, std::uint64_t id) noex
     item->pending_rt = {};
   }
 }
-const boundary::Callbacks Boundaries{
-    nullptr,    before_legacy, before_enhanced, observe_legacy, observe_enhanced,        copy_resource,  copy_texture,
-    after_draw, invalidate,    pass_targets,    pass_ended,     selected_legacy_targets, metadata_begin, metadata_end};
+void submission_pass_began(void*,
+                           ID3D12GraphicsCommandList* native,
+                           std::uint64_t id,
+                           D3D12_RENDER_PASS_FLAGS flags,
+                           bool ordinary) noexcept {
+  if (auto item = find_list(native); item && item->id == id)
+    item->submission_proof.begin_pass(flags, ordinary);
+}
+void submission_enhanced(void*, ID3D12GraphicsCommandList* native, std::uint64_t id) noexcept {
+  if (auto item = find_list(native); item && item->id == id)
+    item->submission_proof.invalidate(PfdSubmissionProof::Refusal::enhanced_barrier);
+}
+const boundary::Callbacks Boundaries{nullptr,
+                                     before_legacy,
+                                     before_enhanced,
+                                     observe_legacy,
+                                     observe_enhanced,
+                                     copy_resource,
+                                     copy_texture,
+                                     after_draw,
+                                     invalidate,
+                                     pass_targets,
+                                     pass_ended,
+                                     selected_legacy_targets,
+                                     metadata_begin,
+                                     metadata_end,
+                                     submission_pass_began,
+                                     submission_enhanced};
 std::shared_ptr<List> ensure_list(ID3D12GraphicsCommandList* native, bool observed = false) {
   if (auto existing = find_list(native))
     return existing;
@@ -1189,8 +1417,10 @@ std::shared_ptr<List> ensure_list(ID3D12GraphicsCommandList* native, bool observ
     item->graphics.reset(item->recording, observed);
     item->queries.reset(observed);
     item->copy_proof.reset(observed);
+    item->submission_proof.reset(item->recording, observed);
     item->raw_om_known = observed;
     r.lists[native] = item;
+    r.live_bind.clear(native);
   }
   const auto hooked = boundary::register_list(native, item->id, Boundaries);
   const bool registered = observed ? runtime::manager().register_command_list(native, r.key, item->id)
@@ -1209,6 +1439,152 @@ std::shared_ptr<List> ensure_list(ID3D12GraphicsCommandList* native, bool observ
 void unknown_list(void*, ID3D12GraphicsCommandList* list, std::uint64_t) noexcept {
   const OwnedWork guard;
   observe_safely([&] { ensure_list(list); });
+}
+// Called before manager/runtime submission serialization. The patch snapshot
+// is nonblocking, and the registry is only try-locked: missing metadata must
+// never make ExecuteCommandLists wait for discovery or composition.
+void plan_display_submission(void*,
+                             ID3D12CommandQueue*,
+                             UINT count,
+                             ID3D12CommandList* const* lists,
+                             SceneCaptureManager::DisplaySubmissionPlan& plan) noexcept {
+  auto& r = registry();
+  // An unknown downstream Close chain could append unobserved work after our
+  // terminal bookkeeping. Only the verified native endpoint seals this proof.
+  const auto outcome = [&](DisplaySubmissionOutcome value) noexcept {
+    r.queue_outcomes[static_cast<unsigned>(value)].fetch_add(1, std::memory_order_relaxed);
+  };
+  if (!r.ready) {
+    outcome(DisplaySubmissionOutcome::not_ready);
+    return;
+  }
+  if (!r.close_forward_verified) {
+    outcome(DisplaySubmissionOutcome::unverified_close);
+    return;
+  }
+  if (!lists || !count || count > PfdSubmissionProof::maximum_batch) {
+    outcome(DisplaySubmissionOutcome::invalid_batch);
+    return;
+  }
+  const auto generation = r.queue_patch_generation.load(std::memory_order_acquire);
+  runtime::QueuePatchSnapshot patches;
+  runtime::try_snapshot_queue_patches(r.key, generation, patches);
+  const std::unique_lock lock(r.mutex, std::try_to_lock);
+  if (!lock.owns_lock()) {
+    outcome(DisplaySubmissionOutcome::registry_busy);
+    return;
+  }
+  if (generation != r.queue_patch_generation.load(std::memory_order_acquire)) {
+    outcome(DisplaySubmissionOutcome::generation_changed);
+    return;
+  }
+  std::array<PfdSubmissionProof::Recording, PfdSubmissionProof::maximum_batch> batch{};
+  for (UINT i = 0; i < count; ++i) {
+    const auto found = r.lists.find(static_cast<ID3D12GraphicsCommandList*>(lists[i]));
+    if (found == r.lists.end() || !found->second->alive) {
+      outcome(DisplaySubmissionOutcome::unknown_list);
+      return;
+    }
+    const auto& item = *found->second;
+    const auto recording = item.closed_recording.load(std::memory_order_acquire);
+    if (!recording || recording != item.recording.load(std::memory_order_acquire)) {
+      outcome(DisplaySubmissionOutcome::unclosed_list);
+      return;
+    }
+    batch[i] = {&item.submission_proof, recording};
+  }
+  if (!PfdSubmissionProof::batch_allows(batch.data(), count)) {
+    for (UINT i = 0; i < count; ++i)
+      if (!batch[i].proof->complete(batch[i].generation)) {
+        const auto reason = batch[i].proof->refusal();
+        r.queue_proof_refusals[static_cast<unsigned>(reason)].fetch_add(1, std::memory_order_relaxed);
+        r.queue_last_proof_flags.store(batch[i].proof->diagnostic_flags(batch[i].generation), std::memory_order_relaxed);
+        break;
+      }
+    outcome(DisplaySubmissionOutcome::incomplete_proof);
+    return;
+  }
+  const auto no_position = count * 2;
+  std::array<UINT, 2> positions{no_position, no_position};
+  std::array<PfdSubmissionProof::Candidate, 2> selected{};
+  unsigned candidates = 0;
+  for (UINT i = 0; i < count; ++i) {
+    for (std::size_t slot = 0; slot < PfdSubmissionProof::maximum_resources; ++slot) {
+      auto exit = batch[i].proof->candidate(slot, batch[i].generation);
+      bool before = false;
+      if (!exit) {
+        exit = batch[i].proof->prefix_candidate(slot, batch[i].generation);
+        before = bool(exit);
+      }
+      if (!exit) {
+        const auto refusal = batch[i].proof->prefix_refusal(slot, batch[i].generation);
+        if (refusal.operation < r.queue_prefix_blockers.size()) {
+          const auto target = r.resources.find(reinterpret_cast<ID3D12Resource*>(refusal.key.resource));
+          if (target != r.resources.end() && target->second->id == refusal.key.generation && display_item(r, *target->second))
+            r.queue_prefix_blockers[refusal.operation].fetch_add(1, std::memory_order_relaxed);
+        }
+        continue;
+      }
+      auto* native = reinterpret_cast<ID3D12Resource*>(exit.key.resource);
+      const auto found = r.resources.find(native);
+      if (found == r.resources.end() || !found->second->alive || found->second->id != exit.key.generation ||
+          !display_item(r, *found->second))
+        continue;
+      ++candidates;
+      // A submitted, identity-qualified RT completion is independent of camera
+      // demand. Keep this distinct from actual draws and preserve side ordering.
+      found->second->submission_activity.fetch_add(1, std::memory_order_relaxed);
+      for (unsigned side = 0; side < 2; ++side)
+        if (patches.ready_mask & (1u << side))
+          if (r.selected_resources[side] == found->second) {
+            positions[side] = i * 2 + (before ? 0u : 1u);
+            selected[side] = exit;
+          }
+    }
+  }
+  if (!candidates) {
+    outcome(DisplaySubmissionOutcome::no_display_exit);
+    return;
+  }
+  if (patches.generation != generation || patches.profile != r.profile->id) {
+    outcome(DisplaySubmissionOutcome::patch_not_ready);
+    return;
+  }
+  plan.device_key = r.key;
+  plan.generation = generation;
+  plan.current_generation = &r.queue_patch_generation;
+  auto empty_reason = DisplaySubmissionOutcome::no_selected_exit;
+  for (unsigned order = 0; order < 2; ++order) {
+    const unsigned side = positions[0] <= positions[1] ? order : 1u - order;
+    if (positions[side] == no_position || !selected[side])
+      continue;
+    const auto& target = r.selected_resources[side];
+    const auto& patch = patches.sides[side];
+    if (!target || !target->alive || !patch.buffer || !display_item(r, *target)) {
+      empty_reason = DisplaySubmissionOutcome::unavailable_target;
+      continue;
+    }
+    if (patch.calibration && !r.calibration_budget.try_acquire(0, GetTickCount64())) {
+      empty_reason = DisplaySubmissionOutcome::calibration_budget;
+      continue;
+    }
+    auto& item = plan.items[plan.count++];
+    item.after_list = positions[side] / 2;
+    item.before = positions[side] % 2 == 0;
+    item.copy = {target->native,
+                 patch.buffer,
+                 patch.footprint,
+                 item.before ? selected[side].first_before : selected[side].state_after,
+                 static_cast<UINT>(patch.destination.left),
+                 static_cast<UINT>(patch.destination.top),
+                 static_cast<UINT>(patch.destination.right - patch.destination.left),
+                 static_cast<UINT>(patch.destination.bottom - patch.destination.top)};
+    item.copy.target->AddRef();
+    item.copy.source->AddRef();
+  }
+  if (plan.count)
+    r.queue_patch_plans.fetch_add(1, std::memory_order_relaxed);
+  outcome(plan.count ? DisplaySubmissionOutcome::planned : empty_reason);
 }
 void unknown_queue(ID3D12CommandQueue* queue) noexcept {
   if (owned_depth || !registry().ready || queue->GetDesc().Type != D3D12_COMMAND_LIST_TYPE_DIRECT)
@@ -1476,6 +1852,7 @@ HRESULT STDMETHODCALLTYPE close(ID3D12GraphicsCommandList* native) noexcept {
   using F = HRESULT(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*);
   if (!owned_depth && registry().ready) {
     const OwnedWork guard;
+    clear_live_bind(native);
     observe_safely([&] {
       if (auto item = find_list(native); item && item->ready && !item->closing) {
         item->closing = true;
@@ -1491,7 +1868,15 @@ HRESULT STDMETHODCALLTYPE close(ID3D12GraphicsCommandList* native) noexcept {
       }
     });
   }
-  return list_close.forward<F>()(native);
+  const auto result = list_close.forward<F>()(native);
+  if (!owned_depth && registry().ready) {
+    const OwnedWork guard;
+    if (auto item = find_list(native)) {
+      item->submission_proof.close(item->recording, SUCCEEDED(result));
+      item->closed_recording.store(SUCCEEDED(result) ? item->recording.load() : 0, std::memory_order_release);
+    }
+  }
+  return result;
 }
 HRESULT STDMETHODCALLTYPE reset(ID3D12GraphicsCommandList* native, ID3D12CommandAllocator* allocator, ID3D12PipelineState* pso) noexcept {
   using F = HRESULT(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*, ID3D12CommandAllocator*, ID3D12PipelineState*);
@@ -1501,6 +1886,8 @@ HRESULT STDMETHODCALLTYPE reset(ID3D12GraphicsCommandList* native, ID3D12Command
   const auto observation_epoch = registry().observation_epoch.load(std::memory_order_acquire);
   std::shared_ptr<List> item;
   observe_safely([&] { item = ensure_list(native); });
+  if (item)
+    item->closed_recording.store(0, std::memory_order_release);
   const auto hr = list_reset.forward<F>()(native, allocator, pso);
   if (item) {
     // Demand cannot change between qualifying this native Reset and publishing
@@ -1524,13 +1911,15 @@ HRESULT STDMETHODCALLTYPE reset(ID3D12GraphicsCommandList* native, ID3D12Command
     item->raw_om_known = item->ready;
     if (item->ready) {
       item->closing = false;
-    item->graphics.reset(++item->recording, true);
-    item->graphics.bind_pipeline(pso);
-    if (registry().live_backfill.load(std::memory_order_relaxed))
-      registry().live_bind.clear(native);
-    boundary::successful_reset(native, item->id);
+      item->graphics.reset(++item->recording, true);
+      item->submission_proof.reset(item->recording, true);
+      item->graphics.bind_pipeline(pso);
+      if (registry().live_backfill.load(std::memory_order_relaxed))
+        registry().live_bind.clear(native);
+      boundary::successful_reset(native, item->id);
       runtime::manager().successful_reset(native, item->id);
     } else {
+      item->submission_proof.invalidate();
       item->graphics.invalidate("native_reset_failed");
       boundary::reset_failed(native, item->id);
     }
@@ -1668,7 +2057,7 @@ struct Targets {
     if (r.live_backfill.load(std::memory_order_relaxed)) {
       if (count == 1 && !l.targets[0].resource && input[0].ptr)
         relevant |= bind_live_rtv(r, l, input[0].ptr);
-      else if (count != 1)
+      else
         r.live_bind.clear(l.native);
     }
     if (!snapshots || !relevant || !recording_observed(l))
@@ -1754,21 +2143,31 @@ struct DynamicStripCut {
 };
 struct QueryBegin {
   static void before(List& l, ID3D12QueryHeap* heap, D3D12_QUERY_TYPE type, UINT index) {
+    l.submission_proof.state_disjoint_work(52);
     l.queries.begin(reinterpret_cast<std::uint64_t>(heap), static_cast<std::uint32_t>(type), index);
   }
   static void apply(List&, ID3D12QueryHeap*, D3D12_QUERY_TYPE, UINT) {}
 };
 struct QueryEnd {
   static void apply(List& l, ID3D12QueryHeap* heap, D3D12_QUERY_TYPE type, UINT index) {
+    l.submission_proof.state_disjoint_work(53);
     l.queries.end(reinterpret_cast<std::uint64_t>(heap), static_cast<std::uint32_t>(type), index);
     if (l.queries.known_empty())
       drain_pfds(l.native, l.id);
   }
 };
+struct GpuWork {
+  template <class... Args>
+  static void apply(List& l, Args...) {
+    l.submission_proof.gpu_work();
+  }
+};
+struct StateDisjointGpuWork {};
 struct Unsupported {
   template <class... Args>
   static void apply(List& l, Args...) {
     l.copy_proof.invalidate();
+    l.submission_proof.invalidate(PfdSubmissionProof::Refusal::unsupported_command);
     l.graphics.invalidate("unsupported_native_work");
     boundary::invalidate_recording(l.native, l.id);
   }
@@ -1804,7 +2203,9 @@ struct StateHook<Slot, void (STDMETHODCALLTYPE C::*)(Args...), Action> {
     // clear those bindings. Other state can be omitted only because an epoch
     // mismatch forbids injection until a real, fully observed native Reset.
     if constexpr (!std::is_same_v<Action, Targets> && !std::is_same_v<Action, ClearState> && !std::is_same_v<Action, Unsupported> &&
-                  !std::is_same_v<Action, Predication>) {
+                  !std::is_same_v<Action, Predication> && !std::is_same_v<Action, GpuWork> &&
+                  !std::is_same_v<Action, StateDisjointGpuWork> && !std::is_same_v<Action, QueryBegin> &&
+                  !std::is_same_v<Action, QueryEnd>) {
       if (!observation_enabled()) {
         auto& r = registry();
         if (r.diagnostics_enabled.load(std::memory_order_relaxed))
@@ -1828,8 +2229,14 @@ struct StateHook<Slot, void (STDMETHODCALLTYPE C::*)(Args...), Action> {
     if (!registry().ready)
       return;
     observe_safely([&] {
-      if (auto item = ensure_list(reinterpret_cast<ID3D12GraphicsCommandList*>(native)))
-        Action::apply(*item, args...);
+      if (auto item = ensure_list(reinterpret_cast<ID3D12GraphicsCommandList*>(native))) {
+        if constexpr (std::is_same_v<Action, StateDisjointGpuWork>)
+          item->submission_proof.state_disjoint_work(Slot);
+        else if constexpr (std::is_same_v<Action, GpuWork>)
+          item->submission_proof.gpu_work(Slot);
+        else
+          Action::apply(*item, args...);
+      }
     });
   }
   static void STDMETHODCALLTYPE call(C* native, Args... args) noexcept { invoke(slot.forward<F>(), native, args...); }
@@ -1884,16 +2291,39 @@ bool hook_state(ID3D12GraphicsCommandList* list, bool active = false) {
   // active-pass implementations for these optional newer setters untouched.
   if (active)
     return ok;
+  ok &= STATE(14, Dispatch, StateDisjointGpuWork)::install(list);
+  ok &= STATE(15, CopyBufferRegion, StateDisjointGpuWork)::install(list);
+  ok &= STATE(18, CopyTiles, StateDisjointGpuWork)::install(list);
+  ok &= STATE(19, ResolveSubresource, StateDisjointGpuWork)::install(list);
+  ok &= STATE(47, ClearDepthStencilView, StateDisjointGpuWork)::install(list);
+  ok &= STATE(48, ClearRenderTargetView, GpuWork)::install(list);
+  ok &= STATE(49, ClearUnorderedAccessViewUint, StateDisjointGpuWork)::install(list);
+  ok &= STATE(50, ClearUnorderedAccessViewFloat, StateDisjointGpuWork)::install(list);
+  ok &= STATE(54, ResolveQueryData, StateDisjointGpuWork)::install(list);
   ID3D12GraphicsCommandList1* sample_list{};
   const auto sample_interface = list->QueryInterface(IID_PPV_ARGS(&sample_list));
   if (sample_interface != E_NOINTERFACE) {
     if (FAILED(sample_interface) || !sample_list || static_cast<ID3D12GraphicsCommandList*>(sample_list) != list)
       ok = false;
-    else
+    else {
       ok &= StateHook<63, decltype(&ID3D12GraphicsCommandList1::SetSamplePositions), SamplePositions>::install(list);
+      ok &= StateHook<60, decltype(&ID3D12GraphicsCommandList1::AtomicCopyBufferUINT), GpuWork>::install(list);
+      ok &= StateHook<61, decltype(&ID3D12GraphicsCommandList1::AtomicCopyBufferUINT64), GpuWork>::install(list);
+      ok &= StateHook<64, decltype(&ID3D12GraphicsCommandList1::ResolveSubresourceRegion), StateDisjointGpuWork>::install(list);
+    }
   }
   if (sample_list)
     sample_list->Release();
+  ID3D12GraphicsCommandList2* immediate_list{};
+  const auto immediate_interface = list->QueryInterface(IID_PPV_ARGS(&immediate_list));
+  if (immediate_interface != E_NOINTERFACE) {
+    if (FAILED(immediate_interface) || !immediate_list || static_cast<ID3D12GraphicsCommandList*>(immediate_list) != list)
+      ok = false;
+    else
+      ok &= StateHook<66, decltype(&ID3D12GraphicsCommandList2::WriteBufferImmediate), StateDisjointGpuWork>::install(list);
+  }
+  if (immediate_list)
+    immediate_list->Release();
   ID3D12GraphicsCommandList4* state_object_list{};
   const auto state_object_interface = list->QueryInterface(IID_PPV_ARGS(&state_object_list));
   if (state_object_interface != E_NOINTERFACE) {
@@ -1901,10 +2331,28 @@ bool hook_state(ID3D12GraphicsCommandList* list, bool active = false) {
       ok = false;
     } else {
       ok &= StateHook<75, decltype(&ID3D12GraphicsCommandList4::SetPipelineState1), PipelineStateObject>::install(list, active);
+      ok &= StateHook<67, decltype(&ID3D12GraphicsCommandList3::SetProtectedResourceSession), Unsupported>::install(list);
+      ok &= StateHook<70, decltype(&ID3D12GraphicsCommandList4::InitializeMetaCommand), Unsupported>::install(list);
+      ok &= StateHook<71, decltype(&ID3D12GraphicsCommandList4::ExecuteMetaCommand), Unsupported>::install(list);
+      ok &= StateHook<72, decltype(&ID3D12GraphicsCommandList4::BuildRaytracingAccelerationStructure), StateDisjointGpuWork>::install(list);
+      ok &= StateHook<73, decltype(&ID3D12GraphicsCommandList4::EmitRaytracingAccelerationStructurePostbuildInfo),
+                      StateDisjointGpuWork>::install(list);
+      ok &= StateHook<74, decltype(&ID3D12GraphicsCommandList4::CopyRaytracingAccelerationStructure), StateDisjointGpuWork>::install(list);
+      ok &= StateHook<76, decltype(&ID3D12GraphicsCommandList4::DispatchRays), StateDisjointGpuWork>::install(list);
     }
   }
   if (state_object_list)
     state_object_list->Release();
+  ID3D12GraphicsCommandList6* mesh_list{};
+  const auto mesh_interface = list->QueryInterface(IID_PPV_ARGS(&mesh_list));
+  if (mesh_interface != E_NOINTERFACE) {
+    if (FAILED(mesh_interface) || !mesh_list || static_cast<ID3D12GraphicsCommandList*>(mesh_list) != list)
+      ok = false;
+    else
+      ok &= StateHook<79, decltype(&ID3D12GraphicsCommandList6::DispatchMesh), GpuWork>::install(list);
+  }
+  if (mesh_list)
+    mesh_list->Release();
   d3d12_extended::CommandList9* extended{};
   const auto extension = list->QueryInterface(d3d12_extended::CommandList9Id, reinterpret_cast<void**>(&extended));
   if (extension != E_NOINTERFACE) {
@@ -1998,6 +2446,7 @@ bool initialize_graphics(IUnknown* reported) noexcept {
   ok &= runtime::init_queue(r.key, queue);
   ok &= queue_hook::set_unknown_queue_observer(unknown_queue);
   ok &= runtime::manager().set_unknown_list_observer(unknown_list, nullptr);
+  ok &= runtime::manager().set_display_submission_planner(plan_display_submission, nullptr);
   for (unsigned i = 0; i < creations.size(); ++i)
     ok &= creations[i].install(device, CreationSlots[i], CreationWrappers[i]);
   ok &= root_creation.install(device, 16, reinterpret_cast<void*>(&root_create));
@@ -2010,6 +2459,9 @@ bool initialize_graphics(IUnknown* reported) noexcept {
   r.ready = ok;
   r.error = ok ? "native_graphics_ready" : "native_hook_installation_failed";
   if (ok) {
+    // Late attachment observes the application's existing native D3D12 work.
+    // Do not create an unrelated D3D11On12 device or suspend application threads
+    // to install instruction patches while the simulator is rendering.
     r.backfill_started_ms = 0;
     r.backfill_inventory_ms = 0;
     r.live_backfill.store(true, std::memory_order_relaxed);
@@ -2099,6 +2551,15 @@ GraphicsStatus graphics_status() noexcept {
   result.list_registry_lookups = r.list_registry_lookups.load(std::memory_order_relaxed);
   result.idle_state_bypasses = r.idle_state_bypasses.load(std::memory_order_relaxed);
   result.idle_callback_bypasses = r.idle_callback_bypasses.load(std::memory_order_relaxed);
+  result.queue_patch_plans = r.queue_patch_plans.load(std::memory_order_relaxed);
+  result.queue_close_verified = r.close_forward_verified;
+  for (unsigned i = 0; i < result.queue_outcomes.size(); ++i)
+    result.queue_outcomes[i] = r.queue_outcomes[i].load(std::memory_order_relaxed);
+  for (unsigned i = 0; i < result.queue_proof_refusals.size(); ++i)
+    result.queue_proof_refusals[i] = r.queue_proof_refusals[i].load(std::memory_order_relaxed);
+  result.queue_last_proof_flags = r.queue_last_proof_flags.load(std::memory_order_relaxed);
+  for (unsigned i = 0; i < result.queue_prefix_blockers.size(); ++i)
+    result.queue_prefix_blockers[i] = r.queue_prefix_blockers[i].load(std::memory_order_relaxed);
   return result;
 }
 static std::vector<PfdTargetObservation> pfd_inventory_locked(Registry& r) {
@@ -2108,7 +2569,7 @@ static std::vector<PfdTargetObservation> pfd_inventory_locked(Registry& r) {
     if (item->alive && profiles::matches_display(*r.profile, static_cast<UINT>(item->desc.Width), item->desc.Height, item->desc.MipLevels,
                                                  static_cast<UINT>(item->desc.Format)))
       result.push_back({item->id, item->draws, static_cast<UINT>(item->desc.Width), item->desc.Height, item->desc.MipLevels,
-                        static_cast<UINT>(item->desc.Format)});
+                        static_cast<UINT>(item->desc.Format), item->submission_activity.load()});
   }
   return result;
 }
@@ -2126,10 +2587,10 @@ std::vector<PfdTargetObservation> pfd_inventory() {
 }
 void service_live_backfill(std::uint64_t now, std::size_t inventory_count) noexcept {
   auto& r = registry();
+  const std::lock_guard lock(r.mutex);
   if (!r.live_backfill.load(std::memory_order_relaxed))
     return;
-  if (inventory_count >= LiveBackfillNeeded) {
-    const std::lock_guard lock(r.mutex);
+  if (inventory_count != 0) {
     maybe_stop_live_backfill(r);
     if (!r.live_backfill.load(std::memory_order_relaxed))
       return;
@@ -2137,7 +2598,7 @@ void service_live_backfill(std::uint64_t now, std::size_t inventory_count) noexc
       r.backfill_inventory_ms = now ? now : 1;
     // List filled; keep associating RTVs. The empty-list 3 s cut must not
     // freeze stamps/calibration while candidates are already visible.
-    if (now - r.backfill_inventory_ms >= LiveBackfillAssociateMs)
+    if (now >= r.backfill_inventory_ms && now - r.backfill_inventory_ms >= LiveBackfillAssociateMs)
       r.live_backfill.store(false, std::memory_order_relaxed);
     return;
   }
@@ -2145,8 +2606,34 @@ void service_live_backfill(std::uint64_t now, std::size_t inventory_count) noexc
     r.backfill_started_ms = now ? now : 1;
     return;
   }
-  if (now - r.backfill_started_ms >= LiveBackfillAdmitMs)
+  if (now >= r.backfill_started_ms && now - r.backfill_started_ms >= LiveBackfillAdmitMs)
     r.live_backfill.store(false, std::memory_order_relaxed);
+}
+void service_display_patches() noexcept {
+  auto& r = registry();
+  runtime::QueuePatchConfig config;
+  {
+    const std::lock_guard lock(r.mutex);
+    if (!r.ready)
+      return;
+    refresh_selected(r);
+    config.generation = r.queue_patch_generation.load(std::memory_order_acquire);
+    config.profile = r.profile->id;
+    for (unsigned side = 0; side < 2; ++side) {
+      const auto& target = r.selected_resources[side];
+      if (!target || !display_item(r, *target))
+        continue;
+      View owned_encoding;
+      owned_encoding.resource = target;
+      owned_encoding.recovered = true;
+      config.formats[side] = output_format(owned_encoding);
+      if (config.formats[side] == DXGI_FORMAT_UNKNOWN)
+        continue;
+      config.camera_mask |= r.active_mask & (1u << side);
+      config.calibration_mask |= r.calibration_mask & (1u << side);
+    }
+  }
+  runtime::configure_queue_patches(r.key, config);
 }
 bool assign_targets(std::uint64_t left, std::uint64_t right) noexcept {
   auto& r = registry();
@@ -2163,6 +2650,8 @@ bool assign_targets(std::uint64_t left, std::uint64_t right) noexcept {
   if (!l || !rr)
     return false;
   const bool assigned = r.routes.select_explicit({left, right});
+  if (assigned && live_display_rtvs(r) != live_display_resources(r))
+    rearm_live_backfill(r);
   refresh_selected(r);
   return assigned;
 }
@@ -2197,6 +2686,18 @@ void set_aircraft_profile(std::uint32_t id) noexcept {
     r.routes.reset();
     r.profile = profile;
     r.detector.configure(*profile);
+    // Retry discovery from fresh activity and fresh late-bind evidence. Keep
+    // creation-proven native identities/descriptors: discarding those would
+    // turn an otherwise valid resident bridge into another blind late attach.
+    for (const auto& [native, item] : r.resources) {
+      (void)native;
+      if (item->alive) {
+        item->draws.store(0, std::memory_order_relaxed);
+        item->submission_activity.store(0, std::memory_order_relaxed);
+      }
+    }
+    std::erase_if(r.rtvs, [](const auto& entry) { return entry.second.recovered; });
+    rearm_live_backfill(r);
     refresh_selected(r);
   }
   if (!runtime::set_patch_profile(r.key, id))
@@ -2240,10 +2741,11 @@ void discover_pfds(std::uint64_t now) noexcept {
       } else if (ranked_group && (!r.routes.targets[0] || !r.routes.targets[1])) {
         // After incomplete→complete the detector reports ini_group_changed
         // (invalidates). Still adopt a filled idle eight so ready/calibration
-        // are not stuck behind all-eight draw increments or a stale singleton.
+        // are not stuck behind all-eight draw increments or a stale automatic
+        // singleton. A live explicit selection remains the user's anchor.
         if (const auto pair = allocation_group_pair(*r.profile, inventory); pair[0]) {
           if (!r.routes.adopt_detected(pair) && (!r.routes.targets[0] || !r.routes.targets[1]))
-            r.routes.adopt_detected(pair, true);
+            r.routes.replace_detected(pair);
         }
       }
     }
