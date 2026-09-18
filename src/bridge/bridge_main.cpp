@@ -789,13 +789,15 @@ DWORD run_impl() {
           static_cast<unsigned long long>(graphics.fallback_state_refused), static_cast<unsigned long long>(graphics.recording_end_draws),
           static_cast<unsigned long long>(graphics.shader_deferred), static_cast<unsigned long long>(graphics.close_forward_refused));
       log_status(status, draw_detail);
-      char retention_detail[256];
+      char retention_detail[384];
       std::snprintf(
           retention_detail, sizeof(retention_detail),
-          "Camera retention: created_total=%llu snapshot_bytes=%llu quarantined=%llu prewarm=%s patch_requests=%u patch_draws=%llu",
+          "Camera retention: created_total=%llu snapshot_bytes=%llu quarantined=%llu prewarm=%s patch_requests=%u patch_draws=%llu "
+          "retirement_deferrals=%llu retirement_waiting=%u retirement_status=%s retirement_queues=%u/%u",
           static_cast<unsigned long long>(scene.created_total), static_cast<unsigned long long>(output.capture.bytes),
           static_cast<unsigned long long>(output.capture.quarantined), prewarm.name(), output.patch_requests,
-          static_cast<unsigned long long>(output.patch_draws));
+          static_cast<unsigned long long>(output.patch_draws), static_cast<unsigned long long>(scene.retirement_deferrals),
+          scene.retirement_waiting, scene.retirement_status, scene.retirement_queue_counts[0], scene.retirement_queue_counts[1]);
       log_status(status, retention_detail);
       if (graphics_diagnostics) {
         char graphics_detail[512];

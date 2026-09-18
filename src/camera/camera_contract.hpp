@@ -20,6 +20,9 @@ struct CameraFunctions {
   std::uint32_t update_view = 0;
   std::uint32_t refresh_output = 0;
   std::uint32_t manager_update = 0;
+  // Read-only release ABI anchors; never invoked by the bridge.
+  std::uint32_t release_view = 0;
+  std::uint32_t drain_views = 0;
 };
 
 // Published only after the entire instruction/data contract resolves. The
@@ -45,5 +48,13 @@ struct CameraContractResolution {
 CameraContractResolution resolve_camera_contract(discovery::ImageReader& reader,
                                                  const discovery::Inventory& image,
                                                  std::uint64_t loaded_image_base);
+
+// Bounded runtime edge check only; full method bodies are already part of the
+// startup contract. The caller freshly captures/rechecks the renderer vptr.
+bool verify_renderer_release_methods(discovery::ImageReader& reader,
+                                     const discovery::Inventory& image,
+                                     std::uint64_t loaded_image_base,
+                                     std::uint64_t vtable,
+                                     const CameraFunctions& functions);
 
 }  // namespace taxi_camera::native_camera

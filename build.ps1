@@ -315,6 +315,7 @@ if ($Validate) {
         @{Name='bug-report'; Sources=@('tests/app/bug_report_test.cpp')},
         @{Name='scene-demand'; Sources=@('tests/camera/scene_demand_test.cpp','src/camera/entry_pair.cpp')},
         @{Name='scene-session-reset'; Sources=@('tests/camera/scene_session_reset_test.cpp','src/camera/entry_pair.cpp')},
+        @{Name='view-creation-wait'; Sources=@('tests/camera/view_creation_wait_test.cpp','src/camera/entry_pair.cpp')},
         @{Name='manager-inspection'; Sources=@('tests/camera/manager_inspection_test.cpp')},
         @{Name='relocatable-contract'; Sources=@('src/camera/relocatable_contract.cpp','tests/camera/relocatable_contract_test.cpp')},
         @{Name='rtti-vtables'; Sources=@('src/camera/rtti_vtables.cpp','tests/camera/rtti_vtables_test.cpp')},
@@ -418,6 +419,7 @@ if ($Validate) {
             'compositor formats and exposure','scene handoff and resource state','camera ownership','bug report URL encoding, bounds and diagnostic privacy','relocatable native instruction discovery and static RTTI identity','complete camera contract on relocated synthetic PE images and refusal controls','queue submit','PFD state observer lifecycle','render boundary','engine hook','camera telemetry and lifecycle','aircraft layout compatibility','exe.xml preservation and rename migration',
             'bounded weak command-list lookup reuse and idle observation epochs','continuous source-state observation with idle capture suppression','optional fenced GPU timestamps on owned recordings','5-60 camera activation limits and low-rate scheduling',
             'bounded rotating runtime logs, oversized history and concurrent writers','bounded renderer-fault retention with active-record preservation',
+            'both native release queues and first-free view retirement admission','partial camera-pair cleanup and deferred startup with request cancellation',
             'nonblocking telemetry shutdown with retained worker ownership','private composition contention retry with retained leases and GPU pixels','nonblocking helper refusal and retained GPU submission ordering',
             'same-submit iniBuilds and FBW camera/calibration pixels after barrier-only lists and before mixed exit/consumer lists including first-list insertion, replay and subsequent native overwrite','exact RT exit proof including COMMON and SRV, pass and generation refusal','bounded display copy packets with fence-held source/target lifetime and mip preservation','prepared camera/calibration patches with nonblocking snapshots and manager timeline ordering','late display submission activity with unchanged automatic side ordering',
             'native imports and header dependency closure','embedded multi-resolution application icon and Windows shell extraction','release selection, download integrity and updater handoff guards'));

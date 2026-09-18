@@ -100,6 +100,30 @@ Version **0.9.38**, build 0, was installed at **14:32:58 UTC**, preserving all 1
 
 The logs retain sampled flow state rather than every event, and WER had already deleted the temporary dump. Register patterns match the earlier crash, but the faulting object's ownership is not established. Native/GPU audits found no demonstrated stale descriptor or resource-reuse defect to justify speculative cleanup. **The patch fixes demonstrated admission defects; the exact CTD cause and resolution still require the identical simulator reproduction.** System-freeze causality and A380 boot-time target identity also remain unresolved.
 
+## Repeated 0.9.38 failures and deferred native retirement
+
+The user reproduced the cold-and-dark → End Flight → same aircraft on runway CTD repeatedly on **0.9.38**, and reported no crash with the companion closed. The previous flight-start patch did not resolve it. Three retained failure records (PIDs39324,25560 and the later27428 session) repeat `0xc0000005` at MSFS RVA`0x3d0ffe4`, reading`0x10` with RDI zero. Each run holds the loading latch, then creates replacement entries1003/1004 after public readiness returns. Background preparation has `intent_mask=0`; no completed prewarm pair follows. This evidence does not support another change to the public readiness latch.
+
+Read-only native-code capture establishes a separate allocation hazard. Entry removal detaches a view's associations and queues it for deferred cleanup. The renderer uses two alternating queues; its later consumer clears the associations again, clears the pending-release marker, and retains the pooled view object for slots0..7. The native allocator chooses the first association-free slot without consulting those queues. Our previous capacity check mirrored that availability predicate, so entry absence and a free-slot count did not establish safe reuse. A queued view could be rebound before the consumer cleared its new associations.
+
+The native contract and source establish this hazard. The recorded failures did not capture queue contents at replacement creation, so they do not independently prove that this hazard caused the observed CTD. A later read-only active ini A380 snapshot found clean free slots and no pending releases; manager/entry mapping confirmed our entries1001/1002 in occupied slots1/2. No simulator thread was suspended or process memory modified by those diagnostics.
+
+The correction verifies the complete native release and consumer instruction contracts at startup, then uses bounded, reread observations of both queue buffers and each view's pending marker at creation boundaries. It checks the first native-free slots rather than counting later clean slots. Old view identities remain tracked after entry removal until native retirement is observed. A refused allocation preserves the current request through partial-pair cleanup; Stop or a newer request cancels it. Native creation failures retain their terminal handling. No release marker is written, no queue is drained by the bridge, and no blocking GPU wait or thread suspension is added. The existing rotating log records cumulative retirement deferrals and the latest queue counts/status.
+
+- Pool regression: **81,112 checks**, including the old association-only predicate accepting a queued first-free slot, both release buffers, the marker-cleared/queue-not-yet-cleared interval, retained queue capacity, unavailable reads and changed snapshots.
+- Deferred-start/prewarm regression: **376 checks** against the actual pair controller. Partial ownership remains tracked through cleanup; temporary suspension does not consume Start; empty deferral is cleared before publication so prewarm cannot mistake it for a permanent failure.
+- Native contract regression: **153,765 checks**, including changed queue/marker displacements and renderer endpoint refusal. Existing native reset tests: **44 checks**.
+- The complete **126-byte release and 948-byte consumer** templates were independently compared with read-only live captures, including **18 decoded address operands**, with no mismatches. The production resolver accepted **43 ranges** using a local reader overlay of only the known original manager-vtable slot; the raw already-hooked image correctly refused that identity. The overlay did not modify simulator memory and is not part of production.
+
+Version **0.9.39**, build 0, IPC protocol 9 passed pinned `build.ps1 -Validate` on hardware and WARP, followed by **148 exact-binary smoke checks**. The debug layer was unavailable. Its renderer endpoints were also checked against the actual current renderer vtable without an overlay. This build closes the demonstrated retirement-admission gap; the identical simulator reload reproduction remains the acceptance test for the reported CTD.
+
+| File | SHA-256 |
+| --- | --- |
+| `taxi-cam.exe` | `E08CE11A5C7B44DCD9EA227735BAD1E078BE00770EE47391A35872EA9BFD8F3B` |
+| `taxi-camera-bridge.dll` | `14F8663CDAF453B0919146DB3C4DD8C1AF641810532AF4E7D646FCFF5D58F6F3` |
+
+The pair was validated before committing these source changes. No simulator process was stopped for validation. Its binary hashes and validation receipt identify this local test build independently of later CI version metadata.
+
 ## Local evidence
 
 Logs, GPU reproductions, process snapshots, binaries and receipts remain in ignored build directories:
@@ -112,3 +136,7 @@ Logs, GPU reproductions, process snapshots, binaries and receipts remain in igno
 - `build/pr42-review/delivery-20260918-134022-210/`: immutable reset-build installation receipt, validated pair and rollback pair.
 - `build/pr42-review/a350-cold-dark-assignment/`: captured failing log/IPC metadata, old-policy failure, corrected regressions, full validation and exact smoke.
 - `build/pr42-review/delivery-20260918-140810-116/`: immutable A350-assignment installation receipt, validated pair and rollback pair.
+- `build/pr42-review/flight-reload-ctd-20260918-1416/`: 0.9.38 latch regression, validation, crash evidence and deployment scripts.
+- `build/pr42-review/delivery-20260918-143257-579/`: immutable 0.9.38 installation receipt and rollback pair.
+- `build/pr42-review/repeated-reload-ctd-20260918-1618/`: repeated failure logs/records, native fault and release-consumer captures, bounded renderer snapshots and retirement investigation.
+- `build/pr42-review/retirement-validated-20260918-1545/`: immutable 0.9.39 validated executable/DLL pair and receipts.

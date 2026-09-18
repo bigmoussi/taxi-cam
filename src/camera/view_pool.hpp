@@ -14,6 +14,7 @@ enum class ViewPoolStatus {
   invalid_array,
   invalid_view,
   duplicate_view,
+  invalid_release_queue,
   invalid_control,
   read_failed,
   changed,
@@ -29,6 +30,8 @@ struct ViewSlot {
   ViewAssociation association = ViewAssociation::unobserved;
   bool free = false;
   bool association_valid = false;
+  bool release_pending = false;
+  bool release_queued = false;
 };
 
 struct ViewPoolSnapshot {
@@ -46,6 +49,22 @@ struct ViewPoolSnapshot {
   // Published only after all slots and their consistency rechecks succeed.
   std::uint32_t free_count = 0;
   std::array<std::int32_t, 2> first_free_indices{-1, -1};
+  bool release_checked = false;
+  std::uint32_t release_count = 0;
+  std::array<std::uint32_t, 2> release_queue_counts{};
+  std::array<std::uint64_t, 128> release_views{};
+
+  // The engine selects the first native-free slot, not the first unqueued one.
+  bool creation_available(unsigned required) const noexcept {
+    if (!valid || !release_checked || required == 0 || required > first_free_indices.size() || free_count < required)
+      return false;
+    for (unsigned i = 0; i < required; ++i) {
+      const auto index = first_free_indices[i];
+      if (index < 0 || index >= static_cast<std::int32_t>(slots.size()) || slots[index].release_pending || slots[index].release_queued)
+        return false;
+    }
+    return true;
+  }
 };
 
 // Reproduce the captured 66864720 availability predicate over eight EXISTING
@@ -64,5 +83,58 @@ struct ViewPoolSnapshot {
 // The reader must not throw; report unavailable memory by returning false.
 // This helper is not an SEH fault barrier.
 ViewPoolSnapshot inspect_view_pool(MemoryReader& reader, std::uint64_t renderer) noexcept;
+
+// Creation-only extension. The caller must first verify the renderer release
+// method contracts. Captures P+23688 and both renderer+2768/+2784 release queues,
+// then rechecks the entire association/marker/queue trace together. A cleared
+// association alone is never evidence that native deferred release has ended.
+ViewPoolSnapshot inspect_view_creation_pool(MemoryReader& reader, std::uint64_t renderer) noexcept;
+
+// These addresses are comparison tokens, never dereferenced after retirement.
+// Keep them beyond native ID disappearance until the current pool and release
+// queue prove the old views are no longer pending. Only native code clears the
+// marker/replaces the slot. A different renderer cannot prove old retirement.
+class RetiredViewPool {
+ public:
+  bool retain(std::uint64_t renderer, std::uint64_t view) noexcept {
+    if (!renderer || !view || (renderer_ && renderer_ != renderer))
+      return false;
+    for (auto old : views_)
+      if (old == view)
+        return true;
+    for (auto& old : views_)
+      if (!old) {
+        renderer_ = renderer;
+        old = view;
+        return true;
+      }
+    return false;
+  }
+  bool pending() const noexcept { return views_[0] || views_[1]; }
+  bool observe(std::uint64_t renderer, const ViewPoolSnapshot& pool) noexcept {
+    if (!pending())
+      return true;
+    if (renderer != renderer_ || !pool.valid || !pool.release_checked)
+      return false;
+    for (auto& old : views_) {
+      if (!old)
+        continue;
+      bool pending = false;
+      for (unsigned i = 0; i < pool.release_count; ++i)
+        pending |= pool.release_views[i] == old;
+      for (const auto& slot : pool.slots)
+        pending |= slot.view_address == old && slot.release_pending;
+      if (!pending)
+        old = 0;
+    }
+    if (!pending())
+      renderer_ = 0;
+    return !pending();
+  }
+
+ private:
+  std::uint64_t renderer_{};
+  std::array<std::uint64_t, 2> views_{};
+};
 
 }  // namespace taxi_camera::engine_camera

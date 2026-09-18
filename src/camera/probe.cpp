@@ -18,6 +18,7 @@
 #include "scene_session_reset.hpp"
 #include "source_view.hpp"
 #include "view_aa.hpp"
+#include "view_creation_wait.hpp"
 #include "view_readiness_wait.hpp"
 #include "view_resize.hpp"
 #include "view_resize_recovery.hpp"
@@ -87,6 +88,16 @@ struct Runtime {
   ViewResizeRecovery resize_recovery;
   ViewReadinessWait view_wait;
   ViewRetirement retirement;
+  ec::RetiredViewPool retired_views;
+  std::array<std::uint64_t, 2> owned_pool_views{};
+  std::uint64_t owned_pool_renderer{};
+  ViewCreationWait creation_wait;
+  std::uint64_t creation_revision = 0;
+  bool creation_pool_deferred = false;
+  std::uint64_t retirement_deferrals = 0;
+  bool retirement_waiting = false;
+  const char* retirement_status = "not_inspected";
+  std::array<std::uint32_t, 2> retirement_queue_counts{};
   ULONGLONG last_inspection = 0;
   std::uint64_t manager = 0;
   std::uint64_t control = 0;
@@ -131,7 +142,12 @@ void begin_session_reset(Runtime& runtime, const profiles::AircraftProfile& prof
   runtime.profile_transition.consume();
   runtime.session_reset.begin(profile.id);
   const auto cancelled = runtime.pair.cancel_uncreated_request();
-  runtime.session_reset.observe_empty(cancelled, runtime.pair.snapshot());
+  // Only the observer can acknowledge renderer retirement. An empty mailbox
+  // snapshot does not establish that either native release queue has drained.
+  // Before an observer has ever been installed, no native camera allocation
+  // could have run; preserve the empty initial setup path without a deadlock.
+  if (!runtime.hooked.load(std::memory_order_acquire))
+    runtime.session_reset.observe_empty(cancelled, runtime.pair.snapshot());
   if (runtime.profile_transition_token != UINT64_MAX)
     ++runtime.profile_transition_token;
   else
@@ -719,6 +735,39 @@ void service_profile_transition(Runtime& runtime, void* manager, ProbeSnapshot& 
     }
   }
 }
+ec::ViewPoolSnapshot creation_pool(Runtime& runtime) {
+  LocalMemoryReader reader;
+  LocalImageReader image(reinterpret_cast<HMODULE>(runtime.base), runtime.image.image_size, LocalImageQueryMode::pages);
+  auto pool = inspected(runtime, [&] {
+    std::uint64_t vtable = 0, again = 0;
+    if (!reader.read(runtime.renderer, &vtable, sizeof(vtable)) ||
+        !verify_renderer_release_methods(image, runtime.image, runtime.base, vtable, runtime.contract.functions))
+      return ec::ViewPoolSnapshot{};
+    auto result = ec::inspect_view_creation_pool(reader, runtime.renderer);
+    if (!reader.read(runtime.renderer, &again, sizeof(again)) || again != vtable ||
+        !verify_renderer_release_methods(image, runtime.image, runtime.base, vtable, runtime.contract.functions))
+      return ec::ViewPoolSnapshot{};
+    return result;
+  });
+  runtime.retirement_queue_counts = pool.release_queue_counts;
+  runtime.retirement_waiting = !pool.valid || !runtime.retired_views.observe(runtime.renderer, pool);
+  runtime.retirement_status = !pool.valid ? "unavailable" : runtime.retirement_waiting ? "retired_views_pending" : "complete";
+  return pool;
+}
+
+bool creation_capacity(Runtime& runtime, unsigned required) {
+  const auto pool = creation_pool(runtime);
+  const bool ready = !runtime.retirement_waiting && pool.creation_available(required);
+  if (!ready) {
+    runtime.retirement_waiting = true;
+    ++runtime.retirement_deferrals;
+    if (pool.valid && !std::strcmp(runtime.retirement_status, "complete"))
+      runtime.retirement_status = pool.free_count < required ? "capacity_pending" : "first_free_pending";
+    runtime.stage_error = "Waiting for native pooled-view retirement before camera creation.";
+  }
+  return ready;
+}
+
 bool initialize(void* opaque, ec::DescriptorStorage& descriptor) noexcept {
   auto& runtime = *static_cast<Runtime*>(opaque);
   runtime.lifecycle_touched = true;
@@ -736,12 +785,11 @@ bool initialize(void* opaque, ec::DescriptorStorage& descriptor) noexcept {
     try {
       runtime.message.clear();
       runtime.stage_error = "";
-      LocalMemoryReader reader;
-      const auto pool = inspected(runtime, [&] { return ec::inspect_view_pool(reader, runtime.renderer); });
-      runtime.creation_valid = pool.valid && pool.free_count >= 2;
-      if (!runtime.creation_valid)
-        runtime.stage_error = pool.valid ? "Two free engine views are required." : "The view pool could not be validated.";
-      else if (!(runtime.creation_valid = capture_pose(runtime))) {
+      runtime.creation_valid = creation_capacity(runtime, 2);
+      if (!runtime.creation_valid) {
+        runtime.creation_pool_deferred = true;
+        runtime.creation_wait.defer(runtime.creation_revision);
+      } else if (!(runtime.creation_valid = capture_pose(runtime))) {
         runtime.creation_error =
             runtime.message.empty() ? "A verified aircraft body pose is required before creating mounted views." : runtime.message;
         runtime.stage_error = runtime.creation_error.c_str();
@@ -770,9 +818,13 @@ ec::EntryId create(void* opaque, ec::ManagerToken token, const ec::DescriptorSto
     runtime.stage_error = "Manager identity changed before camera creation.";
     return 0;
   }
-  LocalMemoryReader reader;
-  const auto pool = inspected(runtime, [&] { return ec::inspect_view_pool(reader, runtime.renderer); });
-  if (!pool.valid || pool.free_count < (runtime.creations == 0 ? 2u : 1u) || !session_work_allowed(runtime)) {
+  if (!creation_capacity(runtime, runtime.creations == 0 ? 2u : 1u)) {
+    runtime.creation_pool_deferred = true;
+    runtime.creation_wait.defer(runtime.creation_revision);
+    runtime.creation_valid = false;
+    return 0;
+  }
+  if (!session_work_allowed(runtime)) {
     runtime.creation_valid = false;
     runtime.stage_error = "Available view capacity changed before camera creation.";
     return 0;
@@ -787,6 +839,10 @@ ec::EntryId create(void* opaque, ec::ManagerToken token, const ec::DescriptorSto
   ++runtime.creations;
   ++runtime.created_total;
   auto view = inspect_entry(runtime, id);
+  if (view.complete && view.ready) {
+    runtime.owned_pool_renderer = runtime.renderer;
+    runtime.owned_pool_views[runtime.creations - 1] = view.view_address;
+  }
   runtime.creation_valid = view.complete && view.ready;
   if (!runtime.creation_valid)
     runtime.stage_error = view.complete ? "Entry setup was pending; rolling back the new pair."
@@ -903,6 +959,8 @@ bool erase(void* opaque, ec::ManagerToken token, ec::EntryId id) noexcept {
   if (action != ViewRetirement::Action::erase || readiness.loading ||
       (runtime.reset_requested.load(std::memory_order_acquire) && !readiness.ready))
     return false;
+  if (!runtime.retired_views.retain(runtime.renderer, view.view_address))
+    return false;
   function<void (*)(void*, std::uint64_t)>(runtime, runtime.contract.functions.erase_entry)(reinterpret_cast<void*>(token.identity), id);
   reader.reset_budget();
   entries = inspected(runtime, [&] { return ec::inspect_owned_entries(reader, token.identity, {id, 0}); });
@@ -936,6 +994,12 @@ void clear_retired_pair(Runtime& runtime) {
   // Only the observer may clear these fields, after PairController confirms
   // that its exact owned IDs are absent. A public event is not that proof.
   scene_handoff().stop_scene();
+  // ID disappearance may be observed without our erase callback (flight
+  // teardown). Transfer last verified pooled identities before discarding the
+  // pair's other metadata. No saved address is dereferenced by this ledger.
+  for (auto& view : runtime.owned_pool_views)
+    if (view && runtime.retired_views.retain(runtime.owned_pool_renderer, view))
+      view = 0;
   runtime.owned_control = 0;
   runtime.scheduled_ids = {};
   runtime.resized_ids = {};
@@ -964,12 +1028,21 @@ void service_session_reset(Runtime& runtime, void* manager, ProbeSnapshot& repor
   report.pair = runtime.pair.snapshot();
   if (drained == ec::EmptyPairCancel::cancelled && SceneSessionReset::empty(report.pair))
     clear_retired_pair(runtime);
+  bool renderer_retired = !runtime.retired_views.pending();
+  if (!renderer_retired && timed(runtime, ProbeStage::manager, [&] { return manager_context(runtime, manager); })) {
+    const auto pool = timed(runtime, ProbeStage::pool, [&] { return creation_pool(runtime); });
+    renderer_retired = pool.valid && !runtime.retirement_waiting;
+    if (!renderer_retired)
+      ++runtime.retirement_deferrals;
+  }
   const std::lock_guard lock(runtime.mutex);
-  runtime.session_reset.observe_empty(drained, report.pair);
+  if (renderer_retired)
+    runtime.session_reset.observe_empty(drained, report.pair);
   report.outputs_matched = false;
   report.accepting_requests = false;
   report.message = !SceneSessionReset::empty(report.pair)
                        ? "Flight reset is closing and retiring the prior owned camera IDs; unresolved identities remain retained."
+                   : !renderer_retired ? "Prior camera IDs are absent; waiting for native pooled-view retirement."
                    : !get_aircraft_session_readiness().ready
                        ? "Prior camera IDs are absent; waiting for flight load completion and fresh public identity/WORLD pose."
                        : "Flight reset completed; prior camera IDs are absent and a new camera pair may be requested.";
@@ -1193,11 +1266,21 @@ void observer(void* manager) noexcept {
       report.free_views = pool.valid ? pool.free_count : 0;
       runtime.creations = 0;
       runtime.creation_pose_unavailable = false;
+      runtime.creation_pool_deferred = false;
+      runtime.creation_revision = start_revision;
       runtime.lifecycle_touched = false;
       runtime.creation_valid = pool.valid && pool.free_count >= 2;
       ec::EngineCallbacks callbacks{&runtime, initialize, create, erase};
       timed(runtime, ProbeStage::lifecycle, [&] { runtime.pair.process_update(runtime.token, callbacks); });
       auto pair = runtime.pair.snapshot();
+      if (runtime.creation_wait.pending()) {
+        const std::lock_guard lock(runtime.mutex);
+        if (runtime.creation_wait.resume(runtime.pair, runtime.requested_start_revision, runtime.recovery.requested(),
+                                         !runtime.suspended.load() && session_work_allowed(runtime))) {
+          runtime.requested_start = requested_start = true;
+          pair = runtime.pair.snapshot();
+        }
+      }
       bool retry_pose_waiting = false;
       if (!requested_start && !pair.owned_ids[0] && !pair.owned_ids[1]) {
         const auto retry_body = sample_body_pose(GetTickCount64());
@@ -1226,17 +1309,21 @@ void observer(void* manager) noexcept {
         }
       }
       bool waiting_for_body = retry_pose_waiting;
+      bool waiting_for_pool = false;
       bool resolution_pause = false;
       if (requested_start && !pair.owned_ids[0] && !pair.owned_ids[1]) {
-        waiting_for_body = !timed(runtime, ProbeStage::pose, [&] { return capture_pose(runtime); });
+        waiting_for_pool = !timed(runtime, ProbeStage::pool, [&] { return creation_capacity(runtime, 2); });
+        if (!waiting_for_pool)
+          waiting_for_body = !timed(runtime, ProbeStage::pose, [&] { return capture_pose(runtime); });
         bool create_requested = false;
-        if (!waiting_for_body) {
+        if (!waiting_for_body && !waiting_for_pool) {
           // Stop and a new Start share this small mailbox transaction. A slow
           // calibration cannot resurrect an enable that the UI has cancelled.
           const std::lock_guard lock(runtime.mutex);
           if (runtime.requested_start && runtime.requested_start_revision == start_revision && !runtime.suspended.load() &&
               session_work_allowed(runtime)) {
             scene_handoff().begin_scene();
+            runtime.creation_revision = start_revision;
             runtime.pair.request_independent_pose();
             runtime.requested_start = false;
             create_requested = true;
@@ -1247,17 +1334,29 @@ void observer(void* manager) noexcept {
           pair = runtime.pair.snapshot();
           if (pair.state != ec::State::active) {
             bool deferred = false;
+            if (runtime.creation_pool_deferred) {
+              // Cleanup remains runnable on later observers. The retained
+              // revision can rearm only once the controller proves no owned ID.
+              runtime.pair.request_disable();
+              // Do not publish a terminal empty initializer failure for even
+              // one worker tick: prewarm would otherwise consume it as failed.
+              // Partial ownership stays cleanup_pending until actual removal.
+              runtime.pair.cancel_uncreated_request();
+              pair = runtime.pair.snapshot();
+              waiting_for_pool = deferred = true;
+            }
             {
               const std::lock_guard lock(runtime.mutex);
-              deferred = defer_initial_pose_failure(runtime.pair, runtime.token, runtime.recovery, runtime.creation_pose_unavailable,
-                                                    runtime.creations, start_revision, runtime.requested_start_revision, now);
+              if (!deferred)
+                deferred = defer_initial_pose_failure(runtime.pair, runtime.token, runtime.recovery, runtime.creation_pose_unavailable,
+                                                      runtime.creations, start_revision, runtime.requested_start_revision, now);
               if (deferred)
-                runtime.stop_detail = runtime.creation_error;
+                runtime.stop_detail = waiting_for_pool ? runtime.stage_error : runtime.creation_error;
             }
-            if (deferred) {
+            if (deferred && !waiting_for_pool) {
               pair = runtime.pair.snapshot();
               waiting_for_body = report.pose_waiting = true;
-            } else {
+            } else if (!deferred) {
               record_stop(runtime, SceneStopReason::creation_failed,
                           *runtime.stage_error ? runtime.stage_error : "Owned camera creation did not complete.", now, start_revision);
             }
@@ -1499,7 +1598,10 @@ void observer(void* manager) noexcept {
         report.flags = {};
       }
       report.pose_captured = runtime.pose_captured;
-      if (resolution_pause)
+      if (waiting_for_pool || runtime.creation_wait.pending()) {
+        report.view_waiting = true;
+        report.message = "Camera start remains pending until native pooled-view retirement completes.";
+      } else if (resolution_pause)
         report.message = runtime.message;
       else if (body_pose_failed || waiting_for_body)
         report.message = runtime.message.empty() ? runtime.stage_error : runtime.message;
@@ -1525,6 +1627,10 @@ void observer(void* manager) noexcept {
     // duration is published after this operation has itself been timed.
     report.inspection_count = runtime.inspection_count;
     report.created_total = runtime.created_total;
+    report.retirement_deferrals = runtime.retirement_deferrals;
+    report.retirement_waiting = runtime.retirement_waiting;
+    report.retirement_status = runtime.retirement_status;
+    report.retirement_queue_counts = runtime.retirement_queue_counts;
     report.view_wait_count = runtime.view_wait.episodes();
     report.observer_last_ms = runtime.observer_last_ms;
     report.observer_max_ms = runtime.observer_max_ms;

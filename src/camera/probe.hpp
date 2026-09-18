@@ -74,6 +74,10 @@ struct ProbeSnapshot {
   std::array<std::uint64_t, 2> activation_counts{};
   std::uint32_t thread_id = 0;
   std::uint32_t free_views = 0;
+  std::uint64_t retirement_deferrals = 0;
+  bool retirement_waiting = false;
+  const char* retirement_status = "not_inspected";
+  std::array<std::uint32_t, 2> retirement_queue_counts{};
   std::array<bool, 2> ready{};
   std::array<const char*, 2> inspection_status{"not_inspected", "not_inspected"};
   std::array<bool, 2> resource_present{};
