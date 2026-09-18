@@ -15,7 +15,9 @@ namespace taxi_camera::standalone {
 // call. Never split the application's batch into separate Execute calls.
 // A prefix is revoked if the same display later becomes writable again: the
 // overlay would run first and the native instrument (or TAA/DLSS history) would
-// show through for that stamp frame.
+// show through for that stamp frame. A later list in the same Execute that
+// writes the display (UAV TAA, a second instrument pass) moves the copy after
+// that last insertable write instead of stamping first.
 //
 // The caller observes every recording from a real successful Reset through
 // successful Close, reports every GPU command and pass, and invalidates omitted
@@ -154,7 +156,10 @@ class PfdSubmissionProof {
       // COMMON promotes to RT on the first write in the Execute. A prefix
       // overlay copied before that promotion is then replaced by the instrument.
       for (auto& slot : slots_)
-        if (slot.prefix_exit && slot.seen && slot.after == D3D12_RESOURCE_STATE_COMMON) {
+        if (slot.seen && slot.after == D3D12_RESOURCE_STATE_COMMON) {
+          slot.wrote = true;
+          if (!slot.prefix_exit)
+            continue;
           slot.prefix_exit = false;
           if (slot.prefix_blocker == UINT_MAX)
             slot.prefix_blocker = operation;
@@ -242,6 +247,8 @@ class PfdSubmissionProof {
     slot->after = after;
     slot->subresource = subresource;
     slot->exit = before == D3D12_RESOURCE_STATE_RENDER_TARGET && copy_restorable(after);
+    if (writable_gpu_state(after))
+      slot->wrote = true;
     if (slot->prefix_exit && writable_gpu_state(after)) {
       slot->prefix_exit = false;
       if (slot->prefix_blocker == UINT_MAX)
@@ -284,6 +291,51 @@ class PfdSubmissionProof {
     }
     return {};
   }
+  // Compute TAA/DLSS often writes the same display after an RT→SRV exit, in this
+  // list or a later list in the same Execute. That overwrite is not a leading RT
+  // exit, but the overlay must run after the last proven write.
+  Candidate suffix_candidate(Key key, std::uint64_t generation) const noexcept {
+    if (complete(generation))
+      for (const auto& slot : slots_)
+        if (slot.key == key && slot.seen && slot.wrote && insertable_after(slot.after))
+          return {slot.key, generation, slot.first_before, slot.after, slot.subresource};
+    return {};
+  }
+  Candidate suffix_candidate(std::size_t index, std::uint64_t generation) const noexcept {
+    if (index < slots_.size() && complete(generation)) {
+      const auto& slot = slots_[index];
+      if (slot.seen && slot.wrote && insertable_after(slot.after))
+        return {slot.key, generation, slot.first_before, slot.after, slot.subresource};
+    }
+    return {};
+  }
+  bool overwrote(Key key, std::uint64_t generation) const noexcept {
+    if (complete(generation))
+      for (const auto& slot : slots_)
+        if (slot.key == key && slot.seen && slot.wrote)
+          return true;
+    return false;
+  }
+  // Dispatch/ClearUAV cannot touch an RT-state base mip, so they stay
+  // prefix-safe before the first RT exit. After an explicit UAV or COMMON
+  // state they can replace a stamp that already ran.
+  void compute_work(UINT operation = 14) noexcept {
+    state_disjoint_work(operation);
+    if (!open())
+      return;
+    for (auto& slot : slots_) {
+      if (!slot.seen)
+        continue;
+      if (slot.after != D3D12_RESOURCE_STATE_COMMON && !(static_cast<UINT>(slot.after) & D3D12_RESOURCE_STATE_UNORDERED_ACCESS))
+        continue;
+      slot.wrote = true;
+      slot.prefix_exit = false;
+      if (slot.prefix_blocker == UINT_MAX)
+        slot.prefix_blocker = operation;
+      if (prefix_blocker_ == UINT_MAX)
+        prefix_blocker_ = operation;
+    }
+  }
   // A later writable return revokes prefix insertion, but the leading RT exit
   // still proves this display completed. Autodetect activity uses that evidence
   // without stamping before TAA/DLSS or a second instrument pass.
@@ -315,6 +367,41 @@ class PfdSubmissionProof {
       return {};
     return batch[after_list].proof->candidate(key, batch[after_list].generation);
   }
+  struct Overlay {
+    Candidate candidate{};
+    std::size_t list = static_cast<std::size_t>(-1);
+    bool before = false;
+    explicit operator bool() const noexcept { return static_cast<bool>(candidate) && list != static_cast<std::size_t>(-1); }
+  };
+  // Prefer a copy after the last proven write in this Execute. A prefix/tail
+  // site is refused when a later list overwrote the same display without an
+  // insertable after-state: stamping first would flash the native instrument.
+  static Overlay batch_overlay(const Recording* batch, std::size_t count, Key key) noexcept {
+    Overlay write{}, safe{};
+    if (!batch_allows(batch, count))
+      return {};
+    for (std::size_t i = 0; i < count; ++i) {
+      const auto generation = batch[i].generation;
+      const auto* proof = batch[i].proof;
+      if (auto suffix = proof->suffix_candidate(key, generation))
+        write = {suffix, i, false};
+      if (!safe.candidate) {
+        if (auto tail = proof->candidate(key, generation))
+          safe = {tail, i, false};
+        else if (auto prefix = proof->prefix_candidate(key, generation))
+          safe = {prefix, i, true};
+      }
+    }
+    if (write.candidate)
+      return write;
+    if (safe.candidate) {
+      const auto after = safe.list + (safe.before ? 0 : 1);
+      for (std::size_t i = after; i < count; ++i)
+        if (batch[i].proof->overwrote(key, batch[i].generation))
+          return {};
+    }
+    return safe;
+  }
 
  private:
   struct Slot {
@@ -322,7 +409,7 @@ class PfdSubmissionProof {
     D3D12_RESOURCE_STATES first_before{}, after{};
     UINT subresource{};
     UINT prefix_blocker = UINT_MAX;
-    bool seen{}, exit{}, prefix_exit{}, leading_exit{};
+    bool seen{}, exit{}, prefix_exit{}, leading_exit{}, wrote{};
   };
   static bool copy_restorable(D3D12_RESOURCE_STATES state) noexcept {
     // COMMON is exact only because an explicit full RT exit established it and
@@ -334,9 +421,17 @@ class PfdSubmissionProof {
     return !(static_cast<UINT>(state) & ~mask);
   }
   static bool writable_gpu_state(D3D12_RESOURCE_STATES state) noexcept {
-    constexpr UINT mask = D3D12_RESOURCE_STATE_RENDER_TARGET | D3D12_RESOURCE_STATE_UNORDERED_ACCESS |
-                          D3D12_RESOURCE_STATE_COPY_DEST | D3D12_RESOURCE_STATE_RESOLVE_DEST;
+    constexpr UINT mask = D3D12_RESOURCE_STATE_RENDER_TARGET | D3D12_RESOURCE_STATE_UNORDERED_ACCESS | D3D12_RESOURCE_STATE_COPY_DEST |
+                          D3D12_RESOURCE_STATE_RESOLVE_DEST;
     return (static_cast<UINT>(state) & mask) != 0;
+  }
+  // Queue copies restore RT, UAV, or SRV/NSR. COMMON after GPU work is not
+  // insertable: the first write implicitly promotes it.
+  static bool insertable_after(D3D12_RESOURCE_STATES state) noexcept {
+    if (state == D3D12_RESOURCE_STATE_RENDER_TARGET || state == D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
+      return true;
+    constexpr UINT mask = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    return state != D3D12_RESOURCE_STATE_COMMON && (static_cast<UINT>(state) & ~mask) == 0;
   }
   bool open() noexcept {
     if (!known_ || closed_) {

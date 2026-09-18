@@ -285,14 +285,14 @@ void submission_gpu_classification_checks() {
   };
 #define WORK_CASE(Slot, Interface, Method, Action, Disjoint) \
   run(Slot, Disjoint, [&] { WorkCall<Slot, decltype(&Interface::Method), win::Action>::run(list->native); })
-  WORK_CASE(14, ID3D12GraphicsCommandList, Dispatch, StateDisjointGpuWork, true);
+  WORK_CASE(14, ID3D12GraphicsCommandList, Dispatch, ComputeGpuWork, true);
   WORK_CASE(15, ID3D12GraphicsCommandList, CopyBufferRegion, StateDisjointGpuWork, true);
   WORK_CASE(18, ID3D12GraphicsCommandList, CopyTiles, StateDisjointGpuWork, true);
   WORK_CASE(19, ID3D12GraphicsCommandList, ResolveSubresource, StateDisjointGpuWork, true);
   WORK_CASE(47, ID3D12GraphicsCommandList, ClearDepthStencilView, StateDisjointGpuWork, true);
   WORK_CASE(48, ID3D12GraphicsCommandList, ClearRenderTargetView, GpuWork, false);
-  WORK_CASE(49, ID3D12GraphicsCommandList, ClearUnorderedAccessViewUint, StateDisjointGpuWork, true);
-  WORK_CASE(50, ID3D12GraphicsCommandList, ClearUnorderedAccessViewFloat, StateDisjointGpuWork, true);
+  WORK_CASE(49, ID3D12GraphicsCommandList, ClearUnorderedAccessViewUint, ComputeGpuWork, true);
+  WORK_CASE(50, ID3D12GraphicsCommandList, ClearUnorderedAccessViewFloat, ComputeGpuWork, true);
   WORK_CASE(54, ID3D12GraphicsCommandList, ResolveQueryData, StateDisjointGpuWork, true);
   WORK_CASE(60, ID3D12GraphicsCommandList1, AtomicCopyBufferUINT, GpuWork, false);
   WORK_CASE(61, ID3D12GraphicsCommandList1, AtomicCopyBufferUINT64, GpuWork, false);
@@ -301,7 +301,7 @@ void submission_gpu_classification_checks() {
   WORK_CASE(72, ID3D12GraphicsCommandList4, BuildRaytracingAccelerationStructure, StateDisjointGpuWork, true);
   WORK_CASE(73, ID3D12GraphicsCommandList4, EmitRaytracingAccelerationStructurePostbuildInfo, StateDisjointGpuWork, true);
   WORK_CASE(74, ID3D12GraphicsCommandList4, CopyRaytracingAccelerationStructure, StateDisjointGpuWork, true);
-  WORK_CASE(76, ID3D12GraphicsCommandList4, DispatchRays, StateDisjointGpuWork, true);
+  WORK_CASE(76, ID3D12GraphicsCommandList4, DispatchRays, ComputeGpuWork, true);
   WORK_CASE(79, ID3D12GraphicsCommandList6, DispatchMesh, GpuWork, false);
 #undef WORK_CASE
   using Begin = WorkCall<52, decltype(&ID3D12GraphicsCommandList::BeginQuery), win::QueryBegin>;

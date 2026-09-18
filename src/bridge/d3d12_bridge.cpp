@@ -1528,12 +1528,8 @@ void plan_display_submission(void*,
   for (UINT i = 0; i < count; ++i) {
     for (std::size_t slot = 0; slot < PfdSubmissionProof::maximum_resources; ++slot) {
       auto exit = batch[i].proof->candidate(slot, batch[i].generation);
-      bool before = false;
-      bool insert = bool(exit);
-      if (!exit) {
+      if (!exit)
         exit = batch[i].proof->prefix_candidate(slot, batch[i].generation);
-        before = insert = bool(exit);
-      }
       if (!exit) {
         const auto refusal = batch[i].proof->prefix_refusal(slot, batch[i].generation);
         if (refusal.operation < r.queue_prefix_blockers.size()) {
@@ -1543,6 +1539,8 @@ void plan_display_submission(void*,
         }
         exit = batch[i].proof->activity_candidate(slot, batch[i].generation);
       }
+      if (!exit)
+        exit = batch[i].proof->suffix_candidate(slot, batch[i].generation);
       if (!exit)
         continue;
       auto* native = reinterpret_cast<ID3D12Resource*>(exit.key.resource);
@@ -1554,14 +1552,18 @@ void plan_display_submission(void*,
       // A submitted, identity-qualified RT completion is independent of camera
       // demand. Keep this distinct from actual draws and preserve side ordering.
       found->second->submission_activity.fetch_add(1, std::memory_order_relaxed);
-      if (!insert)
-        continue;
-      for (unsigned side = 0; side < 2; ++side)
-        if (patches.ready_mask & (1u << side))
-          if (r.selected_resources[side] == found->second) {
-            positions[side] = i * 2 + (before ? 0u : 1u);
-            selected[side] = exit;
-          }
+    }
+  }
+  for (unsigned side = 0; side < 2; ++side) {
+    if (!(patches.ready_mask & (1u << side)))
+      continue;
+    const auto* target = r.selected_resources[side];
+    if (!target || !target->alive || !display_item(r, *target))
+      continue;
+    const PfdSubmissionProof::Key key{reinterpret_cast<std::uint64_t>(target->native), target->id};
+    if (const auto overlay = PfdSubmissionProof::batch_overlay(batch.data(), count, key)) {
+      positions[side] = static_cast<UINT>(overlay.list * 2 + (overlay.before ? 0u : 1u));
+      selected[side] = overlay.candidate;
     }
   }
   if (!candidates) {
@@ -2185,6 +2187,7 @@ struct GpuWork {
   }
 };
 struct StateDisjointGpuWork {};
+struct ComputeGpuWork {};
 struct Unsupported {
   template <class... Args>
   static void apply(List& l, Args...) {
@@ -2226,8 +2229,8 @@ struct StateHook<Slot, void (STDMETHODCALLTYPE C::*)(Args...), Action> {
     // mismatch forbids injection until a real, fully observed native Reset.
     if constexpr (!std::is_same_v<Action, Targets> && !std::is_same_v<Action, ClearState> && !std::is_same_v<Action, Unsupported> &&
                   !std::is_same_v<Action, Predication> && !std::is_same_v<Action, GpuWork> &&
-                  !std::is_same_v<Action, StateDisjointGpuWork> && !std::is_same_v<Action, QueryBegin> &&
-                  !std::is_same_v<Action, QueryEnd>) {
+                  !std::is_same_v<Action, StateDisjointGpuWork> && !std::is_same_v<Action, ComputeGpuWork> &&
+                  !std::is_same_v<Action, QueryBegin> && !std::is_same_v<Action, QueryEnd>) {
       if (!observation_enabled()) {
         auto& r = registry();
         if (r.diagnostics_enabled.load(std::memory_order_relaxed))
@@ -2254,6 +2257,8 @@ struct StateHook<Slot, void (STDMETHODCALLTYPE C::*)(Args...), Action> {
       if (auto item = ensure_list(reinterpret_cast<ID3D12GraphicsCommandList*>(native))) {
         if constexpr (std::is_same_v<Action, StateDisjointGpuWork>)
           item->submission_proof.state_disjoint_work(Slot);
+        else if constexpr (std::is_same_v<Action, ComputeGpuWork>)
+          item->submission_proof.compute_work(Slot);
         else if constexpr (std::is_same_v<Action, GpuWork>)
           item->submission_proof.gpu_work(Slot);
         else
@@ -2313,14 +2318,14 @@ bool hook_state(ID3D12GraphicsCommandList* list, bool active = false) {
   // active-pass implementations for these optional newer setters untouched.
   if (active)
     return ok;
-  ok &= STATE(14, Dispatch, StateDisjointGpuWork)::install(list);
+  ok &= STATE(14, Dispatch, ComputeGpuWork)::install(list);
   ok &= STATE(15, CopyBufferRegion, StateDisjointGpuWork)::install(list);
   ok &= STATE(18, CopyTiles, StateDisjointGpuWork)::install(list);
   ok &= STATE(19, ResolveSubresource, StateDisjointGpuWork)::install(list);
   ok &= STATE(47, ClearDepthStencilView, StateDisjointGpuWork)::install(list);
   ok &= STATE(48, ClearRenderTargetView, GpuWork)::install(list);
-  ok &= STATE(49, ClearUnorderedAccessViewUint, StateDisjointGpuWork)::install(list);
-  ok &= STATE(50, ClearUnorderedAccessViewFloat, StateDisjointGpuWork)::install(list);
+  ok &= STATE(49, ClearUnorderedAccessViewUint, ComputeGpuWork)::install(list);
+  ok &= STATE(50, ClearUnorderedAccessViewFloat, ComputeGpuWork)::install(list);
   ok &= STATE(54, ResolveQueryData, StateDisjointGpuWork)::install(list);
   ID3D12GraphicsCommandList1* sample_list{};
   const auto sample_interface = list->QueryInterface(IID_PPV_ARGS(&sample_list));
@@ -2360,7 +2365,7 @@ bool hook_state(ID3D12GraphicsCommandList* list, bool active = false) {
       ok &= StateHook<73, decltype(&ID3D12GraphicsCommandList4::EmitRaytracingAccelerationStructurePostbuildInfo),
                       StateDisjointGpuWork>::install(list);
       ok &= StateHook<74, decltype(&ID3D12GraphicsCommandList4::CopyRaytracingAccelerationStructure), StateDisjointGpuWork>::install(list);
-      ok &= StateHook<76, decltype(&ID3D12GraphicsCommandList4::DispatchRays), StateDisjointGpuWork>::install(list);
+      ok &= StateHook<76, decltype(&ID3D12GraphicsCommandList4::DispatchRays), ComputeGpuWork>::install(list);
     }
   }
   if (state_object_list)
