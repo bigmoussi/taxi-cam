@@ -116,6 +116,14 @@ bool accept_session_packet(const void* raw, DWORD bytes) noexcept {
   ReleaseSRWLockExclusive(&state.lock);
   return changed;
 }
+bool session_reconnect_required(bool invalidated) noexcept {
+  AcquireSRWLockShared(&state.lock);
+  // A legacy Sim-stop can precede FLOW_END. Keep listening so closing the
+  // connection cannot discard the event that establishes the persistent latch.
+  const bool reconnect = invalidated && state.aircraft_session.running() && !state.aircraft_session.loading();
+  ReleaseSRWLockShared(&state.lock);
+  return reconnect;
+}
 bool accept_identity_packet(const void* raw, DWORD bytes, std::uint64_t now) noexcept {
   AcquireSRWLockExclusive(&state.lock);
   const auto before = state.identity.sample(now);
@@ -599,18 +607,14 @@ DWORD WINAPI worker(void*) noexcept {
       }
       if (header[2] == 4 || header[2] == 6 || (AircraftSessionLifecycle::flow_receive_id(header[2]) && bytes == 272)) {
         const bool invalidated = accept_session_packet(raw, bytes);
-        AcquireSRWLockShared(&state.lock);
         // Keep the flow subscription alive throughout loading. Reconnect only
         // after completion, discarding every response queued before it.
-        reconnect = invalidated && !state.aircraft_session.loading();
-        ReleaseSRWLockShared(&state.lock);
+        reconnect = session_reconnect_required(invalidated);
         if (reconnect)
           break;
       } else if (header[2] == 15 || (header[2] == 8 && bytes >= 40 && header[5] == 5)) {
         const bool invalidated = accept_identity_packet(raw, bytes, GetTickCount64());
-        AcquireSRWLockShared(&state.lock);
-        reconnect = invalidated && !state.aircraft_session.loading();
-        ReleaseSRWLockShared(&state.lock);
+        reconnect = session_reconnect_required(invalidated);
         if (reconnect)
           break;
       } else if (header[2] == 8) {
@@ -834,6 +838,23 @@ bool select_aircraft_profile(std::uint32_t id) noexcept {
   if (!profiles::find(id))
     return false;
   AcquireSRWLockExclusive(&lifecycle);
+  AcquireSRWLockExclusive(&state.lock);
+  if (state.aircraft_session.loading() || !state.aircraft_session.running()) {
+    ReleaseSRWLockExclusive(&state.lock);
+    ReleaseSRWLockExclusive(&lifecycle);
+    return false;
+  }
+  if (id == profile_id.load() && state.worker && state.stop && WaitForSingleObject(state.worker, 0) == WAIT_TIMEOUT &&
+      WaitForSingleObject(state.stop, 0) == WAIT_TIMEOUT) {
+    // Explicit reconnect/full reset still requires new samples and calibration,
+    // but the same adapter needs no unsubscribe gap that could lose FLOW_END
+    // or FLIGHT_START. The worker will issue a new coherent identity poll.
+    reset_session_locked();
+    ReleaseSRWLockExclusive(&state.lock);
+    ReleaseSRWLockExclusive(&lifecycle);
+    return true;
+  }
+  ReleaseSRWLockExclusive(&state.lock);
   const bool stopped = stop_provider_locked();
   if (stopped)
     profile_id.store(id);
@@ -1072,6 +1093,9 @@ OnGroundSample on_ground_at(std::uint64_t now_ms) noexcept {
 }
 bool accept_session_packet(const void* packet, std::uint32_t bytes) noexcept {
   return native_camera::accept_session_packet(packet, bytes);
+}
+bool session_reconnect_required(bool invalidated) noexcept {
+  return native_camera::session_reconnect_required(invalidated);
 }
 bool accept_camera_packet(const void* packet, std::uint32_t bytes, std::uint64_t sample_ms) noexcept {
   return native_camera::accept_camera_packet(packet, bytes, sample_ms);

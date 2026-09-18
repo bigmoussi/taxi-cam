@@ -279,13 +279,15 @@ DWORD run_impl() {
       applied_profile_request = pending_profile_request;
       applied_session_epoch = pending_session_epoch;
       applied_connection = pending_connection;
-      char transition_detail[256]{};
+      char transition_detail[384]{};
       std::snprintf(
           transition_detail, sizeof(transition_detail),
-          "Aircraft transition: token=%llu session=%llu profile=%u entries=%llu/%llu connection=%llu full_reset=%u gpu_generation=%llu",
+          "Aircraft transition: token=%llu session=%llu profile=%u entries=%llu/%llu connection=%llu full_reset=%u gpu_generation=%llu "
+          "public_ready=%u loading=%u flow_subscribed=%u flow=%u",
           static_cast<unsigned long long>(transition_token), static_cast<unsigned long long>(applied_session_epoch), applied_profile,
           static_cast<unsigned long long>(transition.pair.owned_ids[0]), static_cast<unsigned long long>(transition.pair.owned_ids[1]),
-          static_cast<unsigned long long>(applied_connection), pending_full_reset, static_cast<unsigned long long>(pending_gpu_generation));
+          static_cast<unsigned long long>(applied_connection), pending_full_reset, static_cast<unsigned long long>(pending_gpu_generation),
+          transition_session.ready, transition_session.loading, transition_session.flow_subscribed, transition_session.last_flow_event);
       log_status(status, transition_detail);
       applied_mounts = {};
       intent = {};

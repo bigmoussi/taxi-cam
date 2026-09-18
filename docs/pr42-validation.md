@@ -40,7 +40,7 @@ At 13:14:14 UTC the simulator's crash report recorded an access violation in `Re
 
 During the transition, invalid camera world data preceded the public session-change notification. The old camera pair disappeared; warmup later created entries 1003/1004, raising the created-view count from two to four shortly before the crash. The final bridge samples show output disabled and both gates closed. This narrows investigation to transition/removal/recreation ordering but does not prove the faulting object's identity or the cause of the subsequent system freeze. GPU process-memory telemetry timed out; no claim of GPU release or retained allocations is made.
 
-The full runtime reset below was implemented after this crash. It was not present in the rendering-validation snapshot and has not yet been tested through an airport or aircraft change in MSFS.
+The full runtime reset below was implemented after this crash. It was not present in the rendering-validation snapshot. The later End Flight/runway test below reproduced the CTD with that reset present.
 
 ## Full flight-session reset test build
 
@@ -79,6 +79,26 @@ Version **0.9.37**, build 0, was installed at **14:08:10 UTC**. All 12 protected
 The captured detector regression fails against90ae339 and passes with this correction. Actual bridge discovery/routing checks pass **129 cases**, including partial power-up, reset and manual selection. Pinned `build.ps1 -Validate` passed on hardware/WARP; exact-pair smoke passed **148 checks**. The A350 graphics fixture now rejects its incomplete idle automatic pair, then verifies manual camera/calibration output with the same pixel oracles. The debug layer was unavailable.
 
 Automatic assignment in the new binary still needs a live cold-and-dark retest. These results do not establish right45's cockpit identity or resolve A380 boot-time targeting or airport-change crash/freeze behaviour.
+
+## End Flight / new runway flight crash and lifecycle correction
+
+The user reproduced the CTD on **0.9.37** by starting cold and dark, leaving Taxi Cam on the PFD, ending the flight, then starting a new flight on the runway. At **14:16:41 UTC**, Asobo reported `RenderThreadProc` with `0xc0000005`. WER and the bounded bridge record agree on PID44028, MSFS1.8.16.0, RVA`0x3d0ffe4`, read address`0x10`, matching the earlier airport-change fault. The old pair1001/1002 was absent before new entries1003/1004 were created during background warmup. Capture/composition/stamp totals did not advance after recreation. The reconnect in the launcher log occurred after the crash timestamp.
+
+The previous lifecycle policy incorrectly let FLT_LOADED clear an observed End Flight/menu state. A frozen-source regression against`a5a3618` supplies valid A35K identity, body and WORLD telemetry after End Flight → FLT_LOAD → FLT_LOADED and reproduces premature readiness. The correction stays blocked until the separate FLIGHT_START event and new telemetry. Stopped/loading sessions retain their event subscription; same-profile setup clears cached samples/calibration without closing a healthy worker. Native work also requires the exact startup flight epoch, including valid epoch zero for Connect in an already loaded flight. Successful-transition logs now include public readiness/loading and the last observed flow event.
+
+Version **0.9.38**, build 0, was installed at **14:32:58 UTC**, preserving all 12 protected settings/calibration files. MSFS was already closed; no simulator process was stopped.
+
+| File | SHA-256 |
+| --- | --- |
+| `taxi-cam.exe` | `DC2D0B6D3A2DF1B35EDAB4868AF9E510ECED204380E46D9A0E406758B2FF4EFD` |
+| `taxi-camera-bridge.dll` | `FCDBFE6C3AAA6FDE56AE686BFE51E100FDFF3EC11CCB23CDD73BF831A361184D` |
+
+- Pinned `build.ps1 -Validate`: hardware/WARP passed; exact-pair smoke: **148 checks passed**.
+- Public telemetry/session: **1,405 checks**; native reset/admission: **44**; production wrong-host runtime: **1,407**.
+- End/load regression fails against the frozen previous provider and passes with the correction. Both event orders, early Sim-stop, subscription preservation, fresh telemetry and late Connect are covered locally.
+- GPU fence/replay ownership remains unchanged. Existing blocked-producer reset and replay cases passed in full validation. The debug layer was unavailable.
+
+The logs retain sampled flow state rather than every event, and WER had already deleted the temporary dump. Register patterns match the earlier crash, but the faulting object's ownership is not established. Native/GPU audits found no demonstrated stale descriptor or resource-reuse defect to justify speculative cleanup. **The patch fixes demonstrated admission defects; the exact CTD cause and resolution still require the identical simulator reproduction.** System-freeze causality and A380 boot-time target identity also remain unresolved.
 
 ## Local evidence
 

@@ -54,8 +54,10 @@ class AircraftSessionLifecycle {
         if (!before)
           changed();
       } else if (event == FltLoaded) {
-        // Loading a new flight also leaves the preceding menu/end state.
-        pending_ &= ~(1u | 4u);
+        // A generic .flt load is not FLIGHT_START: menu/loading scenes can
+        // already expose valid aircraft telemetry. Only FLIGHT_START releases
+        // a previously observed end/menu latch.
+        pending_ &= ~1u;
       } else if (event == TeleportDone) {
         pending_ &= ~2u;
       } else if (event == FlightStart) {

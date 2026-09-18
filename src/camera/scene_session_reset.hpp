@@ -8,6 +8,12 @@ namespace taxi_camera::native_camera {
 // This policy owns no pointers; the observer still verifies each native erase.
 class SceneSessionReset {
  public:
+  // Public readiness from a newer flight cannot authorize an operation that
+  // was prepared for the prior flight. Retirement deliberately uses separate
+  // ownership/readiness guards because it must drain the previous epoch.
+  static bool work_allowed(bool reset_requested, std::uint64_t authorized_epoch, std::uint64_t public_epoch, bool public_ready) noexcept {
+    return !reset_requested && authorized_epoch == public_epoch && public_ready;
+  }
   void begin(std::uint32_t profile) noexcept {
     profile_ = profile;
     retired_ = false;

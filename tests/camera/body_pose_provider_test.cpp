@@ -36,6 +36,25 @@ void blocked_worker_lifecycle(Check check) {
   const auto before = testing::lifecycle_snapshot();
   check(before.worker && before.stop && before.profile == 1);
   check(initialize_body_pose_provider());
+  const std::array<DWORD, 10> body_header{96, 0, 8, 1, 0, 1, 0, 0, 1, 7};
+  const std::array<double, 7> body_values{51, -0.1, 123, 0, 0, 270, 5};
+  std::array<unsigned char, 96> body{};
+  std::memcpy(body.data(), body_header.data(), sizeof(body_header));
+  std::memcpy(body.data() + 40, body_values.data(), sizeof(body_values));
+  check(testing::accept_aircraft_packet(body.data(), body.size(), GetTickCount64()) && get_ground_speed().valid);
+  const auto initial_epoch = get_aircraft_session_epoch();
+  check(select_aircraft_profile(1));
+  check(!get_ground_speed().valid && get_aircraft_session_epoch() == initial_epoch);
+  const auto same = testing::lifecycle_snapshot();
+  check(same.worker == before.worker && same.stop == before.stop && WaitForSingleObject(blocked.stop, 0) == WAIT_TIMEOUT);
+  std::array<DWORD, 6> sim{24, 0, 4, 0, AircraftSessionLifecycle::SimEvent, 1};
+  check(!testing::accept_session_packet(sim.data(), sizeof(sim)));
+  sim[5] = 0;
+  check(testing::accept_session_packet(sim.data(), sizeof(sim)));
+  check(!testing::session_reconnect_required(true) && !select_aircraft_profile(2));
+  check(testing::lifecycle_snapshot().profile == 1 && WaitForSingleObject(blocked.stop, 0) == WAIT_TIMEOUT);
+  sim[5] = 1;
+  check(testing::accept_session_packet(sim.data(), sizeof(sim)));
   const auto began = GetTickCount64();
   check(!shutdown_body_pose_provider());
   check(GetTickCount64() - began < 250 && WaitForSingleObject(worker, 0) == WAIT_TIMEOUT);
@@ -109,6 +128,12 @@ void session_readiness_regressions(Check check) {
     check(accept(Session::BackToMainMenu) && session.epoch() == 4);
     check(!accept(Session::BackToMainMenu));
     check(accept(Session::FlightStart) && !session.loading());
+    check(accept(Session::FlightEnd) && session.epoch() == 5);
+    check(accept(Session::FltLoad));
+    check(accept(Session::FltLoaded) && session.loading() && session.epoch() == 5);
+    check(!accept(Session::FltLoaded) && session.loading());
+    check(!session.accept(sim.data(), sizeof(sim)) && session.loading());
+    check(accept(Session::FlightStart) && !session.loading() && session.epoch() == 5);
     flow_packet(Session::FltLoad, receive_id);
     for (DWORD bytes = 0; bytes < flow.size(); ++bytes)
       check(!session.accept(flow.data(), bytes));
@@ -220,6 +245,37 @@ void session_readiness_regressions(Check check) {
     check(!testing::accept_camera_packet(camera.data(), bytes, now));
   check(!testing::accept_camera_packet(flow.data(), flow.size(), now));
   check(!testing::accept_session_packet(camera.data(), camera.size()));
+  // End Flight -> generic .flt completion can still be a menu or loading
+  // scene. Fresh matching identity/body/WORLD is insufficient without the
+  // distinct FLIGHT_START event, regardless of intermediate Sim=1 messages.
+  const auto ended_epoch = get_aircraft_session_epoch();
+  flow_packet(Session::FlightEnd);
+  check(testing::accept_session_packet(flow.data(), flow.size()));
+  check(!testing::session_reconnect_required(true));
+  check(!select_aircraft_profile(1) && testing::lifecycle_snapshot().profile == 2);
+  flow_packet(Session::FltLoad);
+  check(testing::accept_session_packet(flow.data(), flow.size()));
+  supply();
+  check(!testing::session_readiness_at(now).ready);
+  flow_packet(Session::FltLoaded);
+  check(testing::accept_session_packet(flow.data(), flow.size()));
+  check(!testing::session_reconnect_required(true));
+  supply();
+  check(!testing::accept_session_packet(sim.data(), sizeof(sim)));
+  status = testing::session_readiness_at(now);
+  check(status.loading && !status.ready && status.epoch == ended_epoch + 1);
+  check(!sample_body_pose(now).calibration_required);
+  check(!calibrate_body_pose(body_math::ecef(cv[0], cv[1], cv[2]), static_cast<float>(fov), now));
+  update_taxi_button_request({2, ended_epoch + 1, 2, 3, 3}, true);
+  check(get_taxi_button_request_status().failed && !get_taxi_button_request_status().pending_mask);
+  flow_packet(Session::FlightStart);
+  check(testing::accept_session_packet(flow.data(), flow.size()));
+  check(testing::session_reconnect_required(true));
+  check(!testing::session_readiness_at(now).ready);
+  supply();
+  status = testing::session_readiness_at(now);
+  check(!status.loading && status.ready && status.epoch == ended_epoch + 1);
+  check(!testing::accept_session_packet(flow.data(), flow.size()));
   check(select_aircraft_profile(1));
 }
 int offline_tests() {

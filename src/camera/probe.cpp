@@ -55,7 +55,7 @@ struct Runtime {
   RetainedProfileTransition::AllocationEvidence published_allocation{};
   std::uint64_t profile_transition_token = 0;
   bool session_reset_failed = false;
-  std::uint64_t scene_session_epoch = 0;
+  std::atomic<std::uint64_t> scene_session_epoch{0};
   bool retained_restart_requested = false;
   profiles::CameraPanes allocation_panes = profiles::A380.camera_panes;
   std::uint64_t requested_mount_revision = 0;
@@ -142,7 +142,9 @@ void begin_session_reset(Runtime& runtime, const profiles::AircraftProfile& prof
 }
 
 bool session_work_allowed(const Runtime& runtime) noexcept {
-  return !runtime.reset_requested.load(std::memory_order_acquire) && get_aircraft_session_readiness().ready;
+  const auto readiness = get_aircraft_session_readiness();
+  return SceneSessionReset::work_allowed(runtime.reset_requested.load(std::memory_order_acquire),
+                                         runtime.scene_session_epoch.load(std::memory_order_acquire), readiness.epoch, readiness.ready);
 }
 
 // Caller owns the mailbox mutex. Recheck public readiness even after an empty

@@ -218,6 +218,28 @@ void empty_and_pending_requests() {
   snapshot.request_pending = true;
   require(!reset.ready(true, snapshot), "Pending request reused an old empty acknowledgement");
 }
+
+void exact_epoch_admission() {
+  using Reset = nc::SceneSessionReset;
+  require(Reset::work_allowed(false, 0, 0, true), "Loaded-flight Connect with fresh epoch-zero telemetry was refused");
+  require(!Reset::work_allowed(false, 0, 0, false), "Epoch-zero readiness was inferred without fresh telemetry");
+  require(Reset::work_allowed(false, 8, 8, true), "Fresh authorized flight refused camera work");
+  require(!Reset::work_allowed(false, 8, 8, false), "Unready flight admitted camera work");
+  require(!Reset::work_allowed(true, 8, 8, true), "Latched reset admitted camera work");
+  // The provider can receive begin/completion/fresh samples while an observer
+  // is inspecting a prior flight, before the bridge has submitted its reset.
+  require(!Reset::work_allowed(false, 8, 9, true), "New public readiness authorized old-flight creation/resize/activation");
+  require(!Reset::work_allowed(false, 9, 8, true), "Old public snapshot authorized new-flight camera work");
+  require(Reset::work_allowed(false, 9, 9, true), "A newly authorized flight could not resume");
+
+  Fixture f;
+  f.start();
+  f.begin_reset();
+  f.service();
+  f.service();
+  f.service();
+  require(f.erases == 2 && f.ready(), "Work admission epoch blocked guarded retirement of old ownership");
+}
 }  // namespace
 
 int main() {
@@ -225,6 +247,7 @@ int main() {
     invalid_world_before_public_epoch();
     creation_in_flight_and_partial_retirement();
     empty_and_pending_requests();
+    exact_epoch_admission();
     std::printf("scene_session_reset: PASS %u checks\n", checks);
     return 0;
   } catch (const std::exception& error) {

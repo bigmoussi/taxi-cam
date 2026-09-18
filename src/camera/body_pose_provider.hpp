@@ -48,7 +48,9 @@ struct LightingSample {
 // Public SimConnect worker only. Call lifecycle functions outside DllMain and
 // private engine callbacks. Never acquires or changes the simulator camera.
 // Returns false while the previous worker is stopping; retry without changing
-// the active profile or starting another worker.
+// the active profile or starting another worker. Loading/stopped sessions keep
+// their existing subscription; same-profile revalidation clears cached samples
+// without closing a healthy worker's flow subscription.
 bool select_aircraft_profile(std::uint32_t id) noexcept;
 AircraftIdentitySample get_aircraft_identity() noexcept;
 // Changes only when the flight/aircraft session changes. Selecting the
@@ -114,6 +116,7 @@ struct LifecycleSnapshot {
 bool install_worker(void* worker, void* stop) noexcept;
 LifecycleSnapshot lifecycle_snapshot() noexcept;
 bool accept_session_packet(const void* packet, std::uint32_t bytes) noexcept;
+bool session_reconnect_required(bool invalidated) noexcept;
 bool accept_camera_packet(const void* packet, std::uint32_t bytes, std::uint64_t sample_ms) noexcept;
 AircraftSessionReadiness session_readiness_at(std::uint64_t now_ms) noexcept;
 void service_world_invalidation() noexcept;
