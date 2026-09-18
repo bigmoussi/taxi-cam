@@ -12,6 +12,30 @@ using namespace taxi_camera::testing;
 namespace runtime = taxi_camera::scene_runtime;
 using Output = SceneFrameOutput;
 
+struct DeathProbe final : IUnknown {
+  explicit DeathProbe(std::atomic<unsigned>& count) : count_(count) {}
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** result) override {
+    *result = nullptr;
+    if (iid != __uuidof(IUnknown))
+      return E_NOINTERFACE;
+    *result = static_cast<IUnknown*>(this);
+    AddRef();
+    return S_OK;
+  }
+  ULONG STDMETHODCALLTYPE AddRef() override { return ++refs_; }
+  ULONG STDMETHODCALLTYPE Release() override {
+    const auto remaining = --refs_;
+    if (!remaining) {
+      ++count_;
+      delete this;
+    }
+    return remaining;
+  }
+  std::atomic<ULONG> refs_{1};
+  std::atomic<unsigned>& count_;
+};
+constexpr GUID SessionProbeId{0xf50d3096, 0x4341, 0x479d, {0xb7, 0x76, 0xd9, 0x60, 0x74, 0xaf, 0x23, 0xd1}};
+
 void run(bool warp) {
   Reference<ID3D12Debug> debug;
   const bool debug_enabled = SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(debug.put())));
@@ -57,11 +81,11 @@ void run(bool warp) {
     Reference<ID3D12CommandAllocator> allocator;
     Reference<ID3D12GraphicsCommandList> list;
   };
-  std::array<Recording, 4> recordings;
+  std::array<Recording, 6> recordings;
   using Colours = std::array<std::array<unsigned char, 4>, 2>;
   const Colours first{{{51, 102, 153, 255}, {153, 51, 102, 255}}};
   const Colours second{{{204, 153, 51, 255}, {51, 204, 153, 255}}};
-  const auto capture = [&](unsigned round, const Colours& colours) {
+  const auto capture = [&](unsigned round, const Colours& colours, bool retire = true) {
     std::array<ID3D12CommandList*, 2> lists{};
     for (UINT feed = 0; feed < 2; ++feed) {
       const auto index = round * 2 + feed;
@@ -84,6 +108,8 @@ void run(bool warp) {
     require(receipt != 0, "Capture submission receipt");
     queue->ExecuteCommandLists(static_cast<UINT>(lists.size()), lists.data());
     manager.after_submission(queue.get(), receipt);
+    if (!retire)
+      return;
     for (UINT feed = 0; feed < 2; ++feed) {
       const auto index = round * 2 + feed;
       manager.destroy_command_list(recordings[index].list.get(), index + 1);
@@ -180,6 +206,53 @@ void run(bool warp) {
   require(receipt != 0, "Retried output consumer receipt");
   finish_consumer(receipt);
   verify_pixels(second);
+
+  // A full flight reset invalidates publication immediately while old app
+  // recordings remain executable and both producer/consumer fences are blocked.
+  std::atomic<unsigned> destroyed{};
+  for (auto& source : sources) {
+    auto* probe = new DeathProbe(destroyed);
+    check(source->SetPrivateDataInterface(SessionProbeId, probe), "Source lifetime probe");
+    probe->Release();
+  }
+  Reference<ID3D12Fence> blocked;
+  check(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(blocked.put())), "Session blocker");
+  check(queue->Wait(blocked.get(), 1), "Block actual old-flight producer");
+  capture(2, first, false);
+  auto reset = std::async(std::launch::async, [&] { return runtime::reset_session(key); });
+  const bool reset_prompt = reset.wait_for(std::chrono::milliseconds(500)) == std::future_status::ready;
+  if (!reset_prompt)
+    check(blocked->Signal(1), "Unblock fixture before reporting reset wait");
+  const auto session = reset.get();
+  require(reset_prompt && session > 1 && !runtime::snapshot(key).output, "Session invalidation is immediate without GPU wait");
+  for (auto& source : sources) {
+    source->Release();
+    *source.put() = nullptr;
+  }
+  require(destroyed == 0, "Reset cannot free sources still referenced by executable old captures");
+  std::array<ID3D12CommandList*, 2> old{recordings[4].list.get(), recordings[5].list.get()};
+  const auto old_receipt = manager.before_submission(queue.get(), 2, old.data());
+  require(old_receipt != 0, "Old capture replay retains its receipt after full reset");
+  queue->ExecuteCommandLists(2, old.data());
+  manager.after_submission(queue.get(), old_receipt);
+  for (unsigned index = 4; index < 6; ++index)
+    manager.destroy_command_list(recordings[index].list.get(), index + 1);
+  runtime::service();
+  require(destroyed == 0 && item.status.frames == 2 && !item.status.output,
+          "Retirement alone cannot release blocked GPU sources or publish old captures");
+  require(runtime::resume_session(key, session) && !manager.register_consumer_recording(consumer.list.get()),
+          "Resume cannot admit new reads in a previous-session native recording");
+  check(blocked->Signal(1), "Finish old-flight GPU work");
+  require(drain_copy_queue(queue.get(), device.get()), "Old replay and producer-retirement fences complete");
+  runtime::service();
+  runtime::service();
+  require(destroyed == 2 && item.status.frames == 2 && !runtime::snapshot(key).output && !item.pending[0].token && !item.pending[1].token,
+          "Completed obsolete captures release actual source leases without republishing into the new session");
+  check(consumer.allocator->Reset(), "Reset completed old consumer allocator");
+  check(consumer.list->Reset(consumer.allocator.get(), nullptr), "Fresh native recording in resumed session");
+  manager.successful_reset(consumer.list.get(), 20);
+  require(manager.register_consumer_recording(consumer.list.get()), "Actual native Reset admits current-session work");
+  check(consumer.list->Close(), "Close fresh consumer");
   manager.destroy_command_list(consumer.list.get(), 20);
   handoff.stop_scene();
   runtime::reset_feed(key);
@@ -197,8 +270,10 @@ void run(bool warp) {
       }
     }
   require(errors == 0, "Contention GPU debug validation");
-  std::printf("PASS runtime contention %s: prompt retry, two retained leases, old/new output %u pixels; debug=%d errors=%llu.\n",
-              warp ? "WARP" : "hardware", pixels, debug_enabled, errors);
+  std::printf(
+      "PASS runtime contention %s: prompt retry, retained leases, flight reset/replay/fenced source retirement, old/new output %u pixels; "
+      "debug=%d errors=%llu.\n",
+      warp ? "WARP" : "hardware", pixels, debug_enabled, errors);
 }
 }  // namespace
 

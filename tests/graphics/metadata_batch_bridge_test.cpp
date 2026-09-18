@@ -608,6 +608,79 @@ void known_list_and_idle_checks() {
       "\"timingDiagnosticOnly\":true,\"nativeGpuCalls\":0}\n",
       iterations, active_ms, idle_ms);
 }
+void display_session_reset_checks() {
+  namespace win = taxi_camera::standalone;
+  auto& r = win::registry();
+  const auto old_ready = r.ready.load();
+  const auto old_verified = r.close_forward_verified;
+  const auto old_epoch = r.observation_epoch.load();
+  const auto old_floor = r.session_recording_floor.load();
+  const auto old_key = r.key;
+  const auto* old_profile = r.profile;
+  auto item = std::make_shared<win::List>();
+  item->native = reinterpret_cast<ID3D12GraphicsCommandList*>(0x790000);
+  item->id = 790;
+  auto target = std::make_shared<win::Resource>();
+  target->native = reinterpret_cast<ID3D12Resource*>(0x890000);
+  target->id = 890;
+  target->desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+  target->desc.Width = 768;
+  target->desc.Height = 1024;
+  target->desc.DepthOrArraySize = 1;
+  target->desc.MipLevels = 5;
+  target->desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+  target->desc.SampleDesc.Count = 1;
+  target->desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+  r.ready = r.close_forward_verified = true;
+  r.key = 0;
+  r.profile = &taxi_camera::profiles::A380;
+  r.observation_epoch = 10;  // Already idle: a full reset must still invalidate the recording.
+  item->observation_epoch = 10;
+  item->submission_proof.reset(1, true);
+  item->submission_proof.observe_legacy({reinterpret_cast<std::uint64_t>(target->native), target->id}, D3D12_RESOURCE_STATE_RENDER_TARGET,
+                                        D3D12_RESOURCE_STATE_COMMON, 0);
+  item->submission_proof.close(1, true);
+  item->closed_recording = 1;
+  r.lists[item->native] = item;
+  r.resources[target->native] = target;
+  r.routes.select_explicit({target->id, 0});
+  r.active_mask = r.calibration_mask = 1;
+  target->draws = 8;
+  target->submission_activity = 9;
+  win::refresh_selected(r);
+  const auto generation = r.queue_patch_generation.load();
+  win::reset_display_session();
+  require(!r.routes.targets[0] && !r.active_mask && !r.calibration_mask && !r.selected_resources[0] && !target->draws &&
+              !target->submission_activity && r.queue_patch_generation > generation,
+          "Full session reset kept routes, activity or display demand from the previous flight");
+  require(
+      r.resources.at(target->native) == target && r.lists.at(item->native) == item && target->alive && item->submission_proof.complete(1),
+      "Control-thread reset destroyed native lifetime metadata or mutated a replayable recording");
+  ID3D12CommandList* batch[]{item->native};
+  const auto outcome = static_cast<unsigned>(win::DisplaySubmissionOutcome::generation_changed);
+  const auto rejected = r.queue_outcomes[outcome].load();
+  taxi_camera::SceneCaptureManager::DisplaySubmissionPlan old_plan;
+  win::plan_display_submission(nullptr, nullptr, 1, batch, old_plan);
+  require(!old_plan.count && !target->submission_activity && r.queue_outcomes[outcome] == rejected + 1,
+          "Old closed display proof survived full reset and credited new-flight activity");
+  // Model the proof published by a wholly observed new native Reset/Close.
+  item->observation_epoch = r.observation_epoch.load();
+  taxi_camera::SceneCaptureManager::DisplaySubmissionPlan fresh_plan;
+  win::plan_display_submission(nullptr, nullptr, 1, batch, fresh_plan);
+  require(target->submission_activity == 1 && r.queue_outcomes[outcome] == rejected + 1,
+          "Fresh-session recording could not rediscover a retained live display");
+  win::reset_display_session();
+  require(!target->submission_activity && item->observation_epoch < r.session_recording_floor,
+          "Repeated reset while idle failed to invalidate the next recording");
+  r.lists.erase(item->native);
+  r.resources.erase(target->native);
+  r.observation_epoch = old_epoch;
+  r.session_recording_floor = old_floor;
+  r.key = old_key;
+  r.profile = old_profile;
+  r.ready = old_ready;
+  r.close_forward_verified = old_verified;
+}
 void inventory_checks() {
   namespace win = taxi_camera::standalone;
   auto& r = win::registry();
@@ -656,6 +729,7 @@ int main() {
     submission_profile_filter_checks();
     submission_gpu_classification_checks();
     known_list_and_idle_checks();
+    display_session_reset_checks();
     inventory_checks();
     auto& r = win::registry();
     auto* native = reinterpret_cast<ID3D12GraphicsCommandList*>(0x1000);

@@ -132,6 +132,7 @@ struct Registry {
   // take this lock. Ordinary setters and metadata callbacks never take it.
   std::mutex observation_mutex;
   std::atomic<std::uint64_t> observation_epoch{1};  // Odd: observing; even: idle.
+  std::atomic<std::uint64_t> session_recording_floor{};
   std::atomic<bool> diagnostics_enabled{};
   std::atomic<std::uint64_t> list_lookup_calls{}, list_cache_hits{}, list_registry_lookups{};
   std::atomic<std::uint64_t> idle_state_bypasses{}, idle_callback_bypasses{}, observation_invalidations{};
@@ -1479,6 +1480,7 @@ void plan_display_submission(void*,
     return;
   }
   std::array<PfdSubmissionProof::Recording, PfdSubmissionProof::maximum_batch> batch{};
+  const auto session_floor = r.session_recording_floor.load(std::memory_order_acquire);
   for (UINT i = 0; i < count; ++i) {
     const auto found = r.lists.find(static_cast<ID3D12GraphicsCommandList*>(lists[i]));
     if (found == r.lists.end() || !found->second->alive) {
@@ -1486,6 +1488,10 @@ void plan_display_submission(void*,
       return;
     }
     const auto& item = *found->second;
+    if (item.observation_epoch.load(std::memory_order_acquire) < session_floor) {
+      outcome(DisplaySubmissionOutcome::generation_changed);
+      return;
+    }
     const auto recording = item.closed_recording.load(std::memory_order_acquire);
     if (!recording || recording != item.recording.load(std::memory_order_acquire)) {
       outcome(DisplaySubmissionOutcome::unclosed_list);
@@ -2672,6 +2678,40 @@ std::array<std::uint64_t, 2> target_ids() noexcept {
   auto& r = registry();
   const std::lock_guard lock(r.mutex);
   return r.routes.targets;
+}
+void reset_display_session() noexcept {
+  auto& r = registry();
+  // The same order is used by native Reset/list registration. Do not mutate
+  // recording-local proofs from this control thread: atomically exclude old
+  // recordings until an actual native Reset observes the new session.
+  const std::lock_guard observation_lock(r.observation_mutex);
+  runtime::manager().set_capture_enabled(false);
+  const auto previous = r.observation_epoch.load(std::memory_order_acquire);
+  const auto increment = (previous & 1u) ? 1u : 2u;
+  const auto next = previous && previous <= UINT64_MAX - increment ? previous + increment : 0;
+  r.observation_epoch.store(next, std::memory_order_release);
+  r.session_recording_floor.store(next ? next : UINT64_MAX, std::memory_order_release);
+  r.observation_invalidations.fetch_add(1, std::memory_order_relaxed);
+  const std::lock_guard lock(r.mutex);
+  r.active_mask = r.calibration_mask = 0;
+  r.routes.reset();
+  r.detector.reset();
+  for (const auto& [native, item] : r.resources) {
+    (void)native;
+    item->draws.store(0, std::memory_order_relaxed);
+    item->submission_activity.store(0, std::memory_order_relaxed);
+  }
+  for (auto i = r.rtvs.begin(); i != r.rtvs.end();) {
+    if (i->second.recovered) {
+      account_view(i->second, false);
+      i = r.rtvs.erase(i);
+    } else
+      ++i;
+  }
+  rearm_live_backfill(r);
+  // Even an already empty/off setup must invalidate its published patch.
+  r.queue_patch_generation.fetch_add(1, std::memory_order_release);
+  refresh_selected(r);
 }
 void set_aircraft_profile(std::uint32_t id) noexcept {
   const auto* profile = profiles::find(id);

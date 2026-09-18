@@ -124,6 +124,9 @@ DWORD run_impl() {
   std::uint64_t pending_profile_request{}, pending_session_epoch{}, transition_token{};
   unsigned pending_profile{};
   bool changing_profile = false;
+  bool pending_full_reset = false;
+  bool pending_telemetry_selected = false;
+  std::uint64_t pending_gpu_generation{};
   win::CompanionControl control;
   win::CompanionSetupSession connection_session;
   std::uint64_t applied_connection{}, pending_connection{};
@@ -146,7 +149,8 @@ DWORD run_impl() {
       // The observer closes/revalidates owned views and cancels uncreated
       // requests. Keep the native lifetime transaction, including in-flight GPU
       // leases; reconnect will start a fresh setup token over these live objects.
-      native_camera::request_scene_profile_transition(applied_profile ? applied_profile : settings.profile);
+      if (!pending_full_reset)
+        native_camera::request_scene_profile_transition(applied_profile ? applied_profile : settings.profile);
       scene_runtime::manager().stop_source_tracking();
       scene_handoff().stop_scene();
       scene_runtime::reset_feed(key);
@@ -161,11 +165,12 @@ DWORD run_impl() {
       log_status(status, "Connection stopped: camera output closed; next Connect will rescan and set up again.");
     }
     const auto session_epoch = native_camera::get_aircraft_session_epoch();
+    const auto session = native_camera::get_aircraft_session_readiness();
     const bool session_settings = settings.aircraft_session_epoch == session_epoch;
-    const bool command_context = connected && session_settings && settings.enabled && !changing_profile && !connection.started &&
-                                 connection.generation == applied_connection && settings.profile == applied_profile &&
-                                 settings.profile_request == applied_profile_request && session_epoch == applied_session_epoch &&
-                                 native_camera::aircraft_matches_profile();
+    const bool command_context = connected && session_settings && session.ready && settings.enabled && !changing_profile &&
+                                 !connection.started && connection.generation == applied_connection &&
+                                 settings.profile == applied_profile && settings.profile_request == applied_profile_request &&
+                                 session_epoch == applied_session_epoch && native_camera::aircraft_matches_profile();
     native_camera::update_taxi_button_request(
         {settings.taxi_request, settings.aircraft_session_epoch, settings.profile, settings.taxi_selected_mask, settings.taxi_desired_mask},
         command_context);
@@ -174,6 +179,8 @@ DWORD run_impl() {
          settings.profile_request != applied_profile_request || session_epoch != applied_session_epoch)) {
       if (!changing_profile || settings.profile != pending_profile || settings.profile_request != pending_profile_request ||
           session_epoch != pending_session_epoch || connection.generation != pending_connection) {
+        const bool full_reset =
+            pending_full_reset || (applied_profile && (settings.profile != applied_profile || session_epoch != applied_session_epoch));
         win::set_target_mask(0);
         win::set_calibration(0, settings.calibration_budget);
         win::set_graphics_observation_demand(false);
@@ -181,24 +188,42 @@ DWORD run_impl() {
         scene_runtime::manager().stop_source_tracking();
         scene_handoff().stop_scene();
         scene_runtime::reset_feed(key);
+        if (full_reset) {
+          // Forget discovery and completed frames, but keep every outstanding
+          // GPU lease on its existing fence. Native retirement is observer-only.
+          win::reset_display_session();
+          pending_gpu_generation = scene_runtime::reset_session(key);
+        }
+        pending_full_reset = full_reset;
         pending_profile = settings.profile;
         pending_profile_request = settings.profile_request;
         pending_session_epoch = session_epoch;
         pending_connection = connection.generation;
         transition_token = 0;
+        pending_telemetry_selected = false;
         changing_profile = true;
         requested = failed = false;
         route_request = 0;
       }
       native_camera::suspend_scene_rendering(true);
+      if (pending_full_reset && !pending_gpu_generation)
+        pending_gpu_generation = scene_runtime::reset_session(key);
       if (!transition_token)
-        transition_token = native_camera::request_scene_profile_transition(pending_profile);
+        transition_token = pending_full_reset ? native_camera::request_scene_session_reset(pending_profile)
+                                              : native_camera::request_scene_profile_transition(pending_profile);
       const auto transition = native_camera::scene_snapshot();
       const bool ready = transition_token && transition.profile_transition_token == transition_token &&
                          transition.profile_transition_id == pending_profile && transition.profile_transition_ready &&
                          !transition.profile_transition_pending && !transition.profile_transition_failed;
-      const bool telemetry_ready = ready && native_camera::select_aircraft_profile(pending_profile);
-      if (!ready || !telemetry_ready) {
+      if (ready && !pending_telemetry_selected)
+        pending_telemetry_selected = native_camera::select_aircraft_profile(pending_profile);
+      const bool telemetry_ready = pending_telemetry_selected;
+      const auto transition_session = native_camera::get_aircraft_session_readiness();
+      const bool public_ready = transition_session.ready && transition_session.epoch == pending_session_epoch;
+      const bool gpu_ready =
+          ready && telemetry_ready && public_ready &&
+          (!pending_full_reset || (pending_gpu_generation && scene_runtime::resume_session(key, pending_gpu_generation)));
+      if (!ready || !telemetry_ready || !public_ready || !gpu_ready) {
         const auto identity = native_camera::get_aircraft_identity();
         const auto graphics = win::graphics_status();
         win::Status pending{};
@@ -214,26 +239,32 @@ DWORD run_impl() {
         std::memcpy(pending.aircraft_type, identity.type.data(), sizeof(pending.aircraft_type));
         std::memcpy(pending.aircraft_path, identity.path.data(), sizeof(pending.aircraft_path));
         std::snprintf(pending.message, sizeof(pending.message), "%s",
-                      ready ? "Waiting for aircraft telemetry to stop." : camera_transition_message(transition));
+                      !ready             ? camera_transition_message(transition)
+                      : !telemetry_ready ? "Waiting for aircraft telemetry to stop."
+                      : !public_ready    ? "Waiting for the flight to finish loading and fresh camera telemetry."
+                                         : "Waiting for camera GPU session reset.");
         if (mailbox.lock()) {
           mailbox.data()->status = pending;
           mailbox.unlock();
         }
         if (now >= next_log) {
-          char detail[384]{};
+          char detail[512]{};
           std::snprintf(detail, sizeof(detail),
                         "Aircraft transition waiting: token=%llu session=%llu profile=%u failed=%u request_pending=%u "
-                        "creation_pending=%u telemetry_pending=%u entries=%llu/%llu created_total=%llu",
+                        "creation_pending=%u telemetry_pending=%u entries=%llu/%llu created_total=%llu "
+                        "full_reset=%u gpu_generation=%llu public_ready=%u loading=%u flow_subscribed=%u flow=%u reason=%s",
                         static_cast<unsigned long long>(transition_token), static_cast<unsigned long long>(session_epoch), pending_profile,
                         transition.profile_transition_failed, transition.pair.request_pending, transition.pair.creation_pending,
                         ready && !telemetry_ready, static_cast<unsigned long long>(transition.pair.owned_ids[0]),
                         static_cast<unsigned long long>(transition.pair.owned_ids[1]),
-                        static_cast<unsigned long long>(transition.created_total));
+                        static_cast<unsigned long long>(transition.created_total), pending_full_reset,
+                        static_cast<unsigned long long>(pending_gpu_generation), public_ready, transition_session.loading,
+                        transition_session.flow_subscribed, transition_session.last_flow_event, transition_session.error);
           log_status(pending, detail);
           next_log = now + 5000;
         }
         service_scene();
-        if (!ready && now >= next_telemetry) {
+        if (now >= next_telemetry) {
           native_camera::initialize_body_pose_provider();
           next_telemetry = now + 2000;
         }
@@ -249,11 +280,12 @@ DWORD run_impl() {
       applied_session_epoch = pending_session_epoch;
       applied_connection = pending_connection;
       char transition_detail[256]{};
-      std::snprintf(transition_detail, sizeof(transition_detail),
-                    "Aircraft transition: token=%llu session=%llu profile=%u retained_entries=%llu/%llu connection=%llu",
-                    static_cast<unsigned long long>(transition_token), static_cast<unsigned long long>(applied_session_epoch),
-                    applied_profile, static_cast<unsigned long long>(transition.pair.owned_ids[0]),
-                    static_cast<unsigned long long>(transition.pair.owned_ids[1]), static_cast<unsigned long long>(applied_connection));
+      std::snprintf(
+          transition_detail, sizeof(transition_detail),
+          "Aircraft transition: token=%llu session=%llu profile=%u entries=%llu/%llu connection=%llu full_reset=%u gpu_generation=%llu",
+          static_cast<unsigned long long>(transition_token), static_cast<unsigned long long>(applied_session_epoch), applied_profile,
+          static_cast<unsigned long long>(transition.pair.owned_ids[0]), static_cast<unsigned long long>(transition.pair.owned_ids[1]),
+          static_cast<unsigned long long>(applied_connection), pending_full_reset, static_cast<unsigned long long>(pending_gpu_generation));
       log_status(status, transition_detail);
       applied_mounts = {};
       intent = {};
@@ -264,6 +296,8 @@ DWORD run_impl() {
       next_inventory = 0;
       inventory.clear();
       changing_profile = false;
+      pending_full_reset = false;
+      pending_gpu_generation = 0;
     }
     if (now >= next_telemetry) {
       native_camera::initialize_body_pose_provider();
@@ -288,13 +322,13 @@ DWORD run_impl() {
     const auto cutoff = native_camera::get_taxi_cutoff();
     const auto desired = intent.observe(now, buttons.valid, buttons.left_on, buttons.right_on);
     const unsigned mask =
-        connected && session_settings && settings.enabled && aircraft_matches && win::graphics_ready() && !cutoff.inhibited
+        connected && session_settings && session.ready && settings.enabled && aircraft_matches && win::graphics_ready() && !cutoff.inhibited
             ? (settings.follow_taxi && !manual_only ? desired.buttons
                : session_settings                   ? settings.manual_mask
                                                     : 0)
             : 0;
     const bool test_scene =
-        connected && session_settings && settings.enabled && aircraft_matches && settings.scene_test && !cutoff.inhibited;
+        connected && session_settings && session.ready && settings.enabled && aircraft_matches && settings.scene_test && !cutoff.inhibited;
     const auto intent_observed_ms = GetTickCount64();
     if (!mask && !test_scene && !prewarm.active())
       failed = false;
@@ -303,9 +337,10 @@ DWORD run_impl() {
     const auto speed = native_camera::get_ground_speed();
     const auto setup_current = [&]() {
       const auto epoch = native_camera::get_aircraft_session_epoch();
-      return control.connected(GetTickCount64()) && settings.enabled && control.owner_pid() == owner_pid &&
-             connection.generation == applied_connection && settings.aircraft_session_epoch == epoch && epoch == applied_session_epoch &&
-             settings.profile == applied_profile && settings.profile_request == applied_profile_request;
+      const auto current_session = native_camera::get_aircraft_session_readiness();
+      return current_session.ready && current_session.epoch == epoch && control.connected(GetTickCount64()) && settings.enabled &&
+             control.owner_pid() == owner_pid && connection.generation == applied_connection && settings.aircraft_session_epoch == epoch &&
+             epoch == applied_session_epoch && settings.profile == applied_profile && settings.profile_request == applied_profile_request;
     };
     const auto warm_readiness = [&]() {
       const auto sampled_now = GetTickCount64();
@@ -328,7 +363,8 @@ DWORD run_impl() {
           ground.on_ground,
           velocity.valid,
           settings.calibration_mask != 0 || settings.single_camera != 0,
-          velocity.knots};
+          velocity.knots,
+          native_camera::get_aircraft_session_readiness().ready};
     };
     bool background_warmup = false;
     if (prewarm.pending()) {
@@ -356,8 +392,9 @@ DWORD run_impl() {
     }
     const auto demand = win::scene_demand(mask, test_scene, assigned, requested, failed, background_warmup);
     unsigned active = demand.stamp_mask;
-    const unsigned calibration =
-        connected && session_settings && settings.enabled && aircraft_matches && !cutoff.inhibited ? settings.calibration_mask : 0;
+    const unsigned calibration = connected && session_settings && session.ready && settings.enabled && aircraft_matches && !cutoff.inhibited
+                                     ? settings.calibration_mask
+                                     : 0;
     // Warmup and scene-only diagnostics need capture observation without PFD
     // writes. Settled OFF may bypass PFD state while lifetime tracking remains.
     win::set_graphics_observation_demand(!demand.suspend || calibration != 0);

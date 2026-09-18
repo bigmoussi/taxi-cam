@@ -134,6 +134,30 @@ void run(bool warp, bool a350) {
   check(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(consumed.put())), "Consumer completion fence");
   check(queue->Signal(consumed.get(), 1), "Consumer fence after output read");
   require(consumed->GetCompletedValue() == 0, "Consumer cannot pass incomplete calibration writer");
+  const auto calibration_submissions = item.calibration_output.submissions();
+  auto reset = std::async(std::launch::async, [&] { return runtime::reset_session(key); });
+  const bool reset_prompt = reset.wait_for(std::chrono::milliseconds(500)) == std::future_status::ready;
+  if (!reset_prompt)
+    check(blocked->Signal(1), "Unblock fixture before reporting a reset wait regression");
+  const auto session = reset.get();
+  require(reset_prompt && session > 1 && !runtime::snapshot(key).session_active, "Flight reset never waits for blocked GPU work");
+  require(!runtime::configure_queue_patches(key, config), "Loading controls cannot revive calibration demand");
+  runtime::QueuePatchSnapshot stopped;
+  require(!runtime::try_snapshot_queue_patches(key, config.generation, stopped) && !stopped.ready_mask,
+          "Reset immediately withdraws the old prepared calibration snapshot");
+  runtime::service();
+  require(item.calibration_output.submissions() == calibration_submissions && !item.queue_config.generation,
+          "Paused service drains without submitting more calibration work");
+  std::array<ID3D12CommandList*, 2> replay{consumers[0].list.get(), consumers[1].list.get()};
+  const auto replay_receipt = manager.before_submission(queue.get(), 2, replay.data());
+  require(replay_receipt != 0, "Prior-session consumer replay retains timeline ownership");
+  queue->ExecuteCommandLists(2, replay.data());
+  manager.after_submission(queue.get(), replay_receipt);
+  require(consumed->GetCompletedValue() == 0 && !manager.register_consumer_recording(consumers[0].list.get()),
+          "Reset preserves old reads but refuses new work in an old recording");
+  require(!runtime::resume_session(key, session - 1) && runtime::resume_session(key, session),
+          "Only the current flight generation resumes; old GPU work need not be CPU-waited");
+  require(!runtime::try_snapshot_queue_patches(key, config.generation, stopped), "Resume cannot republish previous-flight demand");
   require(runtime::configure_queue_patches(key, {}), "Disable demand without releasing submitted buffers");
   runtime::QueuePatchSnapshot disabled;
   require(!runtime::try_snapshot_queue_patches(key, 2, disabled), "Disabled generation is not published");
@@ -256,7 +280,8 @@ void run(bool warp, bool a350) {
     }
   require(errors == 0, "Queue snapshot GPU validation");
   std::printf(
-      "PASS queue patch snapshots %s profile=%u: cold/contended/generation refusal, pending-GPU timeline, retained buffers, %u pixels; "
+      "PASS queue patch snapshots %s profile=%u: cold/contended/generation refusal, flight reset/replay/resume, pending-GPU timeline, "
+      "retained buffers, %u pixels; "
       "debug=%d errors=%llu.\n",
       warp ? "WARP" : "hardware", profile.id, checked, debug_enabled, errors);
 }

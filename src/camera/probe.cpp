@@ -15,6 +15,7 @@
 #include "probe_inspection_gate.hpp"
 #include "render_schedule.hpp"
 #include "retained_profile.hpp"
+#include "scene_session_reset.hpp"
 #include "source_view.hpp"
 #include "view_aa.hpp"
 #include "view_readiness_wait.hpp"
@@ -49,8 +50,11 @@ struct Runtime {
   const profiles::AircraftProfile* requested_profile = &profiles::A380;
   const profiles::AircraftProfile* aircraft_profile = &profiles::A380;
   RetainedProfileTransition profile_transition;
+  SceneSessionReset session_reset;
+  std::atomic<bool> reset_requested{false};
   RetainedProfileTransition::AllocationEvidence published_allocation{};
   std::uint64_t profile_transition_token = 0;
+  bool session_reset_failed = false;
   std::uint64_t scene_session_epoch = 0;
   bool retained_restart_requested = false;
   profiles::CameraPanes allocation_panes = profiles::A380.camera_panes;
@@ -112,6 +116,53 @@ struct Runtime {
 Runtime& state() {
   static Runtime* const runtime = new Runtime;
   return *runtime;
+}
+
+// Caller owns the mailbox mutex. No native engine call is made here.
+void begin_session_reset(Runtime& runtime, const profiles::AircraftProfile& profile) {
+  runtime.reset_requested.store(true, std::memory_order_release);
+  runtime.suspended.store(true, std::memory_order_release);
+  scene_handoff().stop_scene();
+  runtime.requested_start = false;
+  ++runtime.requested_start_revision;
+  runtime.retained_restart_requested = false;
+  runtime.recovery.stop();
+  runtime.requested_profile = &profile;
+  runtime.profile_transition.consume();
+  runtime.session_reset.begin(profile.id);
+  const auto cancelled = runtime.pair.cancel_uncreated_request();
+  runtime.session_reset.observe_empty(cancelled, runtime.pair.snapshot());
+  if (runtime.profile_transition_token != UINT64_MAX)
+    ++runtime.profile_transition_token;
+  else
+    runtime.session_reset_failed = true;
+  runtime.published.accepting_requests = false;
+  runtime.published.outputs_matched = false;
+  runtime.published.message = "Flight session reset pending; camera creation is disabled until retirement and load readiness.";
+}
+
+bool session_work_allowed(const Runtime& runtime) noexcept {
+  return !runtime.reset_requested.load(std::memory_order_acquire) && get_aircraft_session_readiness().ready;
+}
+
+// Caller owns the mailbox mutex. Recheck public readiness even after an empty
+// pair was acknowledged: another load can revoke that permission at any time.
+void publish_transition(Runtime& runtime, ProbeSnapshot& report) {
+  report.profile_transition_token = runtime.profile_transition_token;
+  if (runtime.session_reset.holding()) {
+    report.profile_transition_id = runtime.session_reset.profile();
+    report.profile_transition_failed = runtime.session_reset_failed;
+    report.profile_transition_ready =
+        !runtime.session_reset_failed && runtime.session_reset.ready(get_aircraft_session_readiness().ready, report.pair);
+    report.profile_transition_pending = !report.profile_transition_ready && !report.profile_transition_failed;
+    report.accepting_requests = false;
+    report.outputs_matched = false;
+  } else {
+    report.profile_transition_id = runtime.profile_transition.id();
+    report.profile_transition_pending = runtime.profile_transition.pending();
+    report.profile_transition_ready = runtime.profile_transition.ready();
+    report.profile_transition_failed = runtime.profile_transition.failed();
+  }
 }
 
 class StageTimer {
@@ -212,6 +263,22 @@ bool capture_pose(Runtime& runtime) {
   runtime.mounted_poses = {};
   std::string memory_detail;
   auto body = sample_body_pose(GetTickCount64());
+  if (!body.valid && std::strcmp(body.error, "camera_world_values") == 0) {
+    // This is a received invalid WORLD value, not a missing/stale callback.
+    // It may precede FlightLoaded or an aircraft epoch change during teleport.
+    notify_invalid_camera_world();
+    const std::lock_guard lock(runtime.mutex);
+    if (!runtime.session_reset.holding())
+      begin_session_reset(runtime, *runtime.requested_profile);
+    runtime.pose_busy = true;
+    runtime.message = "Invalid aircraft WORLD pose; flight session reset is latched and camera gates remain closed.";
+    return false;
+  }
+  if (!session_work_allowed(runtime)) {
+    runtime.pose_busy = true;
+    runtime.message = "Flight session is not ready; camera pose and creation remain paused.";
+    return false;
+  }
   if (!body.valid && temporary_pose_unavailable(body.error)) {
     runtime.pose_busy = true;
     runtime.message = std::string("Aircraft telemetry temporarily unavailable; render gates remain closed: ") + body.error;
@@ -404,7 +471,7 @@ void inspect_pair(Runtime& runtime,
     report.inspection_status = {"not_inspected", "not_inspected"};
     return;
   }
-  if (publish && report.ready[0] && report.ready[1])
+  if (publish && report.ready[0] && report.ready[1] && session_work_allowed(runtime))
     report.outputs_matched = timed(runtime, ProbeStage::handoff, [&] {
       return scene_handoff().publish(ticket, {runtime.token.identity, runtime.token.generation}, ids, resources);
     });
@@ -494,6 +561,8 @@ bool close_owned_pair(Runtime& runtime, void* manager, const ec::Snapshot& pair,
   return true;
 }
 bool prepare_owned_view_aa(Runtime& runtime, ec::EntryId id, ec::OwnedViewSnapshot& view) {
+  if (!session_work_allowed(runtime))
+    return false;
   LocalImageReader image(reinterpret_cast<HMODULE>(runtime.base), runtime.image.image_size, LocalImageQueryMode::pages);
   const auto result = disable_owned_view_aa(view, image, runtime.contract.layout);
   if (!result.complete) {
@@ -517,6 +586,8 @@ bool prepare_owned_view_aa(Runtime& runtime, ec::EntryId id, ec::OwnedViewSnapsh
 }
 
 void apply_pose(Runtime& runtime, const ec::OwnedViewSnapshot& view, const MountedPose& pose) noexcept {
+  if (!session_work_allowed(runtime))
+    return;
   using SetVector = void (*)(void*, const double*);
   function<SetVector>(runtime, runtime.contract.functions.set_position)(reinterpret_cast<void*>(view.node_address), pose.position.data());
   function<SetVector>(runtime, runtime.contract.functions.set_up)(reinterpret_cast<void*>(view.camera_address), pose.up.data());
@@ -530,6 +601,7 @@ void apply_gates(Runtime& runtime,
                  const std::array<bool, 2>& desired,
                  const ProbeSnapshot& inspected,
                  bool initialize_gates) {
+  auto allowed = session_work_allowed(runtime) ? desired : std::array<bool, 2>{};
   using Activate = void (*)(void*, std::uint64_t, bool);
   const auto activate = function<Activate>(runtime, runtime.contract.functions.activate_entry);
   // The captured false path ORs the separately verified {1,0} mask into P48/56.
@@ -537,17 +609,20 @@ void apply_gates(Runtime& runtime,
   // when setup already left bit0 set; no original update runs between calls.
   for (unsigned i = 0; i < ids.size(); ++i) {
     const bool observed_active = (inspected.flags[i][0] & 1u) == 0;
-    if (initialize_gates || (!desired[i] && (runtime.gates[i] || observed_active)))
+    if (initialize_gates || (!allowed[i] && (runtime.gates[i] || observed_active)))
       activate(reinterpret_cast<void*>(runtime.manager), ids[i], false);
   }
   for (unsigned i = 0; i < ids.size(); ++i) {
     const bool observed_active = (inspected.flags[i][0] & 1u) == 0;
-    if (desired[i] && (initialize_gates || !runtime.gates[i] || !observed_active)) {
+    if (allowed[i] && session_work_allowed(runtime) && (initialize_gates || !runtime.gates[i] || !observed_active)) {
       activate(reinterpret_cast<void*>(runtime.manager), ids[i], true);
       ++runtime.activation_counts[i];
+    } else if (allowed[i] && !session_work_allowed(runtime)) {
+      activate(reinterpret_cast<void*>(runtime.manager), ids[i], false);
+      allowed[i] = false;
     }
   }
-  runtime.gates = desired;
+  runtime.gates = allowed;
 }
 
 // Runs only in the verified observer phase. Reuses the existing gate operation;
@@ -619,7 +694,7 @@ void service_profile_transition(Runtime& runtime, void* manager, ProbeSnapshot& 
   // A prior ready acknowledgement never authorizes resume after a failed fresh
   // manager inspection. Missing telemetry/calibration keeps this hold active.
   const auto resume_epoch = get_aircraft_session_epoch();
-  const bool pose_ready = validated && resume_requested && aircraft_matches_profile() &&
+  const bool pose_ready = validated && resume_requested && session_work_allowed(runtime) && aircraft_matches_profile() &&
                           timed(runtime, ProbeStage::pose, [&] { return capture_pose(runtime); });
   report.outputs_matched = false;
   report.pose_waiting = resume_requested && validated && !pose_ready;
@@ -633,7 +708,7 @@ void service_profile_transition(Runtime& runtime, void* manager, ProbeSnapshot& 
     if (validated)
       runtime.aircraft_profile = runtime.requested_profile;
     if (pose_ready && runtime.retained_restart_requested && start_revision == runtime.requested_start_revision &&
-        runtime.recovery.requested() && resume_epoch == get_aircraft_session_epoch()) {
+        runtime.recovery.requested() && session_work_allowed(runtime) && resume_epoch == get_aircraft_session_epoch()) {
       runtime.profile_transition.consume();
       runtime.retained_restart_requested = false;
       runtime.scene_session_epoch = resume_epoch;
@@ -645,6 +720,12 @@ void service_profile_transition(Runtime& runtime, void* manager, ProbeSnapshot& 
 bool initialize(void* opaque, ec::DescriptorStorage& descriptor) noexcept {
   auto& runtime = *static_cast<Runtime*>(opaque);
   runtime.lifecycle_touched = true;
+  if (!session_work_allowed(runtime)) {
+    runtime.creation_valid = false;
+    runtime.creation_pose_unavailable = true;
+    runtime.stage_error = "Flight session reset/loading prohibits camera initialization.";
+    return false;
+  }
   // Only a real creation request reaches this callback, after prior cleanup.
   // Stop requests cannot call the pose getters or descriptor initializer.
   if (runtime.creations == 0) {
@@ -668,7 +749,7 @@ bool initialize(void* opaque, ec::DescriptorStorage& descriptor) noexcept {
       runtime.creation_valid = false;
     }
   }
-  if (!runtime.creation_valid)
+  if (!runtime.creation_valid || !session_work_allowed(runtime))
     return false;
   function<void (*)(void*)>(runtime, runtime.contract.functions.initialize_descriptor)(descriptor.bytes.data());
   return true;
@@ -682,13 +763,14 @@ ec::EntryId create(void* opaque, ec::ManagerToken token, const ec::DescriptorSto
     runtime.stage_error = "The owned-view creation limit was reached.";
     return 0;
   }
-  if (!runtime.creation_valid || !manager_context(runtime, reinterpret_cast<void*>(token.identity)) || token != runtime.token) {
+  if (!session_work_allowed(runtime) || !runtime.creation_valid || !manager_context(runtime, reinterpret_cast<void*>(token.identity)) ||
+      token != runtime.token) {
     runtime.stage_error = "Manager identity changed before camera creation.";
     return 0;
   }
   LocalMemoryReader reader;
   const auto pool = inspected(runtime, [&] { return ec::inspect_view_pool(reader, runtime.renderer); });
-  if (!pool.valid || pool.free_count < (runtime.creations == 0 ? 2u : 1u)) {
+  if (!pool.valid || pool.free_count < (runtime.creations == 0 ? 2u : 1u) || !session_work_allowed(runtime)) {
     runtime.creation_valid = false;
     runtime.stage_error = "Available view capacity changed before camera creation.";
     return 0;
@@ -722,7 +804,7 @@ ec::EntryId create(void* opaque, ec::ManagerToken token, const ec::DescriptorSto
       runtime.stage_error = "The new owned view could not be validated with its render gate closed.";
       return id;
     }
-    if (!prepare_owned_view_aa(runtime, id, view)) {
+    if (!session_work_allowed(runtime) || !prepare_owned_view_aa(runtime, id, view)) {
       runtime.creation_valid = false;
       return id;
     }
@@ -741,6 +823,8 @@ ec::EntryId create(void* opaque, ec::ManagerToken token, const ec::DescriptorSto
 }
 
 bool resize_closed_entry(Runtime& runtime, ec::EntryId id, unsigned index, bool initialize_output = true) {
+  if (!session_work_allowed(runtime))
+    return false;
   const auto view = inspect_entry(runtime, id);
   if (!view.complete || !view.ready || !(view.flags[0] & 1u) || index >= runtime.resized_dimensions.size()) {
     runtime.stage_error = "The owned view could not be validated with its render gate closed.";
@@ -751,11 +835,15 @@ bool resize_closed_entry(Runtime& runtime, ec::EntryId id, unsigned index, bool 
       &runtime,
       [](void* opaque, std::uint64_t address) noexcept {
         auto& current = *static_cast<Runtime*>(opaque);
+        if (!session_work_allowed(current))
+          return false;
         function<void (*)(void*)>(current, current.contract.functions.update_view)(reinterpret_cast<void*>(address));
         return true;
       },
       [](void* opaque, std::uint64_t address) noexcept -> std::uint64_t {
         auto& current = *static_cast<Runtime*>(opaque);
+        if (!session_work_allowed(current))
+          return 0;
         return reinterpret_cast<std::uintptr_t>(
             function<void* (*)(void*)>(current, current.contract.functions.refresh_output)(reinterpret_cast<void*>(address)));
       }};
@@ -803,9 +891,15 @@ bool erase(void* opaque, ec::ManagerToken token, ec::EntryId id) noexcept {
   if (action == ViewRetirement::Action::close_gate) {
     function<void (*)(void*, std::uint64_t, bool)>(runtime, runtime.contract.functions.activate_entry)(
         reinterpret_cast<void*>(token.identity), id, false);
+    const auto pair = runtime.pair.snapshot();
+    for (unsigned i = 0; i < pair.owned_ids.size(); ++i)
+      if (pair.owned_ids[i] == id)
+        runtime.gates[i] = false;
     return false;
   }
-  if (action != ViewRetirement::Action::erase)
+  const auto readiness = get_aircraft_session_readiness();
+  if (action != ViewRetirement::Action::erase || readiness.loading ||
+      (runtime.reset_requested.load(std::memory_order_acquire) && !readiness.ready))
     return false;
   function<void (*)(void*, std::uint64_t)>(runtime, runtime.contract.functions.erase_entry)(reinterpret_cast<void*>(token.identity), id);
   reader.reset_budget();
@@ -836,25 +930,82 @@ void record_stop(Runtime& runtime,
   runtime.stop_detail = detail;
 }
 
-// Recheck at destructive fallback boundaries too: the public epoch may change
-// while a full native inspection is running. A flight change parks the pair.
-bool hold_changed_session(Runtime& runtime, const ec::Snapshot& pair) {
-  const auto epoch = get_aircraft_session_epoch();
-  const std::lock_guard lock(runtime.mutex);
-  if (!RetainedProfileTransition::session_changed(pair, runtime.scene_session_epoch, epoch))
-    return false;
-  runtime.suspended.store(true);
+void clear_retired_pair(Runtime& runtime) {
+  // Only the observer may clear these fields, after PairController confirms
+  // that its exact owned IDs are absent. A public event is not that proof.
   scene_handoff().stop_scene();
-  runtime.requested_start = false;
-  ++runtime.requested_start_revision;
-  runtime.retained_restart_requested = false;
-  if (!runtime.profile_transition.holding()) {
-    runtime.profile_transition.begin(runtime.aircraft_profile->id, pair, runtime.resized_dimensions);
-    if (runtime.profile_transition_token != UINT64_MAX)
-      ++runtime.profile_transition_token;
-    else
-      runtime.profile_transition.refuse();
+  runtime.owned_control = 0;
+  runtime.scheduled_ids = {};
+  runtime.resized_ids = {};
+  runtime.resized_dimensions = {};
+  runtime.resize_warmup.clear();
+  runtime.resize_recovery.clear();
+  runtime.view_wait.clear();
+  runtime.retirement.clear();
+  runtime.gates = {};
+  runtime.schedule.reset();
+}
+
+void service_session_reset(Runtime& runtime, void* manager, ProbeSnapshot& report) {
+  // Creation/erase callbacks run only on this verified observer, outside the
+  // mailbox mutex. Unknown or different manager lifetimes retain ownership.
+  const auto cancelled = runtime.pair.cancel_uncreated_request();
+  report.pair = runtime.pair.snapshot();
+  if (cancelled == ec::EmptyPairCancel::owned && timed(runtime, ProbeStage::manager, [&] { return manager_context(runtime, manager); }) &&
+      runtime.token == report.pair.owner) {
+    runtime.pair.request_disable();
+    const ec::EngineCallbacks callbacks{&runtime, initialize, create, erase};
+    timed(runtime, ProbeStage::lifecycle, [&] { runtime.pair.process_update(runtime.token, callbacks); });
+    report.pair = runtime.pair.snapshot();
   }
+  const auto drained = runtime.pair.cancel_uncreated_request();
+  report.pair = runtime.pair.snapshot();
+  if (drained == ec::EmptyPairCancel::cancelled && SceneSessionReset::empty(report.pair))
+    clear_retired_pair(runtime);
+  const std::lock_guard lock(runtime.mutex);
+  runtime.session_reset.observe_empty(drained, report.pair);
+  report.outputs_matched = false;
+  report.accepting_requests = false;
+  report.message = !SceneSessionReset::empty(report.pair)
+                       ? "Flight reset is closing and retiring the prior owned camera IDs; unresolved identities remain retained."
+                   : !get_aircraft_session_readiness().ready
+                       ? "Prior camera IDs are absent; waiting for flight load completion and fresh public identity/WORLD pose."
+                       : "Flight reset completed; prior camera IDs are absent and a new camera pair may be requested.";
+}
+
+void park_unready_session(Runtime& runtime, void* manager, ProbeSnapshot& report) {
+  report.pair = runtime.pair.snapshot();
+  report.outputs_matched = false;
+  report.pose_waiting = true;
+  report.message = "Fresh public flight readiness is unavailable; the camera pair remains parked.";
+  if (!report.pair.owner.valid() || !manager_context(runtime, manager) || runtime.token != report.pair.owner)
+    return;
+  // Close each proven owned ready view independently, including partial pairs.
+  // No native removal or allocation is authorized by temporary telemetry loss.
+  for (unsigned i = 0; i < report.pair.owned_ids.size(); ++i) {
+    const auto id = report.pair.owned_ids[i];
+    if (!id)
+      continue;
+    const auto view = inspect_entry(runtime, id);
+    if (!view.complete || !view.ready)
+      continue;
+    if ((view.flags[0] & 1u) == 0)
+      function<void (*)(void*, std::uint64_t, bool)>(runtime, runtime.contract.functions.activate_entry)(
+          reinterpret_cast<void*>(runtime.manager), id, false);
+    runtime.gates[i] = false;
+  }
+}
+
+// Recheck at destructive fallback boundaries too: loading may begin during a
+// full native inspection, before its public epoch has advanced.
+bool hold_changed_session(Runtime& runtime, const ec::Snapshot& pair) {
+  const auto readiness = get_aircraft_session_readiness();
+  const std::lock_guard lock(runtime.mutex);
+  if (runtime.session_reset.holding())
+    return true;
+  if (!readiness.loading && !RetainedProfileTransition::session_changed(pair, runtime.scene_session_epoch, readiness.epoch))
+    return false;
+  begin_session_reset(runtime, *runtime.requested_profile);
   return true;
 }
 void observer(void* manager) noexcept {
@@ -879,25 +1030,17 @@ void observer(void* manager) noexcept {
     bool recovery_pending = false;
     bool pair_ready = false;
     bool profile_hold = false;
-    const auto session_epoch = get_aircraft_session_epoch();
+    bool session_hold = false;
+    const auto readiness = get_aircraft_session_readiness();
     std::uint64_t start_revision = 0;
     {
       const std::lock_guard lock(runtime.mutex);
       if (!before.owned_ids[0] && !before.owned_ids[1] && !before.creation_pending)
         runtime.aircraft_profile = runtime.requested_profile;
-      if (RetainedProfileTransition::session_changed(before, runtime.scene_session_epoch, session_epoch) &&
-          !runtime.profile_transition.holding()) {
-        runtime.suspended.store(true);
-        scene_handoff().stop_scene();
-        runtime.requested_start = false;
-        ++runtime.requested_start_revision;
-        runtime.retained_restart_requested = false;
-        runtime.profile_transition.begin(runtime.aircraft_profile->id, before, runtime.resized_dimensions);
-        if (runtime.profile_transition_token != UINT64_MAX)
-          ++runtime.profile_transition_token;
-        else
-          runtime.profile_transition.refuse();
-      }
+      if (!runtime.session_reset.holding() &&
+          (readiness.loading || RetainedProfileTransition::session_changed(before, runtime.scene_session_epoch, readiness.epoch)))
+        begin_session_reset(runtime, *runtime.requested_profile);
+      session_hold = runtime.session_reset.holding();
       profile_hold = runtime.profile_transition.holding() &&
                      (before.owned_ids[0] || before.owned_ids[1] || runtime.profile_transition.awaiting_pair());
       requested_start = runtime.requested_start;
@@ -915,7 +1058,7 @@ void observer(void* manager) noexcept {
     next_schedule.configure(settings & 0xffu, settings >> 8);
     std::array<bool, 2> desired{};
     const bool scheduled_pair = before.state == ec::State::active && runtime.scheduled_ids == before.owned_ids;
-    const bool suspended = runtime.suspended.load();
+    const bool suspended = runtime.suspended.load() || !session_work_allowed(runtime);
     if (scheduled_pair)
       desired = next_schedule.tick(now, suspended);
     const bool gate_change = scheduled_pair && desired != runtime.gates;
@@ -928,7 +1071,7 @@ void observer(void* manager) noexcept {
                                                 before.request_pending || before.creation_pending,
                                                 requested_start,
                                                 runtime.resize_warmup.pending(),
-                                                recovery_pending || profile_hold,
+                                                recovery_pending || profile_hold || session_hold,
                                                 mount_changed};
     const auto inspection = runtime.inspection_gate.decide(inspection_state);
     if (inspection == ProbeInspectionDecision::idle) {
@@ -937,8 +1080,8 @@ void observer(void* manager) noexcept {
       runtime.schedule = next_schedule;
       return;
     }
-    if (inspection != ProbeInspectionDecision::required && !before.request_pending && !gate_change && !runtime.resize_warmup.pending() &&
-        now - runtime.last_inspection < 250) {
+    if (inspection != ProbeInspectionDecision::required && !session_hold && !before.request_pending && !gate_change &&
+        !runtime.resize_warmup.pending() && now - runtime.last_inspection < 250) {
       runtime.schedule = next_schedule;
       return;
     }
@@ -965,7 +1108,7 @@ void observer(void* manager) noexcept {
     // A callback requested meanwhile invalidates the prepared view result below.
     const bool fuse_pair = inspection_state.established_pair && pair_ready && !before.request_pending && !before.creation_pending &&
                            !requested_start && !runtime.resize_warmup.pending() && !runtime.resize_recovery.pending() &&
-                           !runtime.resize_recovery.failed() && !recovery_pending && !mount_changed && !profile_hold;
+                           !runtime.resize_recovery.failed() && !recovery_pending && !mount_changed && !profile_hold && !session_hold;
     bool prepared_pair = false;
     std::array<ec::OwnedViewSnapshot, 2> prepared_views{};
     SceneCaptureTicket prepared_ticket{};
@@ -995,8 +1138,12 @@ void observer(void* manager) noexcept {
       return timed(runtime, ProbeStage::manager, [&] { return manager_context(runtime, manager, nullptr, &manager_inspection); });
     };
     const auto start_body = requested_start ? sample_body_pose(now) : BodyPoseSnapshot{};
-    if (profile_hold) {
+    if (session_hold) {
+      service_session_reset(runtime, manager, report);
+    } else if (profile_hold) {
       service_profile_transition(runtime, manager, report);
+    } else if (!readiness.ready) {
+      park_unready_session(runtime, manager, report);
     } else if (park_initial_scene(suspended, before.owned_ids[0] || before.owned_ids[1])) {
       // OFF also parks an unfinished background creation request. Keep its
       // mailbox request for an explicit resume; never create behind a lost
@@ -1071,7 +1218,7 @@ void observer(void* manager) noexcept {
         }
         const std::lock_guard lock(runtime.mutex);
         if (!runtime.requested_start && runtime.requested_start_revision == start_revision && !runtime.suspended.load() &&
-            runtime.recovery.retry(GetTickCount64(), pair, fresh_pose)) {
+            session_work_allowed(runtime) && runtime.recovery.retry(GetTickCount64(), pair, fresh_pose)) {
           runtime.requested_start = requested_start = true;
           start_revision = ++runtime.requested_start_revision;
         }
@@ -1085,7 +1232,8 @@ void observer(void* manager) noexcept {
           // Stop and a new Start share this small mailbox transaction. A slow
           // calibration cannot resurrect an enable that the UI has cancelled.
           const std::lock_guard lock(runtime.mutex);
-          if (runtime.requested_start && runtime.requested_start_revision == start_revision && !runtime.suspended.load()) {
+          if (runtime.requested_start && runtime.requested_start_revision == start_revision && !runtime.suspended.load() &&
+              session_work_allowed(runtime)) {
             scene_handoff().begin_scene();
             runtime.pair.request_independent_pose();
             runtime.requested_start = false;
@@ -1144,7 +1292,7 @@ void observer(void* manager) noexcept {
               pair.failure == ec::Failure::none && pair.blocked == ec::Blocked::none && !pair.request_pending && !pair.creation_pending) {
             views = prepared_views;
             report.free_views = prepared_free_views;
-            if (report.ready[0] && report.ready[1])
+            if (report.ready[0] && report.ready[1] && session_work_allowed(runtime))
               report.outputs_matched = timed(runtime, ProbeStage::handoff, [&] {
                 return scene_handoff().publish(prepared_ticket, {runtime.token.identity, runtime.token.generation}, pair.owned_ids,
                                                {views[0].resource_address, views[1].resource_address});
@@ -1254,7 +1402,7 @@ void observer(void* manager) noexcept {
             // creation. Only this lifecycle transition resets pulse deadlines.
             next_schedule.reset();
           }
-          desired = next_schedule.tick(GetTickCount64(), runtime.suspended.load());
+          desired = next_schedule.tick(GetTickCount64(), runtime.suspended.load() || !session_work_allowed(runtime));
           const bool needs_pose = desired[0] || desired[1];
           const bool pose_ready = !needs_pose || timed(runtime, ProbeStage::pose, [&] { return capture_pose(runtime); });
           bool aa_ready = true;
@@ -1339,17 +1487,7 @@ void observer(void* manager) noexcept {
         }
       }
       if (!pair.owned_ids[0] && !pair.owned_ids[1]) {
-        scene_handoff().stop_scene();
-        runtime.owned_control = 0;
-        runtime.scheduled_ids = {};
-        runtime.resized_ids = {};
-        runtime.resized_dimensions = {};
-        runtime.resize_warmup.clear();
-        runtime.resize_recovery.clear();
-        runtime.view_wait.clear();
-        runtime.retirement.clear();
-        runtime.gates = {};
-        runtime.schedule.reset();
+        clear_retired_pair(runtime);
       }
       report.pair = pair;
       if (pair.state != ec::State::active) {
@@ -1395,12 +1533,8 @@ void observer(void* manager) noexcept {
     timed(runtime, ProbeStage::publication, [&] {
       const std::lock_guard lock(runtime.mutex);
       runtime.published_allocation = {report.pair.owner, report.pair.owned_ids, runtime.resized_dimensions};
-      report.profile_transition_token = runtime.profile_transition_token;
-      report.profile_transition_id = runtime.profile_transition.id();
-      report.profile_transition_pending = runtime.profile_transition.pending();
-      report.profile_transition_ready = runtime.profile_transition.ready();
-      report.profile_transition_failed = runtime.profile_transition.failed();
       report.accepting_requests = runtime.recovery.requested();
+      publish_transition(runtime, report);
       report.recovery_pending = runtime.recovery.pending();
       report.restart_pending = runtime.requested_start;
       report.recovery_attempts = runtime.recovery.attempts();
@@ -1531,10 +1665,27 @@ void request_scene_test(bool reuse_calibration) noexcept {
     }
     if (!initialize_body_pose_provider())
       throw std::runtime_error("The read-only aircraft telemetry provider could not be started.");
+    {
+      const std::lock_guard lock(runtime.mutex);
+      const auto pair = runtime.pair.snapshot();
+      const auto readiness = get_aircraft_session_readiness();
+      if (!readiness.ready || runtime.session_reset_failed ||
+          (runtime.session_reset.holding() && !runtime.session_reset.ready(readiness.ready, pair))) {
+        runtime.published.message = "Camera startup waits for flight load readiness and confirmed retirement of the prior session.";
+        return;
+      }
+    }
     if (!reuse_calibration || !sample_body_pose(GetTickCount64()).valid)
       reset_body_pose_calibration();
     const std::lock_guard lock(runtime.mutex);
     const auto pair = runtime.pair.snapshot();
+    const auto readiness = get_aircraft_session_readiness();
+    if (!readiness.ready || runtime.session_reset_failed ||
+        (runtime.session_reset.holding() && !runtime.session_reset.consume(readiness.ready, pair))) {
+      runtime.published.message = "Flight load readiness changed during camera startup; no camera creation requested.";
+      return;
+    }
+    runtime.reset_requested.store(false, std::memory_order_release);
     const bool retained = runtime.profile_transition.can_resume(pair);
     if (runtime.profile_transition.holding() && (pair.owned_ids[0] || pair.owned_ids[1]) && !retained) {
       runtime.published.message = "Retained transition is not ready; no creation or removal requested.";
@@ -1545,7 +1696,7 @@ void request_scene_test(bool reuse_calibration) noexcept {
     else {
       runtime.pair.request_disable();
       runtime.profile_transition.consume();
-      runtime.scene_session_epoch = get_aircraft_session_epoch();
+      runtime.scene_session_epoch = readiness.epoch;
     }
     runtime.recovery.start();
     runtime.stop_detail.clear();
@@ -1573,6 +1724,14 @@ std::uint64_t request_scene_profile_transition(std::uint32_t id) noexcept {
   const std::lock_guard lock(runtime.mutex);
   if (runtime.profile_transition_token == UINT64_MAX)
     return 0;
+  // A same-flight Connect/Disconnect cannot downgrade a pending full reset to
+  // the weaker retained-pair acknowledgement.
+  if (runtime.session_reset.holding()) {
+    begin_session_reset(runtime, *profile);
+    runtime.published.pair = runtime.pair.snapshot();
+    publish_transition(runtime, runtime.published);
+    return runtime.profile_transition_token;
+  }
   runtime.suspended.store(true);
   scene_handoff().stop_scene();
   runtime.requested_start = false;
@@ -1595,6 +1754,21 @@ std::uint64_t request_scene_profile_transition(std::uint32_t id) noexcept {
   runtime.published.profile_transition_failed = runtime.profile_transition.failed();
   return token;
 }
+
+std::uint64_t request_scene_session_reset(std::uint32_t id) noexcept {
+  const auto* profile = profiles::find(id);
+  if (!profile)
+    return 0;
+  auto& runtime = state();
+  const std::lock_guard start_lock(runtime.start_mutex);
+  const std::lock_guard lock(runtime.mutex);
+  if (runtime.profile_transition_token == UINT64_MAX)
+    return 0;
+  begin_session_reset(runtime, *profile);
+  runtime.published.pair = runtime.pair.snapshot();
+  publish_transition(runtime, runtime.published);
+  return runtime.profile_transition_token;
+}
 void request_scene_stop(bool keep_telemetry) noexcept {
   auto& runtime = state();
   const std::lock_guard start_lock(runtime.start_mutex);
@@ -1608,7 +1782,7 @@ void request_scene_stop(bool keep_telemetry) noexcept {
     runtime.stop_detail = "Explicit camera OFF/Stop requested.";
     scene_handoff().stop_scene();
     const auto pair = runtime.pair.snapshot();
-    if (!runtime.profile_transition.holding() || (!pair.owned_ids[0] && !pair.owned_ids[1])) {
+    if (!runtime.session_reset.holding() && (!runtime.profile_transition.holding() || (!pair.owned_ids[0] && !pair.owned_ids[1]))) {
       runtime.profile_transition.consume();
       runtime.pair.request_disable();
     }
@@ -1624,7 +1798,8 @@ void note_scene_capture_progress(std::uint64_t now_ms) noexcept {
 }
 
 void suspend_scene_rendering(bool suspended) noexcept {
-  state().suspended.store(suspended);
+  auto& runtime = state();
+  runtime.suspended.store(suspended || !session_work_allowed(runtime));
 }
 
 void request_scene_rate(unsigned rate, unsigned feeds) noexcept {
@@ -1663,11 +1838,7 @@ ProbeSnapshot scene_snapshot() {
   const std::lock_guard lock(runtime.mutex);
   auto result = runtime.published;
   result.pair = runtime.pair.snapshot();
-  result.profile_transition_token = runtime.profile_transition_token;
-  result.profile_transition_id = runtime.profile_transition.id();
-  result.profile_transition_pending = runtime.profile_transition.pending();
-  result.profile_transition_ready = runtime.profile_transition.ready();
-  result.profile_transition_failed = runtime.profile_transition.failed();
+  publish_transition(runtime, result);
   result.recovery_pending = runtime.recovery.pending();
   result.restart_pending = runtime.requested_start;
   result.recovery_attempts = runtime.recovery.attempts();

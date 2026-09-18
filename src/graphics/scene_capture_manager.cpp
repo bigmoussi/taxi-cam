@@ -78,6 +78,10 @@ UINT SceneCaptureManager::augment_submission(ID3D12CommandQueue* queue,
                                              std::uint64_t receipt,
                                              engine_hook::queue_submit::Insertion* output,
                                              UINT capacity) noexcept {
+  const std::unique_lock lock(mutex_, std::try_to_lock);
+  if (!lock.owns_lock() || !transaction_.device || !transaction_.device->session_active ||
+      transaction_.session_generation != transaction_.device->session_generation)
+    return 0;
   if (transaction_owner != this || transaction_.id != receipt || transaction_.queue != queue || transaction_.display_count > capacity ||
       !output)
     return 0;
@@ -148,6 +152,40 @@ void SceneCaptureManager::destroy_device(std::uint64_t key) noexcept {
   }
 }
 
+std::uint64_t SceneCaptureManager::reset_session(std::uint64_t key) noexcept {
+  const std::lock_guard lock(mutex_);
+  auto* owner = device(key);
+  if (!owner || !owner->active)
+    return 0;
+  owner->session_active = false;
+  if (owner->session_generation >= MaximumCounter) {
+    fail_device(*owner);
+    return 0;
+  }
+  ++owner->session_generation;
+  owner->source_states.clear();
+  // Retain identities, not the previous flight's state or last-known RT model.
+  for (std::size_t index = 0; index < sources_.size(); ++index) {
+    const auto& source = sources_[index];
+    if (source.native && source.device_key == key && source_generations_[index].load(std::memory_order_acquire) == source.generation)
+      owner->source_states.register_source({reinterpret_cast<std::uint64_t>(source.native), source.generation});
+  }
+  last_tail_us_ = {};
+  stats_.tail_status = "session_stopped";
+  // Never retire lists, clear packet masks/consumer flags, release recording
+  // leases or reset a GPU allocator here. Old native lists remain replayable.
+  return owner->session_generation;
+}
+
+bool SceneCaptureManager::resume_session(std::uint64_t key, std::uint64_t generation) noexcept {
+  const std::lock_guard lock(mutex_);
+  auto* owner = device(key);
+  if (!owner || !owner->active || owner->failed || !generation || owner->session_generation != generation)
+    return false;
+  owner->session_active = true;
+  return true;
+}
+
 bool SceneCaptureManager::register_command_list(ID3D12GraphicsCommandList* native, std::uint64_t key, std::uint64_t generation) noexcept {
   return register_list(native, key, generation, true);
 }
@@ -175,6 +213,7 @@ bool SceneCaptureManager::register_list(ID3D12GraphicsCommandList* native,
     lists_[index].native = native;
     lists_[index].device_key = key;
     lists_[index].object_generation = generation;
+    lists_[index].session_generation = owner->session_generation;
     lists_[index].awaiting_native_reset = !observed;
     list_indices_.emplace(native, index);
     publish_list(lists_[index]);
@@ -554,6 +593,9 @@ void SceneCaptureManager::observe_source_draw_after(ID3D12GraphicsCommandList* n
     apply_source_draw(*item, {reinterpret_cast<std::uint64_t>(targets[n]), generations[n]}, allowed);
 }
 void SceneCaptureManager::apply_source_draw(List& item, source_state::Key key, bool allowed) noexcept {
+  const auto* owner = device(item.device_key);
+  if (!owner || item.session_generation != owner->session_generation)
+    return;
   const auto* source = source_candidate(reinterpret_cast<ID3D12Resource*>(key.handle));
   if (!source || source->generation != key.generation || source->device_key != item.device_key)
     return;
@@ -566,7 +608,8 @@ void SceneCaptureManager::apply_source_draw(List& item, source_state::Key key, b
     // The exact application Draw has completed but has not returned to its
     // caller: its actual bound RTV source is still a live resource argument.
     // Keep one reference per recording, never a registry-lifetime reference.
-    if (source_tracking_ && !retain_source_lease(item.source_leases, item.source_lease_count, key, source->native)) {
+    if (source_tracking_ && owner->session_active &&
+        !retain_source_lease(item.source_leases, item.source_lease_count, key, source->native)) {
       ++stats_.source_lease_failures;
       item.source_effects.invalidate();
     }
@@ -683,6 +726,8 @@ void SceneCaptureManager::successful_reset(ID3D12GraphicsCommandList* native, st
   auto* item = list(native);
   if (item && item->object_generation == generation) {
     retire_list(*item);
+    if (const auto* owner = device(item->device_key))
+      item->session_generation = owner->session_generation;
     item->awaiting_native_reset = false;
     publish_list(*item);
     ++stats_.resets;
@@ -831,8 +876,12 @@ bool SceneCaptureManager::capture_source(List& item,
     if (copy_refusal)
       *copy_refusal = reason;
   };
-  if (!capture_enabled_) {
+  if (!capture_enabled_ || !owner.session_active) {
     refusal("capture_disabled");
+    return false;
+  }
+  if (item.session_generation != owner.session_generation) {
+    refusal("previous_session_recording");
     return false;
   }
   refusal("packet_pool_or_memory_budget");
@@ -932,6 +981,7 @@ bool SceneCaptureManager::capture_source(List& item,
     }
     packet.match = match;
     packet.token = ++next_token_;
+    packet.session_generation = owner.session_generation;
     packet.submitted = 0;
     packet.order = {};
     packet.producer = nullptr;
@@ -997,7 +1047,7 @@ bool SceneCaptureManager::prepare_tail(Packet& packet, Device& owner) noexcept {
 }
 void SceneCaptureManager::record_queue_tail(Transaction& pending) noexcept {
   auto& owner = *pending.device;
-  if (!owner.active || owner.failed)
+  if (!owner.active || owner.failed || !owner.session_active || pending.session_generation != owner.session_generation)
     return;
   if (!engine_hook::render_boundary::operational()) {
     owner.source_states.invalidate_all();
@@ -1055,6 +1105,7 @@ void SceneCaptureManager::record_queue_tail(Transaction& pending) noexcept {
       List private_recording;
       private_recording.native = packet.tail_list;
       private_recording.device_key = owner.key;
+      private_recording.session_generation = owner.session_generation;
       const bool timed = gpu_timing_enabled_ && packet.tail_timing.begin(owner.native, pending.queue, packet.tail_list);
       if (timed)
         packet.tail_timing.start(0);
@@ -1104,7 +1155,7 @@ bool SceneCaptureManager::register_consumer_recording(ID3D12GraphicsCommandList*
   const std::lock_guard lock(mutex_);
   auto* item = list(native);
   auto* owner = item ? device(item->device_key) : nullptr;
-  if (!owner || !owner->active || owner->failed)
+  if (!owner || !owner->active || owner->failed || !owner->session_active || item->session_generation != owner->session_generation)
     return false;
   item->consumer = true;
   publish_list(*item);
@@ -1134,6 +1185,7 @@ SceneCaptureManager::Submission SceneCaptureManager::begin_transaction(Device& o
     return {};
   }
   transaction_ = {++next_receipt_, &owner, queue, owner.last_signal + 1, packets, private_work};
+  transaction_.session_generation = owner.session_generation;
   for (std::size_t index = 0; index < packets_.size(); ++index)
     if (packets & (1u << index))
       ++packets_[index].in_flight;
@@ -1217,6 +1269,10 @@ std::uint64_t SceneCaptureManager::before_submission(ID3D12CommandQueue* queue,
       return 0;
     }
     owner = current;
+    // A stale source recording may still own capture packets or read stable
+    // output. Preserve that ownership below while refusing its source proof.
+    if (item->source_touched && item->session_generation != current->session_generation)
+      unknown_lists = true;
     mask |= item->packets;
     consumer |= item->consumer;
     source_work |= item->source_touched;
@@ -1231,7 +1287,7 @@ std::uint64_t SceneCaptureManager::before_submission(ID3D12CommandQueue* queue,
     return 0;
   const auto result = begin_transaction(*owner, queue, mask, false);
   if (result.receipt) {
-    if (display_plan.current() && display_plan.device_key == owner->key && !unknown_lists)
+    if (owner->session_active && display_plan.current() && display_plan.device_key == owner->key && !unknown_lists)
       for (UINT i = 0; i < display_plan.count; ++i) {
         const auto& planned = display_plan.items[i];
         if (planned.after_list >= count)
@@ -1395,7 +1451,7 @@ SceneCaptureManager::Submission SceneCaptureManager::begin_private_submission(st
   if (!lock.owns_lock())
     return {0, nullptr, 0, true};
   auto* owner = device(key);
-  if (!owner)
+  if (!owner || !owner->session_active)
     return {};
   const auto result = begin_transaction(*owner, queue, 0, true);
   if (result.receipt)
@@ -1458,7 +1514,7 @@ std::size_t SceneCaptureManager::poll_completed_frames(Frame* frames, std::size_
       quarantine(packet);
       continue;
     }
-    if (!handoff_.is_current(packet.match)) {
+    if (!owner->session_active || packet.session_generation != owner->session_generation || !handoff_.is_current(packet.match)) {
       // No external reader has seen this frame; the already-queued timeline
       // point safely returns the packet after the next collect.
       if (!packet.gpu.finish_consumption(owner->timeline, owner->last_signal))
@@ -1468,7 +1524,7 @@ std::size_t SceneCaptureManager::poll_completed_frames(Frame* frames, std::size_
     if (count == capacity)
       break;
     packet.leased = true;
-    frames[count++] = {packet.token, packet.device_key, packet.match, packet.gpu.ready_resource(), packet.order};
+    frames[count++] = {packet.token, packet.device_key, packet.match, packet.gpu.ready_resource(), packet.order, packet.session_generation};
     ++stats_.completed;
   }
   return count;

@@ -54,6 +54,20 @@ AircraftIdentitySample get_aircraft_identity() noexcept;
 // Changes only when the flight/aircraft session changes. Selecting the
 // adapter does not itself change this epoch.
 std::uint64_t get_aircraft_session_epoch() noexcept;
+struct AircraftSessionReadiness {
+  std::uint64_t epoch = 0;
+  bool loading = false, ready = false, flow_subscribed = false;
+  std::uint32_t last_flow_event = 0;
+  const char* error = "not_initialized";
+};
+// Cache-only and nonblocking. Readiness needs fresh supported aircraft identity,
+// body telemetry and public WORLD camera data; it is independent of the selected
+// profile so draining an old profile cannot prevent choosing the new one.
+AircraftSessionReadiness get_aircraft_session_readiness() noexcept;
+// Native callbacks may report an actually invalid WORLD sample (not merely old
+// telemetry). This atomically gates readiness; the telemetry worker owns reset
+// and fresh-sample recovery. No SDK call, lock or wait occurs here.
+void notify_invalid_camera_world() noexcept;
 bool aircraft_matches_profile() noexcept;
 bool initialize_body_pose_provider() noexcept;
 // Signal stop and poll completion without waiting for SimConnect. False keeps
@@ -100,6 +114,9 @@ struct LifecycleSnapshot {
 bool install_worker(void* worker, void* stop) noexcept;
 LifecycleSnapshot lifecycle_snapshot() noexcept;
 bool accept_session_packet(const void* packet, std::uint32_t bytes) noexcept;
+bool accept_camera_packet(const void* packet, std::uint32_t bytes, std::uint64_t sample_ms) noexcept;
+AircraftSessionReadiness session_readiness_at(std::uint64_t now_ms) noexcept;
+void service_world_invalidation() noexcept;
 bool accept_identity_packet(const void* packet, std::uint32_t bytes, std::uint64_t sample_ms) noexcept;
 bool accept_aircraft_packet(const void* packet, std::uint32_t bytes, std::uint64_t sample_ms) noexcept;
 GroundSpeedSample ground_speed_at(std::uint64_t now_ms) noexcept;

@@ -141,6 +141,9 @@ bool assign_targets(std::uint64_t left, std::uint64_t right) noexcept;
 void set_target_mask(unsigned mask) noexcept;
 void set_calibration(unsigned mask, unsigned budget) noexcept;
 std::array<std::uint64_t, 2> target_ids() noexcept;
+// Control-thread flight reset: drop routes/activity and make all older recording
+// proofs ineligible. Keep native metadata and already-recorded GPU ownership.
+void reset_display_session() noexcept;
 void set_aircraft_profile(std::uint32_t id) noexcept;
 void discover_pfds(std::uint64_t now) noexcept;
 }  // namespace taxi_camera::standalone

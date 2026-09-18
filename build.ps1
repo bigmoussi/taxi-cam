@@ -314,6 +314,7 @@ if ($Validate) {
         @{Name='camera-status'; Sources=@('tests/app/camera_status_test.cpp')},
         @{Name='bug-report'; Sources=@('tests/app/bug_report_test.cpp')},
         @{Name='scene-demand'; Sources=@('tests/camera/scene_demand_test.cpp','src/camera/entry_pair.cpp')},
+        @{Name='scene-session-reset'; Sources=@('tests/camera/scene_session_reset_test.cpp','src/camera/entry_pair.cpp')},
         @{Name='manager-inspection'; Sources=@('tests/camera/manager_inspection_test.cpp')},
         @{Name='relocatable-contract'; Sources=@('src/camera/relocatable_contract.cpp','tests/camera/relocatable_contract_test.cpp')},
         @{Name='rtti-vtables'; Sources=@('src/camera/rtti_vtables.cpp','tests/camera/rtti_vtables_test.cpp')},

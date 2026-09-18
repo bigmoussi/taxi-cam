@@ -62,7 +62,8 @@ void discard(Device& item) {
   }
 }
 bool current_output(const Device& item) {
-  return item.status.output && scene_handoff().is_current(item.committed[0]) && scene_handoff().is_current(item.committed[1]);
+  return item.status.session_active && item.status.output && scene_handoff().is_current(item.committed[0]) &&
+         scene_handoff().is_current(item.committed[1]);
 }
 
 D3D12_RECT native_rect(const profiles::DisplayRect& rect) {
@@ -108,7 +109,7 @@ void publish_queue_patches(Device& item) {
   snapshot = {};
   const auto& config = item.queue_config;
   const auto* profile = profiles::find(config.profile);
-  if (item.status.failed || !config.generation || !profile || config.profile != item.patch_profile)
+  if (!item.status.session_active || item.status.failed || !config.generation || !profile || config.profile != item.patch_profile)
     return;
   snapshot.generation = config.generation;
   snapshot.profile = config.profile;
@@ -133,7 +134,7 @@ void publish_queue_patches(Device& item) {
 bool configure_queue_patches(std::uint64_t key, const QueuePatchConfig& config) {
   const std::lock_guard lock(runtime().mutex);
   auto* item = find(key);
-  if (!item || item->status.failed || !valid_queue_config(*item, config))
+  if (!item || item->status.failed || (!item->status.session_active && config.generation) || !valid_queue_config(*item, config))
     return false;
   if (item->queue_config != config) {
     item->queue_config = config;
@@ -147,7 +148,7 @@ bool try_snapshot_queue_patches(std::uint64_t key, std::uint64_t generation, Que
   if (!lock.owns_lock())
     return false;
   const auto* item = find(key);
-  if (!item || item->status.failed || !generation || item->queue_snapshot.generation != generation ||
+  if (!item || !item->status.session_active || item->status.failed || !generation || item->queue_snapshot.generation != generation ||
       item->queue_snapshot.profile != item->patch_profile || !item->queue_snapshot.ready_mask)
     return false;
   result = item->queue_snapshot;
@@ -178,6 +179,8 @@ bool init_device(std::uint64_t key, ID3D12Device* device) {
       return false;
     item.key = key;
     item.native = device;  // Manager retains this device until process exit.
+    item.status.session_generation = 1;
+    item.status.session_active = true;
     item.output.set_gpu_timing_enabled(runtime().gpu_timing_enabled);
     return true;
   }
@@ -188,6 +191,7 @@ void destroy_device(std::uint64_t key) {
   if (auto* item = find(key)) {
     discard(*item);
     item->status.failed = true;
+    item->status.session_active = false;
     item->status.output = false;
     item->queue_snapshot = {};
     item->status.message = "Device destroyed; GPU resources retained for recorded command lists.";
@@ -366,6 +370,42 @@ void reset_feed(std::uint64_t key) {
     item->status.message = "Waiting for the first completed images from both camera views.";
   }
 }
+std::uint64_t reset_session(std::uint64_t key) {
+  const std::lock_guard lock(runtime().mutex);
+  auto* item = find(key);
+  if (!item)
+    return 0;
+  item->status.session_active = false;
+  item->status.output = false;
+  item->status.ground_speed_valid = false;
+  item->status.ground_speed_knots = 0;
+  item->queue_config = {};
+  item->queue_snapshot = {};
+  item->committed = {};
+  const auto generation = manager().reset_session(key);
+  if (!generation)
+    return 0;
+  item->status.session_generation = generation;
+  // service owns this same mutex across prepare/submit. A healthy pending pair
+  // has no outstanding private recording; failed recordings retain their input
+  // leases because neither completion nor successful discard was established.
+  if (!item->status.failed)
+    discard(*item);
+  // Keep newest: device timeline values remain monotonic across flight resets.
+  // Stable patch allocations may still be referenced by replayable app lists.
+  item->status.message = "Flight session reset; waiting for fresh camera ownership and flight readiness.";
+  return generation;
+}
+bool resume_session(std::uint64_t key, std::uint64_t generation) {
+  const std::lock_guard lock(runtime().mutex);
+  auto* item = find(key);
+  if (!item || item->status.failed || !generation || item->status.session_generation != generation ||
+      !manager().resume_session(key, generation))
+    return false;
+  item->status.session_active = true;
+  item->status.message = "Waiting for the first completed images from the new flight session.";
+  return true;
+}
 bool set_display_exposure(std::uint64_t key, float ev) {
   if (!std::isfinite(ev))
     return false;
@@ -379,7 +419,7 @@ bool set_display_exposure(std::uint64_t key, float ev) {
 void set_ground_speed(std::uint64_t key, float knots, bool valid) {
   const std::lock_guard lock(runtime().mutex);
   if (auto* item = find(key)) {
-    item->status.ground_speed_valid = valid && std::isfinite(knots) && knots >= 0 && knots <= 999;
+    item->status.ground_speed_valid = item->status.session_active && valid && std::isfinite(knots) && knots >= 0 && knots <= 999;
     item->status.ground_speed_knots = item->status.ground_speed_valid ? knots : 0;
   }
 }
@@ -392,7 +432,8 @@ void service() {
   for (std::size_t i = 0; i < count; ++i) {
     auto& frame = incoming[i];
     auto* item = find(frame.device_key);
-    if (!item || !item->status.initialized || item->status.failed || frame.match.feed >= 2 || !scene_handoff().is_current(frame.match)) {
+    if (!item || !item->status.session_active || frame.session_generation != item->status.session_generation || !item->status.initialized ||
+        item->status.failed || frame.match.feed >= 2 || !scene_handoff().is_current(frame.match)) {
       manager().discard_frame(frame.token);
       continue;
     }
@@ -412,7 +453,7 @@ void service() {
   }
   for (auto& item : runtime().devices) {
     item.queue_snapshot = {};
-    if (!item.key || item.status.failed)
+    if (!item.key || !item.status.session_active || item.status.failed)
       continue;
     if (item.status.output && !current_output(item)) {
       item.status.output = false;

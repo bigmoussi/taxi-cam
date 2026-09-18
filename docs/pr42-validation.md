@@ -2,9 +2,9 @@
 
 The user confirmed that the revised camera rendering works in MSFS after the late-Connect fixes. The A350 had also been verified earlier in this testing session. Automatic display assignment is **not validated**: both iniBuilds and FlyByWire A380 selected a different instrument when the camera was activated during display boot. Manual selection allowed correction. A subsequent same-aircraft airport change caused an A350-1000 CTD and a reported system freeze; reload stability is also unresolved.
 
-## Validated local build
+## Earlier rendering-validation build
 
-The installed test pair is version **0.9.35**, build 0, IPC protocol 9:
+The test pair used for the rendering observations above was version **0.9.35**, build 0, IPC protocol 9:
 
 | File | SHA-256 |
 | --- | --- |
@@ -40,7 +40,28 @@ At 13:14:14 UTC the simulator's crash report recorded an access violation in `Re
 
 During the transition, invalid camera world data preceded the public session-change notification. The old camera pair disappeared; warmup later created entries 1003/1004, raising the created-view count from two to four shortly before the crash. The final bridge samples show output disabled and both gates closed. This narrows investigation to transition/removal/recreation ordering but does not prove the faulting object's identity or the cause of the subsequent system freeze. GPU process-memory telemetry timed out; no claim of GPU release or retained allocations is made.
 
-The requested full runtime reset on aircraft or airport changes is follow-up work. It is not implemented or validated by this rendering snapshot.
+The full runtime reset below was implemented after this crash. It was not present in the rendering-validation snapshot and has not yet been tested through an airport or aircraft change in MSFS.
+
+## Full flight-session reset test build
+
+Version **0.9.36**, build 0, IPC protocol 9 was installed at **13:40:22 UTC** after local validation. All 12 protected settings, calibration and other files retained their exact hashes. MSFS was already closed; only the companion was gracefully restarted.
+
+| File | SHA-256 |
+| --- | --- |
+| `taxi-cam.exe` | `5EA94531043CAFE32AB3D80C53612F126F7F37005FF92894AE2E0B07FDD53E76` |
+| `taxi-camera-bridge.dll` | `DC3F2BC2A026E3EB9BC8877C9A12B16D06FE11ECF47E4416225B5C202E4DFE4A` |
+
+Aircraft/profile changes and same-aircraft airport loads/teleports now invalidate the flight session. Native retirement stays on the verified observer; old IDs must be confirmed absent before a fresh pair can start. Loading or invalid WORLD data blocks creation, recovery and rendering. Completion needs fresh supported identity, body and WORLD telemetry. The telemetry adapter is selected once per transition so waiting for fresh samples cannot repeatedly stop its worker.
+
+Routes, activity, recovered bindings, previous recording admission and completed output are reset. Old GPU packets and replayable recordings retain their lifetime and fence obligations, while old frames cannot publish into the new session. Resume requires the exact new generation. Saved user calibration and ordinary TAXI OFF/ON parking remain intact.
+
+- Pinned `build.ps1 -Validate`: passed on hardware and WARP, including the 36 display-submission cases.
+- Exact installed-pair smoke: **148 checks passed**.
+- Public telemetry/session tests: **1,355 checks passed**; native reset policy: **35 checks passed**; bridge metadata: **196 checks passed**.
+- Hardware/WARP reset tests cover an actual blocked producer queue, old-work replay, source destruction only after fence completion, stale-frame rejection, calibration suppression and exact-generation resume.
+- Exact binary audits still reject thread-suspending dependencies and production D3D11On12 bootstrap. No GPU wait was added. The debug layer was unavailable.
+
+These are local results. Actual flow-event delivery, loaded-flight Connect after this change, aircraft swapping and same-aircraft airport reload still need simulator verification. The A380 wrong-instrument selection and cause of the CTD/system freeze remain unresolved. The simulator process had exited and the companion was responsive during investigation. No display-driver reset was recorded in the checked Windows System event interval, but GPU-memory telemetry timed out; that does not establish whether the bridge caused or contributed to the freeze.
 
 ## Local evidence
 
@@ -50,3 +71,5 @@ Logs, GPU reproductions, process snapshots, binaries and receipts remain in igno
 - `build/pr42-review/delivery-20260918-121628-952/`: immutable installation receipt and rollback pair.
 - `build/pr42-review/texture-detection-20260918/`: subsequent live logs and display-identity investigation.
 - `build/pr42-review/airport-change-ctd-20260918-1314/`: bridge/launcher logs, Windows events, simulator crash report and bounded exception record.
+- `build/pr42-review/flight-session-reset/`: full validation, exact smoke, focused GPU/lifecycle tests and deployment scripts for the new reset build.
+- `build/pr42-review/delivery-20260918-134022-210/`: immutable reset-build installation receipt, validated pair and rollback pair.

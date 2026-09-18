@@ -42,6 +42,7 @@ class SceneCaptureManager {
     SceneCopyMatch match;
     ID3D12Resource* resource = nullptr;  // Borrowed owned snapshot, COPY_DEST.
     FrameOrder order;
+    std::uint64_t session_generation = 0;
   };
   struct Submission {
     std::uint64_t receipt = 0;
@@ -82,6 +83,12 @@ class SceneCaptureManager {
 
   bool register_device(std::uint64_t device_key, ID3D12Device* native_device) noexcept;
   void destroy_device(std::uint64_t device_key) noexcept;
+  // Flight invalidation never retires executable application recordings. Their
+  // packet/consumer leases and timeline ordering survive until native Reset,
+  // destruction and covering GPU completion. New capture waits for resume and
+  // a recording belonging to the new session.
+  std::uint64_t reset_session(std::uint64_t device_key) noexcept;
+  bool resume_session(std::uint64_t device_key, std::uint64_t generation) noexcept;
   bool register_command_list(ID3D12GraphicsCommandList* native_list, std::uint64_t device_key, std::uint64_t object_generation) noexcept;
   // A list discovered at submission has an unobserved existing recording.
   // Only a subsequent, fully observed successful native Reset admits it.
@@ -241,6 +248,8 @@ class SceneCaptureManager {
     ID3D12Fence* timeline = nullptr;
     std::uint64_t last_signal = 0;
     bool active = false, failed = false;
+    std::uint64_t session_generation = 1;
+    bool session_active = true;
     source_state::Tracker source_states;
     pfd_submission::Pool display_copies;
   };
@@ -251,6 +260,7 @@ class SceneCaptureManager {
   struct List {
     ID3D12GraphicsCommandList* native = nullptr;
     std::uint64_t device_key = 0, object_generation = 0, recording = 1;
+    std::uint64_t session_generation = 0;
     std::uint16_t packets = 0;
     unsigned feeds = 0;
     bool consumer = false;
@@ -266,6 +276,7 @@ class SceneCaptureManager {
     D3D12_RESOURCE_DESC description{};
     SceneCopyMatch match;
     std::uint64_t token = 0, device_key = 0, submitted = 0;
+    std::uint64_t session_generation = 0;
     FrameOrder order;
     ID3D12CommandQueue* producer = nullptr;  // Registered queue retained by hook.
     unsigned in_flight = 0;
@@ -293,6 +304,7 @@ class SceneCaptureManager {
     std::array<engine_hook::queue_submit::Insertion, engine_hook::queue_submit::kMaximumInsertions> display_insertions{};
     std::array<unsigned, engine_hook::queue_submit::kMaximumInsertions> display_slots{};
     UINT display_count = 0, display_accepted = 0;
+    std::uint64_t session_generation = 0;
   };
   struct SourceCandidate {
     ID3D12Resource* native = nullptr;  // Registry identity only; never a GPU lease.

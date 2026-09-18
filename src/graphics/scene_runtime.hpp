@@ -50,6 +50,8 @@ bool copy_patch(ID3D12GraphicsCommandList*,
                 const D3D12_RECT& content,
                 ID3D12GraphicsCommandList7* enhanced = nullptr);
 struct Snapshot {
+  std::uint64_t session_generation = 0;
+  bool session_active = false;
   bool gpu_timing_enabled = false;
   GpuTimingStatistics composition_gpu, output_copy_gpu, patch_gpu;
   bool initialized = false;
@@ -80,6 +82,11 @@ bool set_display_exposure(std::uint64_t key, float ev);
 // A fresh public SimConnect sample; unavailable samples render GS --.
 void set_ground_speed(std::uint64_t key, float knots, bool valid);
 void reset_feed(std::uint64_t key);
+// Full aircraft/airport boundary. Stop new camera/calibration publications and
+// submissions immediately; replayable buffers and in-flight leases drain on
+// their existing fences. Resume requires this exact returned generation.
+std::uint64_t reset_session(std::uint64_t key);
+bool resume_session(std::uint64_t key, std::uint64_t generation);
 void set_composition(std::uint64_t key, const profiles::Composition& layout);
 void service();
 Snapshot snapshot(std::uint64_t key);
