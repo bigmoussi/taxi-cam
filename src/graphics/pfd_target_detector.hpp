@@ -15,7 +15,8 @@ struct PfdTargetObservation {
   std::uint32_t height = 0;
   std::uint32_t levels = 0;
   std::uint32_t format = 0;
-  // Completed, fully proven RT-exit submissions; never reported as native draws.
+  // Proven RT exits observed at queue submission; not native draw counts or
+  // fence-confirmed GPU completion.
   // The caller excludes stale/aliased/unproven resource incarnations.
   std::uint64_t submission_activity = 0;
 };
@@ -92,7 +93,7 @@ class PfdTargetDetector {
         clear("invalid_input", true);
         return detection_;
       }
-      current_[current_count++] = {value.id, submission_mode ? value.submission_activity : value.draws, value.format};
+      current_[current_count++] = {value.id, submission_mode ? value.submission_activity : value.draws, value.format, value.levels};
     }
     std::sort(current_.begin(), current_.begin() + current_count, [](const Counter& a, const Counter& b) { return a.id < b.id; });
     for (std::size_t i = 1; i < current_count; ++i) {
@@ -104,6 +105,43 @@ class PfdTargetDetector {
     }
     const bool changed_source = baseline_valid_ && submission_mode != submission_mode_;
     submission_mode_ = submission_mode;
+    if (submission_mode && (profile_->id == profiles::A359.id || profile_->id == profiles::A35K.id)) {
+      // A350 native draws and submitted RT exits rank different surfaces.
+      // The observed five-mip UNORM auxiliaries complete more passes than
+      // either EFIS. Only the complete three-surface one-mip typeless group
+      // is qualified for this fallback; retain all ordinary draw candidates.
+      const auto reject = [&](const char* status) -> const PfdTargetDetection& {
+        clear(status);
+        baseline_valid_ = false;
+        previous_count_ = 0;
+        return detection_;
+      };
+      if (!inventory_complete)
+        return reject("incomplete_inventory");
+      std::size_t group_count = 0;
+      for (std::size_t i = 0; i < current_count; ++i) {
+        const auto value = current_[i];
+        if (value.levels == 1 && value.format == 27)
+          current_[group_count++] = value;
+        else if (value.levels != 5 || value.format != 28)
+          return reject("a350_group_format");
+      }
+      if (group_count != 3)
+        return reject(group_count < 3 ? "a350_group_incomplete" : "a350_group_ambiguous");
+      current_count = group_count;
+      // Even replacement of the third (unselected) surface starts a new
+      // complete group baseline, never an artificially uncontested pair.
+      if (baseline_valid_ && !changed_source) {
+        bool same = previous_count_ == current_count;
+        for (std::size_t i = 0; same && i < current_count; ++i)
+          same = previous_[i].id == current_[i].id;
+        if (!same) {
+          clear("a350_group_changed");
+          seed(current_count, now_ms);
+          return detection_;
+        }
+      }
+    }
     if (changed_source) {
       clear("activity_source_changed", profile_->pfd_detection == profiles::PfdDetectionPolicy::ini_a380_allocation_group);
       seed(current_count, now_ms);
@@ -178,6 +216,7 @@ class PfdTargetDetector {
     std::uint64_t id = 0;
     std::uint64_t draws = 0;
     std::uint32_t format = 0;
+    std::uint32_t levels = 0;
   };
 
   const PfdTargetDetection& confirm(const std::array<std::uint64_t, 2>& pair) noexcept {

@@ -1000,7 +1000,12 @@ void native_case(bool warp,
       require(item.draws != 0, "All eight pre-existing typeless displays recover their actual application RTV association");
   win::discover_pfds(GetTickCount64());
   const auto learned_pair = win::target_ids();
-  if (profile.pfd_detection == taxi_camera::profiles::PfdDetectionPolicy::dominant_activity) {
+  if (a350) {
+    // This pixel fixture has only two typed surfaces and no native draws yet.
+    // It must not masquerade as the complete powered three-EFIS group. The
+    // explicit assignments below still exercise every camera/calibration path.
+    require(!learned_pair[0] && !learned_pair[1], "Incomplete idle A350 fixture cannot bypass EFIS-group automatic confirmation");
+  } else if (profile.pfd_detection == taxi_camera::profiles::PfdDetectionPolicy::dominant_activity) {
     require(learned_pair[0] && learned_pair[1] && learned_pair[0] != learned_pair[1],
             "Exactly two learned displays adopt so ready and calibration have targets");
   } else {

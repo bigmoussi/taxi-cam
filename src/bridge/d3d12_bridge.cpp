@@ -487,6 +487,11 @@ std::array<std::uint64_t, 2> dominant_activity_pair(const profiles::AircraftProf
                                                     const std::vector<PfdTargetObservation>& inventory) noexcept {
   if (inventory.size() != 2 || !inventory[0].id || !inventory[1].id || inventory[0].id == inventory[1].id)
     return {};
+  // With opaque pre-existing views, A350's first two surfaces can be unrelated
+  // five-mip outputs or an incomplete powered EFIS group. Let the detector
+  // establish its full submission-only group and activity windows first.
+  if ((profile.id == profiles::A359.id || profile.id == profiles::A35K.id) && !inventory[0].draws && !inventory[1].draws)
+    return {};
   const auto high = std::max(inventory[0].id, inventory[1].id);
   const auto low = std::min(inventory[0].id, inventory[1].id);
   return profile.higher_id_left ? std::array<std::uint64_t, 2>{high, low} : std::array<std::uint64_t, 2>{low, high};

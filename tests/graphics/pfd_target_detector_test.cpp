@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <utility>
 
 #include "../../src/graphics/pfd_target_detector.hpp"
 
@@ -237,6 +238,175 @@ void a350_power_up() {
   std::puts("A350 cold/dark power-up activity and retained rejection guards: PASS");
 }
 
+void a350_submitted_exits() {
+  // A350-1000 PID44364, cold/dark power-up on2026-09-18: native draws
+  // were unavailable. Five-mip auxiliaries43/44/46 led RT-exit counts;
+  // one-mip47/45 led the EFIS group, with unrelated75 (highest ID) third.
+  // The user confirmed47 as left;45/right follows the existing side rule.
+  // Replaying this layout for A359 below is fixture coverage, not live proof.
+  constexpr std::array<std::uint64_t, 6> times{145065109, 145066265, 145071265, 145076265, 145081265, 145086265};
+  constexpr std::array<std::uint64_t, 6> auxiliary{88, 111, 385, 683, 978, 1259};
+  constexpr std::array<std::uint64_t, 6> left{51, 65, 172, 277, 395, 522};
+  constexpr std::array<std::uint64_t, 6> right{51, 65, 176, 290, 399, 526};
+  constexpr std::array<std::uint64_t, 6> other{34, 43, 113, 180, 249, 317};
+  static PfdTargetDetector detector;
+  for (const auto* profile : {&taxi_camera::profiles::A35K, &taxi_camera::profiles::A359}) {
+    std::array<PfdTargetObservation, 8> values{};
+    std::size_t count = 6;
+    const auto initialize = [&] {
+      detector.configure(*profile);
+      count = 6;
+      values = {{{43, 0, 1644, 1024, 5, 28, 88},
+                 {44, 0, 1644, 1024, 5, 28, 88},
+                 {45, 0, 1644, 1024, 1, 27, 51},
+                 {46, 0, 1644, 1024, 5, 28, 88},
+                 {47, 0, 1644, 1024, 1, 27, 51},
+                 {75, 0, 1644, 1024, 1, 27, 34}}};
+    };
+    const auto observe = [&](std::uint64_t now, bool complete = true) -> const auto& {
+      return detector.observe(values.data(), count, now, complete);
+    };
+    const auto add = [&](std::uint64_t l = 100, std::uint64_t r = 100, std::uint64_t third = 60) {
+      for (std::size_t i = 0; i < count; ++i) {
+        auto& value = values[i];
+        value.submission_activity += value.levels == 5 ? 200 : value.id == 45 ? r : value.id == 47 || value.id == 48 ? l : third;
+      }
+    };
+    const auto confirms = [&](std::uint64_t baseline, std::array<std::uint64_t, 2> pair = {47, 45}) {
+      for (unsigned window = 1; window <= 3; ++window) {
+        add();
+        const auto& result = observe(baseline + window * 1000);
+        assert(result.valid == (window == 3) && result.stable_windows == window);
+      }
+      assert(detector.snapshot().targets == pair);
+    };
+    initialize();
+    assert(!detector.observe(nullptr, 0, times[0] - 2000).valid);
+    for (auto& value : values)
+      value.submission_activity = 0;
+    assert(!observe(times[0] - 1000).valid);
+    for (std::size_t sample = 0; sample < times.size(); ++sample) {
+      for (std::size_t i = 0; i < count; ++i) {
+        auto& value = values[i];
+        value.submission_activity = value.levels == 5 ? auxiliary[sample]
+                                    : value.id == 47  ? left[sample]
+                                    : value.id == 45  ? right[sample]
+                                                      : other[sample];
+      }
+      std::reverse(values.begin(), values.begin() + count);
+      const auto& result = observe(times[sample]);
+      assert(result.valid == (sample >= 3));
+      if (sample >= 3)
+        assert((result.targets == std::array<std::uint64_t, 2>{47, 45}));
+    }
+    for (const auto& value : values)
+      assert(!value.draws);
+
+    // Two active EFIS surfaces cannot win during partial cold boot, even
+    // with arbitrarily high counts. A complete third incarnation is required.
+    initialize();
+    count = 5;
+    for (unsigned window = 0; window < 5; ++window) {
+      add();
+      assert(!observe(window * 1000).valid);
+      assert(std::strcmp(detector.snapshot().status, "a350_group_incomplete") == 0);
+    }
+    count = 6;
+    assert(!observe(5000).valid && detector.snapshot().stable_windows == 0);
+    confirms(5000);
+    assert(!observe(8100, false).valid && std::strcmp(detector.snapshot().status, "incomplete_inventory") == 0);
+    assert(!observe(8200).valid && detector.snapshot().stable_windows == 0);
+    confirms(8200);
+
+    // Auxiliary count is not a side-order signal. The complete three-EFIS
+    // group also works when auxiliaries are absent or one more is observed.
+    initialize();
+    values[0] = values[2];
+    values[1] = values[4];
+    values[2] = values[5];
+    count = 3;
+    observe(0);
+    confirms(0);
+    initialize();
+    values[count++] = {99, 0, 1644, 1024, 5, 28, 900000};
+    observe(0);
+    confirms(0);
+
+    for (const auto extra :
+         {PfdTargetObservation{76, 0, 1644, 1024, 1, 27, 100}, {76, 0, 1644, 1024, 1, 28, 100}, {76, 0, 1644, 1024, 5, 27, 100}}) {
+      initialize();
+      values[count++] = extra;
+      assert(!observe(0).valid);
+      assert(std::strcmp(detector.snapshot().status,
+                         extra.levels == 1 && extra.format == 27 ? "a350_group_ambiguous" : "a350_group_format") == 0);
+    }
+    initialize();
+    values[0].id = 0;  // Excluded auxiliaries still need valid, unique IDs.
+    assert(!observe(0).valid && std::strcmp(detector.snapshot().status, "invalid_input") == 0);
+    initialize();
+    values[1].id = values[0].id;
+    assert(!observe(0).valid && std::strcmp(detector.snapshot().status, "duplicate_id") == 0);
+    initialize();
+    values[5].height = 1023;
+    assert(!observe(0).valid && std::strcmp(detector.snapshot().status, "a350_group_incomplete") == 0);
+
+    initialize();
+    observe(0);
+    confirms(0);
+    values[4].submission_activity = 0;
+    assert(!observe(3100).valid && std::strcmp(detector.snapshot().status, "counter_reset") == 0);
+    confirms(3100);
+    for (auto& value : values)
+      value.submission_activity = 0;
+    assert(!observe(6200).valid && std::strcmp(detector.snapshot().status, "counter_reset") == 0);
+    confirms(6200);
+
+    for (const auto replacement : {std::pair{4u, 48ull}, std::pair{5u, 76ull}}) {
+      initialize();
+      observe(0);
+      confirms(0);
+      values[replacement.first].id = replacement.second;
+      values[replacement.first].submission_activity = 100000;
+      assert(!observe(3100).valid && std::strcmp(detector.snapshot().status, "a350_group_changed") == 0);
+      confirms(3100, {replacement.first == 4 ? 48u : 47u, 45});
+    }
+    initialize();
+    observe(1000);
+    confirms(1000);
+    assert(!observe(3999).valid && std::strcmp(detector.snapshot().status, "clock_reset") == 0);
+    confirms(3999);
+    assert(!observe(12000).valid && std::strcmp(detector.snapshot().status, "stale_window") == 0);
+    confirms(12000);
+
+    for (const auto rates : {std::array<std::uint64_t, 3>{100, 100, 100}, {125, 125, 100}, {301, 100, 20}, {0, 100, 0}}) {
+      initialize();
+      observe(0);
+      for (unsigned window = 1; window <= 3; ++window) {
+        add(rates[0], rates[1], rates[2]);
+        assert(!observe(window * 1000).valid && detector.snapshot().stable_windows == 0);
+      }
+    }
+    // Native draw evidence anywhere in the eligible inventory retains its
+    // original precedence, including auxiliaries. Counter sources never mix.
+    initialize();
+    observe(0);
+    confirms(0);
+    values[0].draws = 1;
+    assert(!observe(3100).valid && std::strcmp(detector.snapshot().status, "activity_source_changed") == 0);
+    for (unsigned window = 1; window <= 3; ++window) {
+      add();
+      for (auto& value : values)
+        value.draws += value.levels == 5 ? 200 : 0;
+      assert(!observe(3100 + window * 1000).valid && std::strcmp(detector.snapshot().status, "ambiguous_activity") == 0);
+    }
+    for (auto& value : values)
+      value.draws = 0;
+    assert(!observe(6200).valid && std::strcmp(detector.snapshot().status, "activity_source_changed") == 0);
+    confirms(6200);
+  }
+  std::puts("A350 submitted-exit EFIS group: PASS; captured A35K layout, A359 fixture, complete inventory and unchanged activity guards");
+}
+
 void ini_a380_group() {
   static PfdTargetDetector detector;
   detector.configure(taxi_camera::profiles::IniA380);
@@ -395,6 +565,7 @@ void ini_a380_group() {
 
 int main() {
   submission_activity();
+  a350_submitted_exits();
   a350_power_up();
   ini_a380_group();
   static PfdTargetDetector detector;

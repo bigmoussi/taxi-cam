@@ -63,6 +63,23 @@ Routes, activity, recovered bindings, previous recording admission and completed
 
 These are local results. Actual flow-event delivery, loaded-flight Connect after this change, aircraft swapping and same-aircraft airport reload still need simulator verification. The A380 wrong-instrument selection and cause of the CTD/system freeze remain unresolved. The simulator process had exited and the companion was responsive during investigation. No display-driver reset was recorded in the checked Windows System event interval, but GPU-memory telemetry timed out; that does not establish whether the bridge caused or contributed to the freeze.
 
+## A350 cold-and-dark automatic assignment correction
+
+The subsequent A350-1000 session (PID44364) discovered six textures but never assigned them automatically. Native draw counts were zero. Submitted RT-exit counts for auxiliary IDs43/44/46 tied above the active EFIS group45/47/75, so ranking all six always returned `ambiguous_activity`. Read-only IPC identified the auxiliaries as five-mip UNORM and the EFIS group as one-mip RGBA8 typeless. The user confirmed47 as the working left display;45/right remains inferred from matched activity and the existing side rule.
+
+The A350 submission-only fallback now ranks the complete three-member EFIS group, retaining the existing activity margin, three stable windows and side ordering. Partial idle pairs cannot bypass this through the bridge's two-candidate shortcut. Native-draw ranking, A380 selection and the full manual inventory remain unchanged.
+
+Version **0.9.37**, build 0, was installed at **14:08:10 UTC**. All 12 protected settings/calibration files retained their hashes; MSFS was already closed and only the companion was restarted.
+
+| File | SHA-256 |
+| --- | --- |
+| `taxi-cam.exe` | `643800CB2722830CC97CB8EF10C7A12982F575CB749F34D4CD190EA3E9055DE0` |
+| `taxi-camera-bridge.dll` | `26FFACC681CAE74C3C7F0B4B6A74FCC42874775268E097F074E708DDDE946F68` |
+
+The captured detector regression fails against90ae339 and passes with this correction. Actual bridge discovery/routing checks pass **129 cases**, including partial power-up, reset and manual selection. Pinned `build.ps1 -Validate` passed on hardware/WARP; exact-pair smoke passed **148 checks**. The A350 graphics fixture now rejects its incomplete idle automatic pair, then verifies manual camera/calibration output with the same pixel oracles. The debug layer was unavailable.
+
+Automatic assignment in the new binary still needs a live cold-and-dark retest. These results do not establish right45's cockpit identity or resolve A380 boot-time targeting or airport-change crash/freeze behaviour.
+
 ## Local evidence
 
 Logs, GPU reproductions, process snapshots, binaries and receipts remain in ignored build directories:
@@ -73,3 +90,5 @@ Logs, GPU reproductions, process snapshots, binaries and receipts remain in igno
 - `build/pr42-review/airport-change-ctd-20260918-1314/`: bridge/launcher logs, Windows events, simulator crash report and bounded exception record.
 - `build/pr42-review/flight-session-reset/`: full validation, exact smoke, focused GPU/lifecycle tests and deployment scripts for the new reset build.
 - `build/pr42-review/delivery-20260918-134022-210/`: immutable reset-build installation receipt, validated pair and rollback pair.
+- `build/pr42-review/a350-cold-dark-assignment/`: captured failing log/IPC metadata, old-policy failure, corrected regressions, full validation and exact smoke.
+- `build/pr42-review/delivery-20260918-140810-116/`: immutable A350-assignment installation receipt, validated pair and rollback pair.

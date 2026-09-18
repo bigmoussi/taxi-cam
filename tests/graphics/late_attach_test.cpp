@@ -349,6 +349,63 @@ void a350_power_up_discovery_case() {
   clear_fixture(r);
 }
 
+void a350_submission_power_up_case() {
+  // A35K live metadata: user confirmed47 is left.45 is the inferred paired
+  // candidate; its right-side cockpit identity still needs live confirmation.
+  // Replay sampled cumulative counters at detector-window intervals; log
+  // cadence itself was approximately five seconds, not the discovery cadence.
+  constexpr std::array<std::uint64_t, 6> ids{43, 44, 46, 75, 45, 47};
+  constexpr std::array<std::uint64_t, 4> auxiliary{1, 234, 423, 571};
+  constexpr std::array<std::uint64_t, 4> efis{1, 118, 224, 318};
+  constexpr std::array<std::uint64_t, 4> other{1, 67, 126, 186};
+  auto& r = win::registry();
+  for (const auto* profile : {&profiles::A359, &profiles::A35K}) {
+    clear_fixture(r);
+    win::set_aircraft_profile(profile->id);
+    r.pfd_inventory_complete = true;
+    std::array<std::shared_ptr<win::Resource>, 6> items{};
+    for (unsigned i = 0; i < items.size(); ++i) {
+      items[i] = display(i);
+      items[i]->id = ids[i];
+      items[i]->desc.Width = profile->width;
+      items[i]->desc.Height = profile->height;
+      items[i]->desc.MipLevels = i < 3 ? 5 : 1;
+      items[i]->desc.Format = i < 3 ? DXGI_FORMAT_R8G8B8A8_UNORM : DXGI_FORMAT_R8G8B8A8_TYPELESS;
+    }
+    seed_observed_display(r, items[0]);
+    seed_observed_display(r, items[1]);
+    win::discover_pfds(1000);
+    expect("partial cold A350 outputs cannot bypass automatic activity proof", win::target_ids() == std::array<std::uint64_t, 2>{}, true);
+    for (unsigned i = 2; i < items.size(); ++i)
+      seed_observed_display(r, items[i]);
+    win::discover_pfds(2000);
+    expect("complete but unpowered A350 inventory remains unassigned", win::target_ids() == std::array<std::uint64_t, 2>{}, true);
+    for (unsigned sample = 0; sample < auxiliary.size(); ++sample) {
+      for (unsigned i = 0; i < items.size(); ++i)
+        items[i]->submission_activity = i < 3 ? auxiliary[sample] : i == 3 ? other[sample] : efis[sample];
+      win::discover_pfds(3000 + sample * 1000);
+      expect("A350 completion-only discovery waits then adopts the EFIS activity pair",
+             win::target_ids() == (sample < 3 ? std::array<std::uint64_t, 2>{} : std::array<std::uint64_t, 2>{47, 45}), true);
+    }
+    expect("all six candidates remain available for manual selection", win::pfd_inventory().size(), 6);
+    expect("automatic routing publishes the EFIS identities", r.selected_resources[0] == items[5] && r.selected_resources[1] == items[4],
+           true);
+    expect("manual auxiliary selection stays available", win::assign_targets(43, 0), true);
+    win::discover_pfds(7000);
+    expect("automatic discovery preserves an explicit selection", win::target_ids()[0], 43);
+    win::reset_display_session();
+    win::set_aircraft_profile(profile->id);
+    expect("full reset removes old assignment", win::target_ids() == std::array<std::uint64_t, 2>{}, true);
+    for (unsigned sample = 0; sample < auxiliary.size(); ++sample) {
+      for (unsigned i = 0; i < items.size(); ++i)
+        items[i]->submission_activity = i < 3 ? auxiliary[sample] : i == 3 ? other[sample] : efis[sample];
+      win::discover_pfds(8000 + sample * 1000);
+    }
+    expect("A350 automatic discovery recovers after full flight reset", win::target_ids() == std::array<std::uint64_t, 2>{47, 45}, true);
+  }
+  clear_fixture(r);
+}
+
 void ini_explicit_discovery_case() {
   auto& r = win::registry();
   clear_fixture(r);
@@ -409,6 +466,7 @@ int main() {
   rt_exit_case();
   reconnect_discovery_case();
   a350_power_up_discovery_case();
+  a350_submission_power_up_case();
   ini_explicit_discovery_case();
   std::printf(
       "%s late-attach metadata: checks=%u failures=%u; profile switch, distinct displays, hint lifetimes, unknown views, RT exits.\n",
