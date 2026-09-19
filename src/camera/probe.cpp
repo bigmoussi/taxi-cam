@@ -146,9 +146,11 @@ void begin_session_reset(Runtime& runtime, const profiles::AircraftProfile& prof
   const auto cancelled = runtime.pair.cancel_uncreated_request();
   // Only the observer can acknowledge renderer retirement. An empty mailbox
   // snapshot does not establish that either native release queue has drained.
-  // Before an observer has ever been enabled, no native camera allocation
-  // could have run. A refused start may already have installed the hook;
-  // waiting for that disabled observer deadlocks the next flight reset.
+  // Before an observer has ever been installed, no native camera allocation
+  // could have run. The same is true when the hook exists but the observer
+  // was never enabled: request_scene_test can install the update slot and
+  // then refuse, leaving observer() as a no-op. Waiting for that path
+  // deadlocks camera launch on the next flight-session reset.
   if (SceneSessionReset::acknowledge_empty_without_observer(runtime.hooked.load(std::memory_order_acquire),
                                                            runtime.enabled.load(std::memory_order_acquire)))
     runtime.session_reset.observe_empty(cancelled, runtime.pair.snapshot());
