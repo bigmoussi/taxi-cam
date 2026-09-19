@@ -354,7 +354,7 @@ void constructor_pointer_relations() {
     const auto code =
         std::find_if(model.code.begin(), model.code.end(), [&](const auto& item) { return item.symbol == relation.target_symbol; });
     require(code != model.code.end(), "Static method relation has no reviewed body");
-    if (code->bytes.size() > 8 || !code->operands.empty())
+    if (code->bytes.size() > 9 || !code->operands.empty())
       continue;
     for (unsigned copy = 0; copy < 2; ++copy) {
       duplicate_getters.bytes(duplicate, code->bytes.data(), code->bytes.size());
