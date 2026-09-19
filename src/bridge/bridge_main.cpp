@@ -641,7 +641,8 @@ DWORD run_impl() {
         !connected || !settings.enabled ? "Disconnected. Use Connect in the Windows companion."
         : !aircraft_matches             ? aircraft_message
         : cutoff.inhibited ? (manual_only ? "Above 60 knots: camera displays inhibited." : "Above 60 knots: TAXI buttons commanded off.")
-        : failed           ? scene.message.c_str()
+        : failed                                         ? scene.message.c_str()
+        : scene.pose_waiting && requested               ? scene.message.c_str()
         : scene.view_waiting && scene.stop_reason == native_camera::SceneStopReason::resolution_changed ? scene.message.c_str()
         : !manual_only && !buttons.valid                                                                ? buttons.error
         : !manual_only && taxi_request_status.failed && taxi_request_status.serial == settings.taxi_request
@@ -715,7 +716,9 @@ DWORD run_impl() {
                     scene.performance.stage_ms[static_cast<std::size_t>(native_camera::ProbeStage::aa)],
                     static_cast<unsigned long long>(scene.inspection_count), static_cast<unsigned long long>(scene.updates),
                     static_cast<unsigned long long>(graphics.clear_states),
-                    scene.stop_reason == native_camera::SceneStopReason::none ? "" : scene.stop_detail.c_str());
+                    scene.stop_reason != native_camera::SceneStopReason::none ? scene.stop_detail.c_str()
+                    : !scene.pair.owned_ids[0] && !scene.pair.owned_ids[1]      ? scene.message.c_str()
+                                                                                : "");
       log_status(status, detail);
       char selection_detail[256];
       std::snprintf(selection_detail, sizeof(selection_detail),
