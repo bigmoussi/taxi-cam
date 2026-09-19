@@ -144,15 +144,18 @@ void begin_session_reset(Runtime& runtime, const profiles::AircraftProfile& prof
   const auto cancelled = runtime.pair.cancel_uncreated_request();
   // Only the observer can acknowledge renderer retirement. An empty mailbox
   // snapshot does not establish that either native release queue has drained.
-  // Before an observer has ever been installed, no native camera allocation
-  // could have run; preserve the empty initial setup path without a deadlock.
-  if (!runtime.hooked.load(std::memory_order_acquire))
+  // Before an observer has ever been enabled, no native camera allocation
+  // could have run. A refused start may already have installed the hook;
+  // waiting for that disabled observer deadlocks the next flight reset.
+  if (SceneSessionReset::acknowledge_empty_without_observer(runtime.hooked.load(std::memory_order_acquire),
+                                                           runtime.enabled.load(std::memory_order_acquire)))
     runtime.session_reset.observe_empty(cancelled, runtime.pair.snapshot());
   if (runtime.profile_transition_token != UINT64_MAX)
     ++runtime.profile_transition_token;
   else
     runtime.session_reset_failed = true;
   runtime.published.accepting_requests = false;
+  runtime.published.readiness_deferred = false;
   runtime.published.outputs_matched = false;
   runtime.published.message = "Flight session reset pending; camera creation is disabled until retirement and load readiness.";
 }
@@ -1708,6 +1711,7 @@ void request_scene_test(bool reuse_calibration) noexcept {
   {
     const std::lock_guard lock(runtime.mutex);
     runtime.published.accepting_requests = false;
+    runtime.published.readiness_deferred = false;
   }
   try {
     if (!runtime.hooked.load(std::memory_order_acquire)) {
@@ -1779,6 +1783,7 @@ void request_scene_test(bool reuse_calibration) noexcept {
       const auto readiness = get_aircraft_session_readiness();
       if (!readiness.ready || runtime.session_reset_failed ||
           (runtime.session_reset.holding() && !runtime.session_reset.ready(readiness.ready, pair))) {
+        runtime.published.readiness_deferred = true;
         runtime.published.message = "Camera startup waits for flight load readiness and confirmed retirement of the prior session.";
         return;
       }
@@ -1790,9 +1795,11 @@ void request_scene_test(bool reuse_calibration) noexcept {
     const auto readiness = get_aircraft_session_readiness();
     if (!readiness.ready || runtime.session_reset_failed ||
         (runtime.session_reset.holding() && !runtime.session_reset.consume(readiness.ready, pair))) {
+      runtime.published.readiness_deferred = true;
       runtime.published.message = "Flight load readiness changed during camera startup; no camera creation requested.";
       return;
     }
+    runtime.published.readiness_deferred = false;
     runtime.reset_requested.store(false, std::memory_order_release);
     const bool retained = runtime.profile_transition.can_resume(pair);
     if (runtime.profile_transition.holding() && (pair.owned_ids[0] || pair.owned_ids[1]) && !retained) {
