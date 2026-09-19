@@ -67,6 +67,20 @@ inline const char* owned_view_status_name(OwnedViewStatus status) noexcept {
   return "unknown";
 }
 
+// One material output slot as the captured SetRenderTargets replay sees it:
+// the Bitmap handle resolves, Bitmap+88 names a texture, and that texture has a
+// render-target record for subresource 0 ([T+0x48]->[+8]->[0], else [T+0x40]).
+// The renderer counts only non-null records yet binds the first `count` slots,
+// so a texture without a record is what the retained RenderThreadProc fault
+// dereferences. Observation only; nothing here allocates or binds.
+struct OutputSlotObservation {
+  bool bitmap = false;
+  bool texture = false;
+  bool render_target_record = false;
+  std::uint32_t mask() const noexcept { return (bitmap ? 1u : 0u) | (texture ? 2u : 0u) | (render_target_record ? 4u : 0u); }
+};
+inline constexpr std::array<std::uint32_t, 3> kOutputSlotOffsets{520, 664, 712};  // diffuse, add-diffuse, depth-stencil
+
 struct OwnedViewSnapshot {
   // complete includes a stable pending entry; ready requires the camera chain.
   bool complete = false;
@@ -105,6 +119,10 @@ struct OwnedViewSnapshot {
   // Only a nonnull pointer-shaped resource member was observed. No COM method,
   // interface check, AddRef, description, resource state or GPU data is inspected.
   bool resource_present = false;
+  // Diffuse (520), add-diffuse (664) and depth-stencil (712) slot observations,
+  // published with the complete ready snapshot. Index 0 is the gate-relevant
+  // diffuse; the others are diagnostics for the retention log.
+  std::array<OutputSlotObservation, 3> output_slots{};
 };
 
 // Separate authority for an owned mode2 gate closure only. Never convertible to

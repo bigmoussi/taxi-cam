@@ -26,6 +26,8 @@ ec::OwnedViewSnapshot ready_view() {
   view.resource_present = true;
   view.dimensions = pane;
   view.output_dimensions = pane[0];
+  view.output_slots[0] = {true, true, true};
+  view.output_slots[2] = {true, true, true};
   return view;
 }
 void admission() {
@@ -63,6 +65,22 @@ void admission() {
   require(!owned_view_output_ready(changed, pane), "A changed snapshot was admitted");
   const ViewDimensions other{{{736, 496}, {736, 496}, {736, 496}}};
   require(!owned_view_output_ready(ready_view(), other), "A pane from another feed was admitted");
+  // The retained fault state: pane output present, diffuse texture without a
+  // render-target record. Pane output alone passes; admission refuses.
+  auto recordless = ready_view();
+  recordless.output_slots[0].render_target_record = false;
+  require(
+      owned_view_pane_output(recordless, pane) && !owned_view_render_target_ready(recordless) && !owned_view_output_ready(recordless, pane),
+      "A diffuse texture without a render-target record was admitted");
+  auto no_texture = ready_view();
+  no_texture.output_slots[0] = {true, false, false};
+  require(!owned_view_output_ready(no_texture, pane), "A Bitmap without a texture was admitted");
+  auto depth_only_missing = ready_view();
+  depth_only_missing.output_slots[2] = {};
+  require(owned_view_output_ready(depth_only_missing, pane), "A missing depth-stencil observation blocked the diffuse gate");
+  require(owned_view_slot_digits(ready_view()) == 0x707 && owned_view_slot_digits(recordless) == 0x307 &&
+              owned_view_slot_digits(no_texture) == 0x107,
+          "Slot digits did not encode Bitmap/texture/record per slot");
 }
 void output_wait() {
   ViewResizeWarmup warmup;

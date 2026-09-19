@@ -651,8 +651,8 @@ DWORD run_impl() {
         !connected || !settings.enabled ? "Disconnected. Use Connect in the Windows companion."
         : !aircraft_matches             ? aircraft_message
         : cutoff.inhibited ? (manual_only ? "Above 60 knots: camera displays inhibited." : "Above 60 knots: TAXI buttons commanded off.")
-        : failed                                         ? scene.message.c_str()
-        : scene.pose_waiting && requested               ? scene.message.c_str()
+        : failed           ? scene.message.c_str()
+        : scene.pose_waiting && requested                                                               ? scene.message.c_str()
         : scene.view_waiting && scene.stop_reason == native_camera::SceneStopReason::resolution_changed ? scene.message.c_str()
         : !manual_only && !buttons.valid                                                                ? buttons.error
         : !manual_only && taxi_request_status.failed && taxi_request_status.serial == settings.taxi_request
@@ -728,8 +728,8 @@ DWORD run_impl() {
                     static_cast<unsigned long long>(scene.inspection_count), static_cast<unsigned long long>(scene.updates),
                     static_cast<unsigned long long>(graphics.clear_states),
                     scene.stop_reason != native_camera::SceneStopReason::none ? scene.stop_detail.c_str()
-                    : !scene.pair.owned_ids[0] && !scene.pair.owned_ids[1]      ? scene.message.c_str()
-                                                                                : "");
+                    : !scene.pair.owned_ids[0] && !scene.pair.owned_ids[1]    ? scene.message.c_str()
+                                                                              : "");
       log_status(status, detail);
       char selection_detail[256];
       std::snprintf(selection_detail, sizeof(selection_detail),
@@ -830,7 +830,8 @@ DWORD run_impl() {
           retention_detail, sizeof(retention_detail),
           "Camera retention: created_total=%llu snapshot_bytes=%llu quarantined=%llu prewarm=%s patch_requests=%u patch_draws=%llu "
           "retirement_deferrals=%llu retirement_waiting=%u retirement_status=%s retirement_queues=%u/%u "
-          "flags=%llx:%llx/%llx:%llx aa_restores=%llu aa_restore_failures=%llu aa_cleared_pending=%u",
+          "flags=%llx:%llx/%llx:%llx aa_restores=%llu aa_restore_failures=%llu aa_cleared_pending=%u rt=%03x/%03x rt_refusals=%u "
+          "rt_holds=%llu",
           static_cast<unsigned long long>(scene.created_total), static_cast<unsigned long long>(output.capture.bytes),
           static_cast<unsigned long long>(output.capture.quarantined), prewarm.name(), output.patch_requests,
           static_cast<unsigned long long>(output.patch_draws), static_cast<unsigned long long>(scene.retirement_deferrals),
@@ -838,7 +839,8 @@ DWORD run_impl() {
           static_cast<unsigned long long>(scene.flags[0][0]), static_cast<unsigned long long>(scene.flags[0][1]),
           static_cast<unsigned long long>(scene.flags[1][0]), static_cast<unsigned long long>(scene.flags[1][1]),
           static_cast<unsigned long long>(scene.aa_restores), static_cast<unsigned long long>(scene.aa_restore_failures),
-          scene.aa_cleared_pending);
+          scene.aa_cleared_pending, scene.output_slots[0], scene.output_slots[1], scene.rt_record_refusals,
+          static_cast<unsigned long long>(scene.rt_record_holds));
       log_status(status, retention_detail);
       if (graphics_diagnostics) {
         char graphics_detail[512];
