@@ -293,7 +293,20 @@ void session_readiness_regressions(Check check) {
     accepted = calibrate_body_pose(parked, static_cast<float>(fov), now, &latch);
     check(sample < 2 ? !accepted : accepted);
     check(latch.new_public_sample && latch.calibration_samples == sample + 1);
+    if (sample == 0) {
+      // A late public response defers this attempt without discarding the
+      // progress already made; the candidate itself was not contradicted.
+      CameraMatchReport stale;
+      check(!calibrate_body_pose(parked, static_cast<float>(fov), now + 1000, &stale));
+      check(!stale.public_ready && stale.calibration_samples == 1);
+    }
   }
+  // A camera proven to be somewhere else still loses the latch.
+  now = GetTickCount64() + 4;
+  supply();
+  CameraMatchReport wrong;
+  check(!calibrate_body_pose(body_math::ecef(0, 0, 0), static_cast<float>(fov), now, &wrong));
+  check(wrong.public_ready && !wrong.geometry && wrong.calibration_samples == 0);
   reset_body_pose_calibration();
   check(!sample_body_pose(now).valid);
 }

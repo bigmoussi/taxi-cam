@@ -985,13 +985,16 @@ bool calibrate_body_pose(const Vector3& position, float fov, std::uint64_t now, 
   AcquireSRWLockExclusive(&state.lock);
   // The worker may publish after the caller sampled its clock but before this
   // lock. Judge freshness at the locked read, retaining future test deadlines.
-  const bool good = camera_sample_matches_locked(lla, fov, now, report);
+  CameraMatchReport local;
+  const bool good = camera_sample_matches_locked(lla, fov, now, &local);
   const double delta = lla[2] - state.camera.position[2];
   bool accepted = false;
-  if (report)
-    report->new_public_sample = state.camera_ms != state.calibration_camera_ms;
+  local.new_public_sample = state.camera_ms != state.calibration_camera_ms;
+  // A camera in the wrong place must lose the latch. A momentarily late public
+  // response says nothing about the candidate, and the2cm stability check
+  // still revalidates every accepted sample, so it only defers this attempt.
   if (!good)
-    state.calibration_samples = 0;
+    state.calibration_samples = local.public_ready ? 0 : state.calibration_samples;
   else if (state.camera_ms != state.calibration_camera_ms) {
     const auto public_position = body_math::ecef(state.camera.position[0], state.camera.position[1], state.camera.position[2]);
     // Initial calibration requires a momentarily settled camera. Three
@@ -1013,9 +1016,10 @@ bool calibrate_body_pose(const Vector3& position, float fov, std::uint64_t now, 
       accepted = true;
     }
   }
-  if (report)
-    report->calibration_samples = state.calibration_samples;
+  local.calibration_samples = state.calibration_samples;
   ReleaseSRWLockExclusive(&state.lock);
+  if (report)
+    *report = local;
   return accepted;
 }
 BodyPoseSnapshot sample_body_pose(std::uint64_t now) noexcept {
