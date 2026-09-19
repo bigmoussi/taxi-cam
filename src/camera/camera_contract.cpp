@@ -146,6 +146,40 @@ bool boundaries(discovery::ImageReader& reader, const discovery::Inventory& imag
   return true;
 }
 
+// Exactly one declared shape of this body, reread in full at its resolved RVA.
+// Returns false for a read failure as well as a mismatch; the caller retries
+// another declared shape only after a plain mismatch cannot be distinguished,
+// so a torn read can never be laundered into a different build's shape.
+bool same_template(discovery::ImageReader& reader,
+                   const relocatable::CodeTemplate& code,
+                   const std::vector<std::uint32_t>& symbols) {
+  std::vector<std::uint8_t> bytes(code.bytes.size()), variable(code.bytes.size(), 0);
+  if (!exact(reader, symbols[code.symbol], bytes.data(), static_cast<std::uint32_t>(bytes.size())))
+    return false;
+  for (const auto& operand : code.operands) {
+    if (operand.target_symbol >= symbols.size() || operand.offset > bytes.size() || operand.width > bytes.size() - operand.offset ||
+        (operand.width != 1 && operand.width != 4))
+      return false;
+    std::uint32_t raw = 0;
+    for (std::uint32_t n = 0; n < operand.width; ++n) {
+      raw |= std::uint32_t(bytes[operand.offset + n]) << (n * 8);
+      variable[operand.offset + n] = 1;
+    }
+    std::int64_t target = raw;
+    if (operand.kind == relocatable::AddressKind::pc_relative) {
+      const auto displacement = operand.width == 1 ? (raw < 128 ? std::int64_t(raw) : std::int64_t(raw) - 256)
+                                                   : (raw < 0x80000000u ? std::int64_t(raw) : std::int64_t(raw) - 0x100000000ll);
+      target = std::int64_t(symbols[code.symbol]) + operand.pc_offset + displacement;
+    }
+    if (target != std::int64_t(symbols[operand.target_symbol]) + operand.addend)
+      return false;
+  }
+  for (std::size_t i = 0; i < bytes.size(); ++i)
+    if (!variable[i] && bytes[i] != code.bytes[i])
+      return false;
+  return true;
+}
+
 bool same_templates(discovery::ImageReader& reader,
                     const relocatable::ContractModel& model,
                     const std::vector<std::uint32_t>& symbols,
@@ -155,30 +189,16 @@ bool same_templates(discovery::ImageReader& reader,
   for (const auto& code : model.code) {
     if (code.symbol >= symbols.size())
       return false;
-    std::vector<std::uint8_t> bytes(code.bytes.size()), variable(code.bytes.size(), 0);
-    if (!exact(reader, symbols[code.symbol], bytes.data(), static_cast<std::uint32_t>(bytes.size())))
+    if (same_template(reader, code, symbols))
+      continue;
+    // The resolver adopted whichever shipped shape this image holds. The final
+    // reread must accept the same set, still in full and byte for byte.
+    bool matched = false;
+    for (const auto& variant : model.variants)
+      if (variant.symbol == code.symbol && (matched = same_template(reader, variant, symbols)))
+        break;
+    if (!matched)
       return false;
-    for (const auto& operand : code.operands) {
-      if (operand.target_symbol >= symbols.size() || operand.offset > bytes.size() || operand.width > bytes.size() - operand.offset ||
-          (operand.width != 1 && operand.width != 4))
-        return false;
-      std::uint32_t raw = 0;
-      for (std::uint32_t n = 0; n < operand.width; ++n) {
-        raw |= std::uint32_t(bytes[operand.offset + n]) << (n * 8);
-        variable[operand.offset + n] = 1;
-      }
-      std::int64_t target = raw;
-      if (operand.kind == relocatable::AddressKind::pc_relative) {
-        const auto displacement = operand.width == 1 ? (raw < 128 ? std::int64_t(raw) : std::int64_t(raw) - 256)
-                                                     : (raw < 0x80000000u ? std::int64_t(raw) : std::int64_t(raw) - 0x100000000ll);
-        target = std::int64_t(symbols[code.symbol]) + operand.pc_offset + displacement;
-      }
-      if (target != std::int64_t(symbols[operand.target_symbol]) + operand.addend)
-        return false;
-    }
-    for (std::size_t i = 0; i < bytes.size(); ++i)
-      if (!variable[i] && bytes[i] != code.bytes[i])
-        return false;
   }
   for (const auto& constant : model.constants) {
     if (constant.symbol >= symbols.size() || constant.offset > UINT32_MAX - symbols[constant.symbol])

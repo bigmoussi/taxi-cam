@@ -38,6 +38,15 @@ struct PointerRelation {
 struct ContractModel {
   std::vector<Symbol> symbols;
   std::vector<CodeTemplate> code;
+  // Another shipped build's shape for a body already declared in code, named
+  // by the same symbol. Every shape is matched in full with its own operands;
+  // nothing here reads or branches on a simulator version. Declare the most
+  // specific shape first: a later shape is consulted only where no earlier one
+  // is present, so one build's copy cannot quietly stand in for another's.
+  // Every shape of one body must have the same length as the declared code
+  // entry and agree with it on whether it is seed-discoverable, so extents,
+  // ranges and unwind spans stay identical whichever shape resolves.
+  std::vector<CodeTemplate> variants;
   std::vector<DataConstant> constants;
   std::vector<PointerRelation> pointers;
 };

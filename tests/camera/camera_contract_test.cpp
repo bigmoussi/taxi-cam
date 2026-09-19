@@ -382,6 +382,38 @@ void constructor_pointer_relations() {
     require(changed.reads[slot] >= changed.change_after, "Static method-slot mutation was never exercised");
   }
 }
+void shipped_build_shapes() {
+  // setup_entry reaches one member through a displacement that moved between
+  // shipped builds. Both shapes must be declared, either may resolve, and no
+  // third value may pass: the byte is varied, not waived.
+  const auto& model = camera_release_contract::model();
+  const auto setup = cm::symbol_index("setup_entry");
+  require(setup < model.symbols.size(), "setup_entry is absent from the generated model");
+  const auto newer = std::find_if(model.code.begin(), model.code.end(), [&](const auto& item) { return item.symbol == setup; });
+  const auto older = std::find_if(model.variants.begin(), model.variants.end(), [&](const auto& item) { return item.symbol == setup; });
+  require(newer != model.code.end() && older != model.variants.end(), "Both shipped setup_entry shapes must be declared");
+  require(newer->bytes.size() == older->bytes.size() && newer->operands.size() == older->operands.size(),
+          "The declared setup_entry shapes are not the same reviewed body");
+  std::size_t moved = newer->bytes.size();
+  unsigned differences = 0;
+  for (std::size_t at = 0; at < newer->bytes.size(); ++at)
+    if (newer->bytes[at] != older->bytes[at]) {
+      ++differences;
+      moved = at;
+    }
+  require(differences == 1 && moved < newer->bytes.size(), "The declared setup_entry shapes differ beyond the moved displacement");
+
+  require(Fixture().run().valid, "Declaring a second shape broke the image holding the newer one");
+  Fixture holds_older;
+  holds_older.integer(holds_older.rva("setup_entry") + static_cast<std::uint32_t>(moved), older->bytes[moved], 1);
+  const auto resolved = holds_older.run();
+  require(resolved.valid && resolved.contract.layout.aircraft_facade_vtable == holds_older.expected_layout.aircraft_facade_vtable,
+          "The older shipped setup_entry shape did not resolve");
+  Fixture undeclared;
+  undeclared.integer(undeclared.rva("setup_entry") + static_cast<std::uint32_t>(moved),
+                     static_cast<std::uint8_t>(newer->bytes[moved] ^ 0x11), 1);
+  refused(undeclared.run(), "An undeclared member displacement was accepted");
+}
 }  // namespace
 void renderer_retirement_contract() {
   for (const auto [method, offset] :
@@ -427,6 +459,7 @@ int main() {
     refusals();
     evidence_rechecks();
     constructor_pointer_relations();
+    shipped_build_shapes();
     std::printf("Camera contract wrapper: PASS %u checks; sparse synthetic PE images only.\n", checks);
   } catch (const std::exception& error) {
     std::fprintf(stderr, "FAIL camera contract wrapper after %u checks: %s\n", checks, error.what());
