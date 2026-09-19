@@ -382,10 +382,13 @@ DWORD run_impl() {
         char detail[384]{};
         std::snprintf(
             detail, sizeof(detail),
-            "Prewarm phase=%s elapsed_ms=%llu entries=%llu/%llu created_total=%llu output=%u completed_pairs=%llu/%llu", prewarm.name(),
+            "Prewarm phase=%s elapsed_ms=%llu entries=%llu/%llu created_total=%llu ready=%u/%u outputs=%u/%u output=%u "
+            "completed_pairs=%llu/%llu",
+            prewarm.name(),
             static_cast<unsigned long long>(prewarm.started_ms() && now >= prewarm.started_ms() ? now - prewarm.started_ms() : 0),
             static_cast<unsigned long long>(warm_scene.pair.owned_ids[0]), static_cast<unsigned long long>(warm_scene.pair.owned_ids[1]),
-            static_cast<unsigned long long>(warm_scene.created_total), warm_output.output,
+            static_cast<unsigned long long>(warm_scene.created_total), warm_scene.ready[0], warm_scene.ready[1], warm_scene.output_ready[0],
+            warm_scene.output_ready[1], warm_output.output,
             static_cast<unsigned long long>(
                 warm_output.completed_frames >= prewarm.baseline_pairs() ? warm_output.completed_frames - prewarm.baseline_pairs() : 0),
             static_cast<unsigned long long>(win::ScenePrewarm::RequiredPairs));
@@ -662,7 +665,8 @@ DWORD run_impl() {
       std::snprintf(detail, sizeof(detail),
                     "profile=%u matched=%u connected=%u requested=%u ipc_busy=%llu buttons_valid=%u held=%u expired=%u output=%u "
                     "stop_seq=%llu stop=%s "
-                    "retry=%u pending=%u pose_wait=%u view_wait=%u waits=%llu ready=%u/%u inspection=%s/%s entries=%llu/%llu suspended=%u "
+                    "retry=%u pending=%u pose_wait=%u view_wait=%u waits=%llu ready=%u/%u outputs=%u/%u output_waits=%u inspection=%s/%s "
+                    "entries=%llu/%llu suspended=%u "
                     "gates=%u/%u tail=%s "
                     "draws=%llu unknown_lists=%llu invalid_recordings=%llu scoped_invalidations=%llu invalid_draws=%llu "
                     "lease_failures=%llu global_aliases=%llu overflows=%llu reasons=0x%x capture_stalled=%u "
@@ -673,10 +677,10 @@ DWORD run_impl() {
                     buttons.valid, desired.held, desired.timed_out, output.output, static_cast<unsigned long long>(scene.stop_sequence),
                     native_camera::scene_stop_reason_name(scene.stop_reason), scene.recovery_attempts, scene.recovery_pending,
                     scene.pose_waiting, scene.view_waiting, static_cast<unsigned long long>(scene.view_wait_count), scene.ready[0],
-                    scene.ready[1], scene.inspection_status[0], scene.inspection_status[1],
-                    static_cast<unsigned long long>(scene.pair.owned_ids[0]), static_cast<unsigned long long>(scene.pair.owned_ids[1]),
-                    demand.suspend, scene.gates[0], scene.gates[1], output.capture.tail_status,
-                    static_cast<unsigned long long>(output.capture.source_draws),
+                    scene.ready[1], scene.output_ready[0], scene.output_ready[1], scene.output_waits, scene.inspection_status[0],
+                    scene.inspection_status[1], static_cast<unsigned long long>(scene.pair.owned_ids[0]),
+                    static_cast<unsigned long long>(scene.pair.owned_ids[1]), demand.suspend, scene.gates[0], scene.gates[1],
+                    output.capture.tail_status, static_cast<unsigned long long>(output.capture.source_draws),
                     static_cast<unsigned long long>(output.capture.unknown_submitted_lists),
                     static_cast<unsigned long long>(output.capture.invalid_source_recordings),
                     static_cast<unsigned long long>(output.capture.scoped_source_invalidations),

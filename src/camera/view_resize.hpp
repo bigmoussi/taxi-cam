@@ -22,14 +22,21 @@ bool plan_view_resize(const ViewDimensions& inherited,
 // closed gates before resizing, or that update can overwrite their dimensions.
 // This gate uses the observer iteration counter, not a timer or guessed cache
 // write. The caller must keep both gates closed while pending() is true.
+//
+// The warmup also stays pending until the requested output of both views has
+// been observed after the resize. The output routine is called once; later
+// updates only reread the chain. A bounded number of updates without the
+// output is a startup failure for the normal guarded retirement path.
 class ViewResizeWarmup {
  public:
+  static constexpr unsigned MaximumOutputWaits = 12;
   bool begin(const std::array<std::uint64_t, 2>& ids, std::uint64_t iteration) noexcept {
     if (!ids[0] || !ids[1] || ids[0] == ids[1] || !iteration)
       return false;
     ids_ = ids;
     iteration_ = iteration;
     pending_ = true;
+    output_waits_ = 0;
     return true;
   }
   bool may_resize(const std::array<std::uint64_t, 2>& ids, std::uint64_t iteration) const noexcept {
@@ -39,14 +46,25 @@ class ViewResizeWarmup {
     if (!may_resize(ids, iteration))
       return false;
     pending_ = false;
+    output_waits_ = 0;
     return true;
   }
+  // Dimensions were applied but the output chain is not yet observed. Returns
+  // false once the bounded wait is exhausted; the warmup then stays pending
+  // only for the caller's failure handling, never for another gate decision.
+  bool await_output(const std::array<std::uint64_t, 2>& ids, std::uint64_t iteration) noexcept {
+    if (!may_resize(ids, iteration))
+      return false;
+    return ++output_waits_ <= MaximumOutputWaits;
+  }
+  unsigned output_waits() const noexcept { return output_waits_; }
   bool pending() const noexcept { return pending_; }
   void clear() noexcept { *this = {}; }
 
  private:
   std::array<std::uint64_t, 2> ids_{};
   std::uint64_t iteration_ = 0;
+  unsigned output_waits_ = 0;
   bool pending_ = false;
 };
 

@@ -81,6 +81,11 @@ struct ProbeSnapshot {
   std::array<bool, 2> ready{};
   std::array<const char*, 2> inspection_status{"not_inspected", "not_inspected"};
   std::array<bool, 2> resource_present{};
+  // Output admission per view: mode2, resource present, all size pairs and the
+  // Bitmap at the requested pane. Gates open only for views with this true.
+  std::array<bool, 2> output_ready{};
+  // Observer updates spent waiting for the initial pane output after resizing.
+  unsigned output_waits = 0;
   bool outputs_matched = false;
   std::array<std::array<std::array<std::int32_t, 2>, 3>, 2> dimensions{};
   std::array<std::array<std::uint64_t, 2>, 2> flags{};

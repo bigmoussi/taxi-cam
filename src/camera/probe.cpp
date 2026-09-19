@@ -19,6 +19,7 @@
 #include "source_view.hpp"
 #include "view_aa.hpp"
 #include "view_creation_wait.hpp"
+#include "view_output.hpp"
 #include "view_readiness_wait.hpp"
 #include "view_resize.hpp"
 #include "view_resize_recovery.hpp"
@@ -464,6 +465,8 @@ void inspect_pair(Runtime& runtime,
              *view.error ? view.error : "The owned view is not ready.");
     }
     report.resource_present[i] = report.ready[i] && view.resource_present;
+    report.output_ready[i] =
+        report.ready[i] && runtime.resized_ids[i] == ids[i] && owned_view_output_ready(view, runtime.resized_dimensions[i]);
     if (report.ready[i]) {
       report.dimensions[i] = view.dimensions;
       report.flags[i] = view.flags;
@@ -472,7 +475,7 @@ void inspect_pair(Runtime& runtime,
       // remains pane-sized. Retain the pair; recovery may restore fields only
       // when fresh output dimensions prove that no reallocation is needed.
       if (runtime.resized_ids[i] != ids[i] || runtime.resized_dimensions[i] != view.dimensions) {
-        report.ready[i] = report.resource_present[i] = false;
+        report.ready[i] = report.resource_present[i] = report.output_ready[i] = false;
         refuse(SceneStopReason::resolution_changed,
                "Owned-view dimensions changed; retaining the pair for closed-gate dimension recovery.");
       }
@@ -483,7 +486,7 @@ void inspect_pair(Runtime& runtime,
     runtime.inspection_stop = SceneStopReason::inspection_unavailable;
     runtime.stage_error = "Memory-region metadata changed during pair inspection; no result was accepted.";
     views = {};
-    report.ready = report.resource_present = {};
+    report.ready = report.resource_present = report.output_ready = {};
     report.dimensions = {};
     report.flags = {};
     report.inspection_status = {"not_inspected", "not_inspected"};
@@ -880,13 +883,19 @@ ec::EntryId create(void* opaque, ec::ManagerToken token, const ec::DescriptorSto
   return id;
 }
 
-bool resize_closed_entry(Runtime& runtime, ec::EntryId id, unsigned index, bool initialize_output = true) {
+enum class ResizeOutcome { failed, output_pending, complete };
+
+// Both paths end with the same proof: the closed view carries the requested
+// pane in all three size pairs AND its output chain resolves to a resource
+// whose Bitmap has that pane. The output routine's return address alone never
+// established an allocation; a view without that proof may not open a gate.
+ResizeOutcome resize_closed_entry(Runtime& runtime, ec::EntryId id, unsigned index, bool initialize_output = true) {
   if (!session_work_allowed(runtime))
-    return false;
+    return ResizeOutcome::failed;
   const auto view = inspect_entry(runtime, id);
   if (!view.complete || !view.ready || !(view.flags[0] & 1u) || index >= runtime.resized_dimensions.size()) {
     runtime.stage_error = "The owned view could not be validated with its render gate closed.";
-    return false;
+    return ResizeOutcome::failed;
   }
   const auto desired = runtime.resized_dimensions[index];
   const ViewResizeCallbacks resize_callbacks{
@@ -909,20 +918,25 @@ bool resize_closed_entry(Runtime& runtime, ec::EntryId id, unsigned index, bool 
                                          : restore_owned_view_dimensions(view, index, desired, resize_callbacks, runtime.allocation_panes);
   if (!resized.complete) {
     runtime.stage_error = view_resize_status_name(resized.status);
-    return false;
+    return ResizeOutcome::failed;
   }
   const auto confirmed = inspect_entry(runtime, id);
-  const bool valid =
-      confirmed.complete && confirmed.ready && confirmed.view_address == view.view_address && confirmed.node_address == view.node_address &&
-      confirmed.camera_address == view.camera_address && confirmed.dimensions == desired && (confirmed.flags[0] & 1u) &&
-      (initialize_output || (confirmed.mode == 2 && confirmed.resource_present && confirmed.output_dimensions == desired[0] &&
-                             confirmed.resource_address == view.resource_address));
-  if (!valid) {
+  const bool stable = confirmed.complete && confirmed.ready && confirmed.view_address == view.view_address &&
+                      confirmed.node_address == view.node_address && confirmed.camera_address == view.camera_address &&
+                      confirmed.dimensions == desired && (confirmed.flags[0] & 1u) &&
+                      (initialize_output || confirmed.resource_address == view.resource_address);
+  if (!stable) {
     runtime.stage_error = "The resized owned-view chain did not remain stable; its render gate stays closed.";
-    return false;
+    return ResizeOutcome::failed;
+  }
+  if (!owned_view_output_ready(confirmed, desired)) {
+    runtime.stage_error = initialize_output ? "The owned view has no output resource for its requested pane after the output routine; "
+                                              "its render gate stays closed."
+                                            : "The retained owned view has no output resource for its pane; its render gate stays closed.";
+    return initialize_output ? ResizeOutcome::output_pending : ResizeOutcome::failed;
   }
   runtime.resized_ids[index] = id;
-  return true;
+  return ResizeOutcome::complete;
 }
 
 bool erase(void* opaque, ec::ManagerToken token, ec::EntryId id) noexcept {
@@ -1206,7 +1220,7 @@ void observer(void* manager) noexcept {
         // Never consume a provisional identity after failed endpoint validation.
         // The ordinary fresh path retains its existing refusal/recovery policy.
         prepared_views = {};
-        report.ready = report.resource_present = {};
+        report.ready = report.resource_present = report.output_ready = {};
         report.dimensions = {};
         report.flags = {};
       }
@@ -1311,6 +1325,8 @@ void observer(void* manager) noexcept {
       bool waiting_for_body = retry_pose_waiting;
       bool waiting_for_pool = false;
       bool resolution_pause = false;
+      bool output_blocked = false;
+      bool output_warmup = false;
       if (requested_start && !pair.owned_ids[0] && !pair.owned_ids[1]) {
         waiting_for_pool = !timed(runtime, ProbeStage::pool, [&] { return creation_capacity(runtime, 2); });
         if (!waiting_for_pool)
@@ -1378,17 +1394,31 @@ void observer(void* manager) noexcept {
         bool initial_resize_failed = false;
         if (!closed_warmup && runtime.resize_warmup.pending()) {
           runtime.stage_error = "The initial closed-gate resize phase could not be validated.";
-          runtime.creation_valid = timed(runtime, ProbeStage::lifecycle, [&] {
-            return runtime.resize_warmup.may_resize(pair.owned_ids, runtime.updates) &&
-                   resize_closed_entry(runtime, pair.owned_ids[0], 0) && resize_closed_entry(runtime, pair.owned_ids[1], 1);
+          // Dimensions are written and the output routine is called once per
+          // view. Both gates stay closed until the requested output of BOTH
+          // views is observed; a bounded number of updates may pass first.
+          const auto outcome = timed(runtime, ProbeStage::lifecycle, [&] {
+            if (!runtime.resize_warmup.may_resize(pair.owned_ids, runtime.updates))
+              return ResizeOutcome::failed;
+            const auto first = resize_closed_entry(runtime, pair.owned_ids[0], 0);
+            if (first == ResizeOutcome::failed)
+              return first;
+            const auto second = resize_closed_entry(runtime, pair.owned_ids[1], 1);
+            if (second == ResizeOutcome::failed)
+              return second;
+            return first == ResizeOutcome::complete && second == ResizeOutcome::complete ? ResizeOutcome::complete
+                                                                                         : ResizeOutcome::output_pending;
           });
+          runtime.creation_valid = outcome == ResizeOutcome::complete;
           if (runtime.creation_valid)
             runtime.resize_warmup.finish(pair.owned_ids, runtime.updates);
+          else if (outcome == ResizeOutcome::output_pending && runtime.resize_warmup.await_output(pair.owned_ids, runtime.updates))
+            output_warmup = true;
           else
             initial_resize_failed = true;
         }
         std::array<ec::OwnedViewSnapshot, 2> views{};
-        if (!closed_warmup && !initial_resize_failed) {
+        if (!closed_warmup && !output_warmup && !initial_resize_failed) {
           if (prepared_pair && !runtime.lifecycle_touched && pair.owner == before.owner && pair.owned_ids == before.owned_ids &&
               pair.failure == ec::Failure::none && pair.blocked == ec::Blocked::none && !pair.request_pending && !pair.creation_pending) {
             views = prepared_views;
@@ -1459,8 +1489,8 @@ void observer(void* manager) noexcept {
               runtime.resize_recovery.release_resize_authorization();
             } else {
               const bool restored = outputs_unchanged && timed(runtime, ProbeStage::lifecycle, [&] {
-                                      return resize_closed_entry(runtime, pair.owned_ids[0], 0, false) &&
-                                             resize_closed_entry(runtime, pair.owned_ids[1], 1, false);
+                                      return resize_closed_entry(runtime, pair.owned_ids[0], 0, false) == ResizeOutcome::complete &&
+                                             resize_closed_entry(runtime, pair.owned_ids[1], 1, false) == ResizeOutcome::complete;
                                     });
               if (restored && runtime.resize_recovery.finish(pair.owner, pair.owned_ids)) {
                 runtime.schedule.reset();
@@ -1484,13 +1514,17 @@ void observer(void* manager) noexcept {
           if (restored_now)
             report.view_waiting = false;
           else {
-            report.ready = report.resource_present = {};
+            report.ready = report.resource_present = report.output_ready = {};
             report.outputs_matched = false;
             report.view_waiting = true;
           }
         } else if (closed_warmup) {
           // No publication, resize or activation yet. The tail-called original
           // initializes its cache while both verified new gates remain closed.
+        } else if (output_warmup) {
+          // Dimensions are applied and both gates are closed. No publication or
+          // activation until the requested pane output of both views is observed.
+          runtime.schedule = next_schedule;
         } else if (!runtime.resize_warmup.pending() && report.ready[0] && report.ready[1] &&
                    (runtime.creations == 0 || runtime.creation_valid)) {
           const bool new_pair = runtime.scheduled_ids != pair.owned_ids;
@@ -1504,6 +1538,18 @@ void observer(void* manager) noexcept {
             next_schedule.reset();
           }
           desired = next_schedule.tick(GetTickCount64(), runtime.suspended.load() || !session_work_allowed(runtime));
+          // Output admission. A pooled view reused after native release keeps
+          // the previous entry's material state; camera readiness does not show
+          // that its requested output exists. The renderer binds that output
+          // without a null check, so a gate opens only for a view whose exact
+          // pane output was observed by this inspection. The pair is retained.
+          for (unsigned i = 0; i < desired.size(); ++i) {
+            if (desired[i] && !owned_view_output_ready(views[i], runtime.resized_dimensions[i])) {
+              desired[i] = false;
+              output_blocked = true;
+              report.inspection_status[i] = "output_unavailable";
+            }
+          }
           const bool needs_pose = desired[0] || desired[1];
           const bool pose_ready = !needs_pose || timed(runtime, ProbeStage::pose, [&] { return capture_pose(runtime); });
           bool aa_ready = true;
@@ -1529,6 +1575,11 @@ void observer(void* manager) noexcept {
             timed(runtime, ProbeStage::activation, [&] { apply_gates(runtime, pair.owned_ids, desired, report, new_pair); });
             runtime.scheduled_ids = pair.owned_ids;
             runtime.schedule = next_schedule;
+            if (output_blocked) {
+              report.view_waiting = true;
+              runtime.message =
+                  "Camera output texture is absent or not pane-sized; that render gate stays closed while the pair is retained.";
+            }
           } else if (!aa_ready) {
             timed(runtime, ProbeStage::activation, [&] { apply_gates(runtime, pair.owned_ids, {}, report, true); });
             runtime.scheduled_ids = pair.owned_ids;
@@ -1594,10 +1645,12 @@ void observer(void* manager) noexcept {
       if (pair.state != ec::State::active) {
         report.ready = {};
         report.resource_present = {};
+        report.output_ready = {};
         report.dimensions = {};
         report.flags = {};
       }
       report.pose_captured = runtime.pose_captured;
+      report.output_waits = runtime.resize_warmup.output_waits();
       if (waiting_for_pool || runtime.creation_wait.pending()) {
         report.view_waiting = true;
         report.message = "Camera start remains pending until native pooled-view retirement completes.";
@@ -1605,6 +1658,11 @@ void observer(void* manager) noexcept {
         report.message = runtime.message;
       else if (body_pose_failed || waiting_for_body)
         report.message = runtime.message.empty() ? runtime.stage_error : runtime.message;
+      else if (output_warmup) {
+        report.view_waiting = true;
+        report.message = "New scene views stay closed until their pane output textures are observed.";
+      } else if (output_blocked)
+        report.message = runtime.message;
       else if (report.view_waiting)
         report.message = "Owned view inspection unavailable; camera IDs retained while waiting for fresh validation.";
       else if (pair.state == ec::State::active && runtime.resize_warmup.pending())
