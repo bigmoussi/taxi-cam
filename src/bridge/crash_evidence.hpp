@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <cwchar>
 #include <limits>
 #include <new>
@@ -21,6 +22,13 @@ struct Record {
 static_assert(sizeof(Record) <= 4096);
 inline Record* record = nullptr;
 inline HANDLE record_file = INVALID_HANDLE_VALUE;
+struct CodeCaptureResult {
+  bool written = false;
+  bool searched = false;
+  std::uint32_t match_rva = 0, window_rva = 0, window_bytes = 0;
+  const char* error = "";
+};
+inline CodeCaptureResult* code_capture = nullptr;
 inline constexpr std::uint64_t renderer_fault_rva = 64028644;
 inline constexpr unsigned retained_records = 16;
 inline constexpr unsigned maintenance_entries = 4096, maintenance_passes = 32;
@@ -247,8 +255,13 @@ inline LONG capture(Record* destination, const EXCEPTION_POINTERS* exception) no
   const auto& e = *exception->ExceptionRecord;
   const auto& c = *exception->ContextRecord;
   const auto address = reinterpret_cast<std::uint64_t>(e.ExceptionAddress);
-  if (e.ExceptionCode != EXCEPTION_ACCESS_VIOLATION || !destination->module || address < destination->module ||
-      address - destination->module != renderer_fault_rva || c.Rip != address || e.NumberParameters > EXCEPTION_MAXIMUM_PARAMETERS ||
+  if (e.ExceptionCode != EXCEPTION_ACCESS_VIOLATION || !destination->module || address < destination->module)
+    return EXCEPTION_CONTINUE_SEARCH;
+  // The observed 1.8.16.0 site, or the same instruction sequence located in
+  // the current image at arm time (1.9.12.0: +0x3E5C054). Nothing else.
+  const auto rva = address - destination->module;
+  const bool located = code_capture && code_capture->match_rva && rva == code_capture->match_rva;
+  if ((rva != renderer_fault_rva && !located) || c.Rip != address || e.NumberParameters > EXCEPTION_MAXIMUM_PARAMETERS ||
       InterlockedCompareExchange(&destination->state, 1, 0) != 0)
     return EXCEPTION_CONTINUE_SEARCH;
   // Only bounded copies into an already mapped, initialized record. No file
@@ -256,7 +269,7 @@ inline LONG capture(Record* destination, const EXCEPTION_POINTERS* exception) no
   destination->code = e.ExceptionCode;
   destination->parameters = e.NumberParameters;
   destination->thread = GetCurrentThreadId();
-  destination->fault_rva = renderer_fault_rva;
+  destination->fault_rva = rva;
   for (DWORD i = 0; i < e.NumberParameters; ++i)
     destination->information[i] = e.ExceptionInformation[i];
   destination->context = c;
@@ -265,6 +278,122 @@ inline LONG capture(Record* destination, const EXCEPTION_POINTERS* exception) no
 }
 inline LONG CALLBACK handler(EXCEPTION_POINTERS* exception) noexcept {
   return capture(record, exception);
+}
+
+// Read-only arm-time copy of the main image's code around the renderer fault
+// instruction. The store executable file is not readable from a user account,
+// so the caller frames of the retained RenderThreadProc faults can only be
+// read from the loaded image. The fault instruction sequence is located by its
+// bytes in the executable sections; a fixed window around the match is written
+// once per session. No engine call, write to image memory or exception path.
+struct CodeCaptureHeader {
+  std::uint32_t magic = 0x43434354, version = 1, bytes = sizeof(CodeCaptureHeader), process = 0;
+  std::uint64_t module = 0;
+  std::uint32_t image_size = 0, timestamp = 0;
+  std::uint32_t match_rva = 0, window_rva = 0, window_bytes = 0, pattern_bytes = 0;
+};
+// leaq 0xad84(%rcx),%r12; nopl; movq (%rsi,%r14),%rdi; movq 0x10(%rdi),%rax;
+// movq %rax,(%r14); movl 0x28(%rdi),%eax; movl %eax,(%r12); movq 0x48(%rdi),%rax
+// from the 1.9.12.0 dump; the fault instruction starts at pattern offset 16.
+inline constexpr std::array<std::uint8_t, 34> renderer_fault_pattern{0x4c, 0x8d, 0xa1, 0x84, 0xad, 0x00, 0x00, 0x0f, 0x1f, 0x44, 0x00, 0x00,
+                                                                     0x4a, 0x8b, 0x3c, 0x36, 0x48, 0x8b, 0x47, 0x10, 0x49, 0x89, 0x06, 0x8b,
+                                                                     0x47, 0x28, 0x41, 0x89, 0x04, 0x24, 0x48, 0x8b, 0x47, 0x48};
+inline constexpr std::uint32_t renderer_fault_pattern_fault_offset = 16;
+inline constexpr std::uint32_t code_window_each_side = 128 * 1024;
+
+inline CodeCaptureResult capture_fault_site_code(const wchar_t* directory, HMODULE module, DWORD process) noexcept {
+  CodeCaptureResult result;
+  if (!directory || !module || !process) {
+    result.error = "code_capture_arguments";
+    return result;
+  }
+  const auto base = reinterpret_cast<const std::uint8_t*>(module);
+  const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+  if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0 || dos->e_lfanew > 4096) {
+    result.error = "code_capture_dos_header";
+    return result;
+  }
+  const auto* headers = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
+  if (headers->Signature != IMAGE_NT_SIGNATURE || headers->FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64 ||
+      headers->FileHeader.NumberOfSections == 0 || headers->FileHeader.NumberOfSections > 96) {
+    result.error = "code_capture_nt_header";
+    return result;
+  }
+  const auto image_size = headers->OptionalHeader.SizeOfImage;
+  const auto* section = IMAGE_FIRST_SECTION(headers);
+  result.searched = true;
+  for (unsigned index = 0; index < headers->FileHeader.NumberOfSections; ++index, ++section) {
+    if (!(section->Characteristics & IMAGE_SCN_MEM_EXECUTE) || !section->Misc.VirtualSize)
+      continue;
+    const auto begin = section->VirtualAddress;
+    if (begin >= image_size || section->Misc.VirtualSize > image_size - begin || section->Misc.VirtualSize < renderer_fault_pattern.size())
+      continue;
+    const auto end = begin + section->Misc.VirtualSize;
+    MEMORY_BASIC_INFORMATION region{};
+    if (VirtualQuery(base + begin, &region, sizeof(region)) != sizeof(region) || region.State != MEM_COMMIT ||
+        !(region.Protect & (PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY | PAGE_READONLY | PAGE_EXECUTE)))
+      continue;
+    const std::uint8_t* cursor = base + begin;
+    const std::uint8_t* limit = base + end - renderer_fault_pattern.size();
+    while (cursor <= limit) {
+      const auto* hit =
+          static_cast<const std::uint8_t*>(std::memchr(cursor, renderer_fault_pattern[0], static_cast<std::size_t>(limit - cursor) + 1));
+      if (!hit)
+        break;
+      if (std::memcmp(hit, renderer_fault_pattern.data(), renderer_fault_pattern.size()) == 0) {
+        const auto match = static_cast<std::uint32_t>(hit - base);
+        const auto window_begin = match > begin + code_window_each_side ? match - code_window_each_side : begin;
+        const auto window_end = end - match > code_window_each_side ? match + code_window_each_side : end;
+        wchar_t path[32768]{};
+        // One capture is retained: the current session replaces earlier files.
+        if (std::swprintf(path, std::size(path), L"%ls\\renderer-fault-code-*.bin", directory) >= 0) {
+          WIN32_FIND_DATAW entry{};
+          const auto search = FindFirstFileW(path, &entry);
+          if (search != INVALID_HANDLE_VALUE) {
+            do {
+              if (entry.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT))
+                continue;
+              wchar_t old_path[32768]{};
+              if (std::swprintf(old_path, std::size(old_path), L"%ls\\%ls", directory, entry.cFileName) >= 0)
+                DeleteFileW(old_path);
+            } while (FindNextFileW(search, &entry));
+            FindClose(search);
+          }
+        }
+        if (std::swprintf(path, std::size(path), L"%ls\\renderer-fault-code-%lu.bin", directory, process) < 0) {
+          result.error = "code_capture_path";
+          return result;
+        }
+        const auto file = CreateFileW(path, GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file == INVALID_HANDLE_VALUE) {
+          result.error = "code_capture_create";
+          return result;
+        }
+        CodeCaptureHeader header;
+        header.process = process;
+        header.module = reinterpret_cast<std::uint64_t>(base);
+        header.image_size = image_size;
+        header.timestamp = headers->FileHeader.TimeDateStamp;
+        header.match_rva = match + renderer_fault_pattern_fault_offset;
+        header.window_rva = window_begin;
+        header.window_bytes = window_end - window_begin;
+        header.pattern_bytes = static_cast<std::uint32_t>(renderer_fault_pattern.size());
+        DWORD written = 0;
+        const bool ok = WriteFile(file, &header, sizeof(header), &written, nullptr) && written == sizeof(header) &&
+                        WriteFile(file, base + window_begin, header.window_bytes, &written, nullptr) && written == header.window_bytes;
+        CloseHandle(file);
+        result.written = ok;
+        result.match_rva = header.match_rva;
+        result.window_rva = header.window_rva;
+        result.window_bytes = header.window_bytes;
+        result.error = ok ? "" : "code_capture_write";
+        return result;
+      }
+      cursor = hit + 1;
+    }
+  }
+  result.error = "code_capture_pattern_absent";
+  return result;
 }
 
 // Called outside DllMain, after the bridge verifies its host and pins itself.
@@ -291,6 +420,10 @@ inline bool initialize() noexcept {
   record_file = mapping.file;
   mapping.file = INVALID_HANDLE_VALUE;
   mapping.memory = nullptr;
+  // Process-lifetime diagnostic result; the bridge pins itself until exit.
+  static CodeCaptureResult capture_result;
+  capture_result = capture_fault_site_code(folder, GetModuleHandleW(nullptr), GetCurrentProcessId());
+  code_capture = &capture_result;
   return true;
 }
 }  // namespace taxi_camera::standalone::crash_evidence
