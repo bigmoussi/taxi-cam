@@ -626,17 +626,20 @@ void SceneCaptureManager::invalidate_source_recording(ID3D12GraphicsCommandList*
   auto* item = list(native);
   if (!item || item->object_generation != generation)
     return;
-  // Suspended and malformed passes report PassState on lists that never named a
-  // published camera source. Applying that invalid recording wipes every tracked
-  // source. Ignore it there. A list that did name a published source loses only
-  // that source's RT evidence; unknown state is never stored as a render target.
-  // Barrier, alias, unobserved-work and reset failures still discard the recording.
+  // PassState and unsupported native commands are reported on lists that never
+  // named a published camera source. Applying that invalid recording wipes every
+  // tracked source. Ignore those reports there. A list that did name a published
+  // source loses only that source's RT evidence; unknown state is never stored
+  // as a render target. Barrier, alias, reset and observer-disabled reports
+  // still discard the recording.
   using namespace engine_hook::render_boundary;
-  constexpr std::uint32_t pass_companions =
-      static_cast<std::uint32_t>(InvalidationPassBegin) | static_cast<std::uint32_t>(InvalidationSplitBarrier) |
-      static_cast<std::uint32_t>(InvalidationAliasOrDiscard) | static_cast<std::uint32_t>(InvalidationPassState);
-  const bool pass_state_only = (reasons & InvalidationPassState) != 0 && (reasons & ~pass_companions) == 0;
-  if (pass_state_only) {
+  constexpr std::uint32_t limited_reasons =
+      static_cast<std::uint32_t>(InvalidationPassBegin) | static_cast<std::uint32_t>(InvalidationPassState) |
+      static_cast<std::uint32_t>(InvalidationSplitBarrier) | static_cast<std::uint32_t>(InvalidationAliasOrDiscard) |
+      static_cast<std::uint32_t>(InvalidationUnobservedWork);
+  const bool limited = (reasons & (static_cast<std::uint32_t>(InvalidationPassState) | InvalidationUnobservedWork)) != 0 &&
+                       (reasons & ~limited_reasons) == 0;
+  if (limited) {
     const auto& recording = item->source_effects;
     // A truncated count is not evidence that the published sources were absent.
     if (recording.count <= recording.effects.size()) {
