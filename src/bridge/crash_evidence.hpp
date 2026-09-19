@@ -10,16 +10,30 @@
 
 namespace taxi_camera::standalone::crash_evidence {
 // Small local diagnostic record for the renderer instruction seen in the A350
-// reports. No stack/heap pages or image data are copied. Never sent over IPC.
+// reports. Version 2 adds two bounded copies taken at the fault: the render
+// context's output-merger state (RBX+0x79a0..0x7a40: eight slot pairs, count
+// at +0x7910 is outside and read separately) and the first 0x100 bytes of the
+// slot-1 render-target record, each only after VirtualQuery shows a committed,
+// readable range. No stack pages or image data are copied. Never sent over IPC.
 struct Record {
-  std::uint32_t magic = 0x54434352, version = 1, bytes = sizeof(Record), process = 0;
+  std::uint32_t magic = 0x54434352, version = 2, bytes = sizeof(Record), process = 0;
   volatile LONG state = 0;  // 0 empty, 1 writing, 2 complete
   DWORD code = 0, parameters = 0, thread = 0;
   std::uint64_t module = 0, fault_rva = 0;
   ULONG_PTR information[EXCEPTION_MAXIMUM_PARAMETERS]{};
   CONTEXT context{};
+  // Bit 0: output_merger_state copied. Bit 1: slot1_record copied.
+  // Bit 2: bound-target count at RBX+0x7910 copied into bound_targets.
+  std::uint32_t evidence_flags = 0;
+  std::uint32_t bound_targets = 0;
+  std::uint64_t slot1_record_address = 0;
+  std::uint8_t output_merger_state[0xA0]{};
+  std::uint8_t slot1_record[0x100]{};
 };
-static_assert(sizeof(Record) <= 4096);
+inline constexpr std::size_t record_file_bytes = 8192;
+inline constexpr std::size_t legacy_record_file_bytes = 4096;
+static_assert(sizeof(Record) <= record_file_bytes);
+inline constexpr std::uint64_t output_merger_state_offset = 0x79a0, bound_target_count_offset = 0x7910, slot1_record_offset = 0x79b8;
 inline Record* record = nullptr;
 inline HANDLE record_file = INVALID_HANDLE_VALUE;
 struct CodeCaptureResult {
@@ -89,7 +103,8 @@ inline bool inspect_record(HANDLE file, Candidate& candidate) noexcept {
   BY_HANDLE_FILE_INFORMATION information{};
   if (!GetFileInformationByHandle(file, &information) ||
       (information.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) || information.nFileSizeHigh ||
-      (information.nFileSizeLow != 0 && information.nFileSizeLow != 4096))
+      (information.nFileSizeLow != 0 && information.nFileSizeLow != legacy_record_file_bytes &&
+       information.nFileSizeLow != record_file_bytes))
     return false;
   LONG state = 0;
   if (information.nFileSizeLow) {
@@ -100,7 +115,8 @@ inline bool inspect_record(HANDLE file, Candidate& candidate) noexcept {
     static_assert(sizeof(Prefix) == offsetof(Record, state) + sizeof(LONG));
     DWORD read{};
     if (!ReadFile(file, &prefix, sizeof(prefix), &read, nullptr) || read != sizeof(prefix) || prefix.magic != 0x54434352 ||
-        prefix.version != 1 || prefix.bytes != sizeof(Record) || prefix.state < 0 || prefix.state > 2)
+        prefix.version < 1 || prefix.version > 2 || prefix.bytes == 0 || prefix.bytes > information.nFileSizeLow || prefix.state < 0 ||
+        prefix.state > 2)
       return false;
     state = prefix.state;
   }
@@ -232,8 +248,8 @@ inline bool create_record(const wchar_t* directory,
       CreateFileW(path, GENERIC_READ | GENERIC_WRITE | DELETE, FILE_SHARE_READ, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
   if (file == INVALID_HANDLE_VALUE)
     return false;
-  const auto mapping = CreateFileMappingW(file, nullptr, PAGE_READWRITE, 0, 4096, nullptr);
-  auto* memory = mapping ? MapViewOfFile(mapping, FILE_MAP_WRITE, 0, 0, 4096) : nullptr;
+  const auto mapping = CreateFileMappingW(file, nullptr, PAGE_READWRITE, 0, static_cast<DWORD>(record_file_bytes), nullptr);
+  auto* memory = mapping ? MapViewOfFile(mapping, FILE_MAP_WRITE, 0, 0, record_file_bytes) : nullptr;
   if (mapping)
     CloseHandle(mapping);
   if (!memory) {
@@ -246,6 +262,27 @@ inline bool create_record(const wchar_t* directory,
   destination.memory = new (memory) Record{};
   destination.memory->process = process;
   destination.memory->module = module;
+  return true;
+}
+
+// Copy `size` bytes from `source` only when VirtualQuery reports one committed,
+// readable, non-guard region covering the whole range. Safe inside the vectored
+// handler: no allocation, lock or engine call, and no touch of unverified memory.
+inline bool copy_readable(void* destination, std::uint64_t source, std::size_t size) noexcept {
+  if (!destination || !source || size == 0 || source > (std::numeric_limits<std::uint64_t>::max)() - size)
+    return false;
+  MEMORY_BASIC_INFORMATION region{};
+  if (VirtualQuery(reinterpret_cast<const void*>(source), &region, sizeof(region)) != sizeof(region) || region.State != MEM_COMMIT ||
+      (region.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0)
+    return false;
+  const auto protection = region.Protect & 0xff;
+  if (protection != PAGE_READONLY && protection != PAGE_READWRITE && protection != PAGE_WRITECOPY && protection != PAGE_EXECUTE_READ &&
+      protection != PAGE_EXECUTE_READWRITE && protection != PAGE_EXECUTE_WRITECOPY)
+    return false;
+  const auto begin = reinterpret_cast<std::uint64_t>(region.BaseAddress);
+  if (source < begin || region.RegionSize < size || source - begin > region.RegionSize - size)
+    return false;
+  std::memcpy(destination, reinterpret_cast<const void*>(source), size);
   return true;
 }
 
@@ -273,6 +310,21 @@ inline LONG capture(Record* destination, const EXCEPTION_POINTERS* exception) no
   for (DWORD i = 0; i < e.NumberParameters; ++i)
     destination->information[i] = e.ExceptionInformation[i];
   destination->context = c;
+  // Bounded copies of the render context's output-merger state and the slot-1
+  // record the captured binder would visit next. VirtualQuery only; a range
+  // that is not wholly committed and readable is skipped, never touched.
+  destination->evidence_flags = 0;
+  if (copy_readable(destination->output_merger_state, c.Rbx + output_merger_state_offset, sizeof(destination->output_merger_state)))
+    destination->evidence_flags |= 1u;
+  if (copy_readable(&destination->bound_targets, c.Rbx + bound_target_count_offset, sizeof(destination->bound_targets)))
+    destination->evidence_flags |= 4u;
+  if (destination->evidence_flags & 1u) {
+    std::uint64_t slot1 = 0;
+    std::memcpy(&slot1, destination->output_merger_state + (slot1_record_offset - output_merger_state_offset), sizeof(slot1));
+    destination->slot1_record_address = slot1;
+    if (slot1 && copy_readable(destination->slot1_record, slot1, sizeof(destination->slot1_record)))
+      destination->evidence_flags |= 2u;
+  }
   InterlockedExchange(&destination->state, 2);
   return EXCEPTION_CONTINUE_SEARCH;
 }
@@ -299,7 +351,9 @@ inline constexpr std::array<std::uint8_t, 34> renderer_fault_pattern{0x4c, 0x8d,
                                                                      0x4a, 0x8b, 0x3c, 0x36, 0x48, 0x8b, 0x47, 0x10, 0x49, 0x89, 0x06, 0x8b,
                                                                      0x47, 0x28, 0x41, 0x89, 0x04, 0x24, 0x48, 0x8b, 0x47, 0x48};
 inline constexpr std::uint32_t renderer_fault_pattern_fault_offset = 16;
-inline constexpr std::uint32_t code_window_each_side = 128 * 1024;
+// 128 KiB before the fault covers frames 0-4 of the retained callstack; 768 KiB
+// after covers frames 5-12 (+0x3EF47BF..+0x3F1954E on 1.9.12.0).
+inline constexpr std::uint32_t code_window_before = 128 * 1024, code_window_after = 768 * 1024;
 
 inline CodeCaptureResult capture_fault_site_code(const wchar_t* directory, HMODULE module, DWORD process) noexcept {
   CodeCaptureResult result;
@@ -342,8 +396,8 @@ inline CodeCaptureResult capture_fault_site_code(const wchar_t* directory, HMODU
         break;
       if (std::memcmp(hit, renderer_fault_pattern.data(), renderer_fault_pattern.size()) == 0) {
         const auto match = static_cast<std::uint32_t>(hit - base);
-        const auto window_begin = match > begin + code_window_each_side ? match - code_window_each_side : begin;
-        const auto window_end = end - match > code_window_each_side ? match + code_window_each_side : end;
+        const auto window_begin = match > begin + code_window_before ? match - code_window_before : begin;
+        const auto window_end = end - match > code_window_after ? match + code_window_after : end;
         wchar_t path[32768]{};
         // One capture is retained: the current session replaces earlier files.
         if (std::swprintf(path, std::size(path), L"%ls\\renderer-fault-code-*.bin", directory) >= 0) {
