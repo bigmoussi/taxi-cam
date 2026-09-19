@@ -1725,8 +1725,8 @@ void request_scene_test(bool reuse_calibration) noexcept {
       const auto contract = resolve_camera_contract(reader, runtime.image, runtime.base);
       if (!runtime.image.valid_image || !contract.valid) {
         const std::lock_guard lock(runtime.mutex);
-        runtime.published.message =
-            "Camera compatibility check failed: " + (runtime.image.valid_image ? contract.error : runtime.image.error);
+        runtime.published.message = "There is no support for this sim version. Send a report. " +
+                                    (runtime.image.valid_image ? contract.error : runtime.image.error);
         return;
       }
       runtime.contract = contract.contract;
