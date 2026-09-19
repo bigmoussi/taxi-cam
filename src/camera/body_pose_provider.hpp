@@ -76,13 +76,35 @@ bool initialize_body_pose_provider() noexcept;
 // the worker, event and caches owned until a later lifecycle call observes exit.
 bool shutdown_body_pose_provider() noexcept;
 void reset_body_pose_calibration() noexcept;
+// Why one candidate private camera did or did not pair with the public WORLD
+// sample. Ages and separations only; no coordinate is ever published here.
+struct CameraMatchReport {
+  bool position_valid = false;  // Candidate ECEF converted to geodetic.
+  bool public_ready = false;    // Readiness plus both public sample ages.
+  bool geometry = false;        // Horizontal, altitude and FOV all in tolerance.
+  // Calibration only: the public camera produced a response the latch has not
+  // already consumed. A repeated response cannot advance the three samples.
+  bool new_public_sample = false;
+  std::uint64_t camera_age_ms = 0;
+  std::uint64_t aircraft_age_ms = 0;
+  double horizontal_m = 0;
+  double altitude_m = 0;
+  double fov_delta = 0;
+  unsigned calibration_samples = 0;
+};
 // The caller supplies a freshly validated current-camera ECEF position/FOV.
 // Matches public CameraGet WORLD before accepting a local vertical correction.
 // No simulator/API calls occur here or in sample_body_pose.
-bool calibrate_body_pose(const Vector3& private_camera_ecef, float private_fov, std::uint64_t now_ms) noexcept;
+bool calibrate_body_pose(const Vector3& private_camera_ecef,
+                         float private_fov,
+                         std::uint64_t now_ms,
+                         CameraMatchReport* report = nullptr) noexcept;
 // Same WORLD/FOV match as calibration, without changing the three-sample latch.
 // A rejected aircraft-object camera must use this before trying another view.
-bool public_camera_matches(const Vector3& private_camera_ecef, float private_fov, std::uint64_t now_ms) noexcept;
+bool public_camera_matches(const Vector3& private_camera_ecef,
+                           float private_fov,
+                           std::uint64_t now_ms,
+                           CameraMatchReport* report = nullptr) noexcept;
 BodyPoseSnapshot sample_body_pose(std::uint64_t now_ms) noexcept;
 // Receipt timing only, not a claim of simulation timestamp or prediction.
 // Counter is monotonic across worker restarts; no additional simulator reads.

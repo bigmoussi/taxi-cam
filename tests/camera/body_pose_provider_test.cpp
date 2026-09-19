@@ -283,10 +283,16 @@ void session_readiness_regressions(Check check) {
     now = GetTickCount64() + sample + 1;
     supply();
     check(testing::session_readiness_at(now).ready);
-    check(public_camera_matches(parked, static_cast<float>(fov), now));
-    check(!public_camera_matches(body_math::ecef(0, 0, 0), static_cast<float>(fov), now));
-    accepted = calibrate_body_pose(parked, static_cast<float>(fov), now);
+    CameraMatchReport near_report, far_report, latch;
+    check(public_camera_matches(parked, static_cast<float>(fov), now, &near_report));
+    check(!public_camera_matches(body_math::ecef(0, 0, 0), static_cast<float>(fov), now, &far_report));
+    // A refusal must say how far off the candidate was, so a wrong coordinate
+    // space cannot be mistaken for a camera that has not settled yet.
+    check(near_report.position_valid && near_report.public_ready && near_report.geometry && near_report.horizontal_m <= 0.5);
+    check(far_report.position_valid && far_report.public_ready && !far_report.geometry && far_report.horizontal_m > 1000);
+    accepted = calibrate_body_pose(parked, static_cast<float>(fov), now, &latch);
     check(sample < 2 ? !accepted : accepted);
+    check(latch.new_public_sample && latch.calibration_samples == sample + 1);
   }
   reset_body_pose_calibration();
   check(!sample_body_pose(now).valid);

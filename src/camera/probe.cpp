@@ -27,6 +27,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <cwchar>
 #include <mutex>
@@ -278,8 +279,50 @@ bool manager_context(Runtime& runtime,
   return true;
 }
 
-bool accept_public_camera_source(const std::array<double, 3>& translation, float fov, void*) noexcept {
-  return public_camera_matches(translation, fov, GetTickCount64());
+// Retains the nearest candidate so a refused scan can say how far off it was.
+// A coordinate-space error and a settling error look identical without it.
+struct ViewMatchScan {
+  unsigned usable = 0;
+  bool have_nearest = false;
+  CameraMatchReport nearest{};
+};
+
+bool accept_public_camera_source(const std::array<double, 3>& translation, float fov, void* context) noexcept {
+  CameraMatchReport report;
+  const bool matched = public_camera_matches(translation, fov, GetTickCount64(), &report);
+  if (auto* scan = static_cast<ViewMatchScan*>(context)) {
+    ++scan->usable;
+    if (!scan->have_nearest || report.horizontal_m < scan->nearest.horizontal_m) {
+      scan->nearest = report;
+      scan->have_nearest = true;
+    }
+  }
+  return matched;
+}
+
+const char* source_view_status_name(SourceViewStatus status) noexcept {
+  switch (status) {
+    case SourceViewStatus::ready: return "ready";
+    case SourceViewStatus::no_source: return "no_source";
+    case SourceViewStatus::invalid_pool: return "invalid_pool";
+    case SourceViewStatus::invalid_pointer: return "invalid_pointer";
+    case SourceViewStatus::pool_changed: return "pool_changed";
+    case SourceViewStatus::read_failed: return "read_failed";
+    case SourceViewStatus::changed: return "changed";
+    case SourceViewStatus::read_limit: return "read_limit";
+    case SourceViewStatus::not_inspected: break;
+  }
+  return "not_inspected";
+}
+
+std::string describe_camera_match(const CameraMatchReport& report) {
+  if (!report.position_valid)
+    return "position=unconvertible";
+  char text[128];
+  std::snprintf(text, sizeof(text), "pub=%llums acft=%llums h=%.2fm v=%.2fm dfov=%.5f n=%u/3",
+                static_cast<unsigned long long>(report.camera_age_ms), static_cast<unsigned long long>(report.aircraft_age_ms),
+                report.horizontal_m, report.altitude_m, report.fov_delta, report.calibration_samples);
+  return report.public_ready ? text : std::string("public_stale ") + text;
 }
 bool capture_pose(Runtime& runtime) {
   runtime.pose_captured = false;
@@ -333,22 +376,30 @@ bool capture_pose(Runtime& runtime) {
     Vector3 position{};
     float matched_fov = 0;
     bool matched = false;
+    const char* aircraft_camera = "absent";
+    CameraMatchReport aircraft_match;
     if (aircraft.valid && aircraft.available && source) {
       objects.reset_budget();
       const auto camera = inspected(runtime, [&] { return inspect_source_pose(objects, source, &position); }, &memory_detail);
-      if (camera.complete && public_camera_matches(position, camera.fov, GetTickCount64())) {
+      aircraft_camera = camera.complete ? "mismatched" : "unusable";
+      if (camera.complete && public_camera_matches(position, camera.fov, GetTickCount64(), &aircraft_match)) {
         matched = true;
         matched_fov = camera.fov;
+        aircraft_camera = "matched";
       }
     }
+    ViewMatchScan scan;
+    const char* view_source = matched ? "not_scanned" : "renderer_absent";
     if (!matched && runtime.renderer) {
       LocalMemoryReader views;
       const auto pool = inspected(runtime, [&] { return ec::inspect_view_pool(views, runtime.renderer); }, &memory_detail);
+      view_source = "pool_unavailable";
       if (pool.valid) {
         views.reset_budget();
         std::array<double, 3> translation{};
         const auto chosen = inspected(
-            runtime, [&] { return select_source_view(views, pool, accept_public_camera_source, nullptr, &translation); }, &memory_detail);
+            runtime, [&] { return select_source_view(views, pool, accept_public_camera_source, &scan, &translation); }, &memory_detail);
+        view_source = chosen.complete ? "matched" : source_view_status_name(chosen.status);
         if (chosen.complete) {
           position = translation;
           matched_fov = chosen.fov;
@@ -356,11 +407,20 @@ bool capture_pose(Runtime& runtime) {
         }
       }
     }
-    if (!matched || !calibrate_body_pose(position, matched_fov, GetTickCount64())) {
+    CameraMatchReport latch;
+    if (!matched || !calibrate_body_pose(position, matched_fov, GetTickCount64(), &latch)) {
       if (!aircraft.valid || !aircraft.available || !source)
         runtime.message = "Aircraft body calibration is waiting for a stable loaded source: " + aircraft.stage + ". " + aircraft.error;
-      else
-        runtime.message = "Aircraft body calibration is waiting for matching fresh public and private camera coordinates.";
+      else {
+        runtime.message = "Aircraft body calibration is waiting for matching fresh public and private camera coordinates. [aircraft=";
+        runtime.message += std::string(aircraft_camera) + " " + describe_camera_match(aircraft_match) + "; views=" + view_source +
+                           " usable=" + std::to_string(scan.usable);
+        if (scan.have_nearest)
+          runtime.message += " nearest " + describe_camera_match(scan.nearest);
+        if (matched)
+          runtime.message += "; latch " + describe_camera_match(latch) + (latch.new_public_sample ? "" : " repeated_response");
+        runtime.message += "]";
+      }
       if (!memory_detail.empty())
         runtime.message += " " + memory_detail;
       return false;
