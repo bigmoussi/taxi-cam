@@ -512,11 +512,55 @@ void pointer_relations() {
   conflict.put(conflict.locations[PointerFixture::Owner] + 340, static_cast<std::uint32_t>(PointerFixture::BaseAddress >> 32));
   refused(conflict.resolve(), "Inconsistent slots bound one method to two addresses");
 }
+void shipped_build_shapes() {
+  // One reviewed body, two shipped shapes. Whichever the image holds must
+  // resolve, and declaring the other must not invent or prefer an absent copy.
+  const auto older_helper = [](ContractModel& model) {
+    auto older = model.code[1];
+    older.bytes[11] = 0x28;
+    model.variants.push_back(std::move(older));
+  };
+  Fixture newer;
+  older_helper(newer.model);
+  const auto unchanged = newer.resolve();
+  require(unchanged.valid && unchanged.symbols == newer.locations && unchanged.candidate_count == 4,
+          "Declaring a second shape disturbed the image that holds the first");
+
+  Fixture older;
+  older.bytes[older.locations[Fixture::Helper] + 11] = 0x28;
+  refused(older.resolve(), "An undeclared body shape resolved");
+  older_helper(older.model);
+  const auto adopted = older.resolve();
+  require(adopted.valid && adopted.symbols == older.locations && adopted.candidate_count == 4,
+          "The declared older body shape did not resolve");
+
+  // Inferred short bodies follow the same rule through the caller graph.
+  Fixture leaf;
+  leaf.bytes[leaf.locations[Fixture::Leaf] + 2] = 0x1c;
+  refused(leaf.resolve(), "An undeclared short body shape resolved");
+  auto older_leaf = leaf.model.code[2];
+  older_leaf.bytes[2] = 0x1c;
+  leaf.model.variants.push_back(std::move(older_leaf));
+  require(leaf.resolve().valid, "The declared older short body shape did not resolve");
+
+  Fixture orphan;
+  orphan.model.variants.push_back({Fixture::Text, {0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90}, {}});
+  refused(orphan.resolve(), "A shape named a symbol with no declared body");
+
+  // A shape that must be inferred cannot stand in for one that is discovered:
+  // the scan and the caller graph would disagree about which copy was found.
+  Fixture mixed;
+  auto unseeded = mixed.model.code[1];
+  unseeded.operands = {{7, 4, 11, AddressKind::pc_relative, Fixture::Text, 0}};
+  mixed.model.variants.push_back(std::move(unseeded));
+  refused(mixed.resolve(), "Shapes of one body disagreed on discoverability");
+}
 }  // namespace
 
 int main() {
   try {
     relocation_and_edges();
+    shipped_build_shapes();
     ambiguity_and_constants();
     model_and_section_failures();
     short_fields_and_limits();

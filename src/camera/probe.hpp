@@ -50,6 +50,9 @@ struct ProbePerformance {
 struct ProbeSnapshot {
   bool hook_installed = false;
   bool accepting_requests = false;
+  // The start was not queued because public flight readiness moved. The caller
+  // may retry. A contract, hook, or other hard refusal leaves this false.
+  bool readiness_deferred = false;
   bool pose_captured = false;
   std::uint64_t profile_transition_token = 0;
   std::uint32_t profile_transition_id = 0;
@@ -78,9 +81,19 @@ struct ProbeSnapshot {
   bool retirement_waiting = false;
   const char* retirement_status = "not_inspected";
   std::array<std::uint32_t, 2> retirement_queue_counts{};
+  // Pooled views whose bit31 this bridge cleared and later restored (writes
+  // performed), refused restores, and whether any such view is still pending.
+  std::uint64_t aa_restores = 0;
+  std::uint64_t aa_restore_failures = 0;
+  bool aa_cleared_pending = false;
   std::array<bool, 2> ready{};
   std::array<const char*, 2> inspection_status{"not_inspected", "not_inspected"};
   std::array<bool, 2> resource_present{};
+  // Output admission per view: mode2, resource present, all size pairs and the
+  // Bitmap at the requested pane. Gates open only for views with this true.
+  std::array<bool, 2> output_ready{};
+  // Observer updates spent waiting for the initial pane output after resizing.
+  unsigned output_waits = 0;
   bool outputs_matched = false;
   std::array<std::array<std::array<std::int32_t, 2>, 3>, 2> dimensions{};
   std::array<std::array<std::uint64_t, 2>, 2> flags{};

@@ -937,25 +937,64 @@ void reset_body_pose_calibration() noexcept {
   state.calibration_camera_ms = 0;
   ReleaseSRWLockExclusive(&state.lock);
 }
-bool calibrate_body_pose(const Vector3& position, float fov, std::uint64_t now) noexcept {
+std::uint64_t sample_age(std::uint64_t sample, std::uint64_t now) noexcept {
+  return sample && now >= sample ? now - sample : 0;
+}
+bool camera_sample_matches_locked(const Vector3& lla, float fov, std::uint64_t now, CameraMatchReport* report = nullptr) noexcept {
+  const auto locked_now = GetTickCount64();
+  if (now < locked_now)
+    now = locked_now;
+  const bool ready = readiness_locked(now).ready && fresh(state.camera_ms, now) && fresh(state.aircraft_ms, now) &&
+                     now - state.camera_ms <= 100 && now - state.aircraft_ms <= 100;
+  const auto camera_surface = body_math::ecef(state.camera.position[0], state.camera.position[1], 0);
+  const auto private_surface = body_math::ecef(lla[0], lla[1], 0);
+  const double delta = lla[2] - state.camera.position[2];
+  const double horizontal = body_math::distance(camera_surface, private_surface);
+  const double fov_delta = std::abs(double{state.camera.fov} - double{fov});
+  const bool geometry = horizontal <= 0.5 && std::isfinite(delta) && std::abs(delta) <= 150 && fov_delta <= 0.0001;
+  if (report) {
+    report->position_valid = true;
+    report->public_ready = ready;
+    report->geometry = geometry;
+    report->camera_age_ms = sample_age(state.camera_ms, now);
+    report->aircraft_age_ms = sample_age(state.aircraft_ms, now);
+    report->horizontal_m = horizontal;
+    report->altitude_m = delta;
+    report->fov_delta = fov_delta;
+    report->calibration_samples = state.calibration_samples;
+  }
+  return ready && geometry;
+}
+bool public_camera_matches(const Vector3& position, float fov, std::uint64_t now, CameraMatchReport* report) noexcept {
+  if (report)
+    *report = {};
+  Vector3 lla{};
+  if (!body_math::geodetic(position, lla) || !std::isfinite(fov))
+    return false;
+  AcquireSRWLockShared(&state.lock);
+  const bool good = camera_sample_matches_locked(lla, fov, now, report);
+  ReleaseSRWLockShared(&state.lock);
+  return good;
+}
+bool calibrate_body_pose(const Vector3& position, float fov, std::uint64_t now, CameraMatchReport* report) noexcept {
+  if (report)
+    *report = {};
   Vector3 lla{};
   if (!body_math::geodetic(position, lla) || !std::isfinite(fov))
     return false;
   AcquireSRWLockExclusive(&state.lock);
   // The worker may publish after the caller sampled its clock but before this
   // lock. Judge freshness at the locked read, retaining future test deadlines.
-  const auto locked_now = GetTickCount64();
-  if (now < locked_now)
-    now = locked_now;
-  bool good = readiness_locked(now).ready && fresh(state.camera_ms, now) && fresh(state.aircraft_ms, now) && now - state.camera_ms <= 100 &&
-              now - state.aircraft_ms <= 100 && std::abs(state.camera.fov - fov) <= 0.0001;
-  const auto camera_surface = body_math::ecef(state.camera.position[0], state.camera.position[1], 0);
-  const auto private_surface = body_math::ecef(lla[0], lla[1], 0);
+  CameraMatchReport local;
+  const bool good = camera_sample_matches_locked(lla, fov, now, &local);
   const double delta = lla[2] - state.camera.position[2];
-  good = good && body_math::distance(camera_surface, private_surface) <= 0.5 && std::isfinite(delta) && std::abs(delta) <= 150;
   bool accepted = false;
+  local.new_public_sample = state.camera_ms != state.calibration_camera_ms;
+  // A camera in the wrong place must lose the latch. A momentarily late public
+  // response says nothing about the candidate, and the2cm stability check
+  // still revalidates every accepted sample, so it only defers this attempt.
   if (!good)
-    state.calibration_samples = 0;
+    state.calibration_samples = local.public_ready ? 0 : state.calibration_samples;
   else if (state.camera_ms != state.calibration_camera_ms) {
     const auto public_position = body_math::ecef(state.camera.position[0], state.camera.position[1], state.camera.position[2]);
     // Initial calibration requires a momentarily settled camera. Three
@@ -977,7 +1016,10 @@ bool calibrate_body_pose(const Vector3& position, float fov, std::uint64_t now) 
       accepted = true;
     }
   }
+  local.calibration_samples = state.calibration_samples;
   ReleaseSRWLockExclusive(&state.lock);
+  if (report)
+    *report = local;
   return accepted;
 }
 BodyPoseSnapshot sample_body_pose(std::uint64_t now) noexcept {

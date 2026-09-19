@@ -48,7 +48,7 @@ void log_status(const win::Status& s, const char* detail = "") noexcept {
 }
 struct StartupTiming {
   unsigned intent_mask{}, attempts{};
-  bool observed{}, target_ready{}, output_ready{}, stamped{};
+  bool observed{}, target_ready{}, output_ready{}, stamped{}, waiting_logged{};
   std::uint64_t intent_ms{}, target_ms{}, prepare_begin_ms{}, prepare_end_ms{}, request_begin_ms{}, request_end_ms{};
   std::uint64_t output_ms{}, stamp_ms{}, baseline_stamps{};
 };
@@ -78,6 +78,13 @@ DWORD run_impl() {
   log_status(status, "Bridge worker started.");
   const bool fault_evidence_ready = win::crash_evidence::initialize();
   log_status(status, fault_evidence_ready ? "Renderer fault evidence armed." : "Renderer fault evidence unavailable.");
+  if (const auto* capture = win::crash_evidence::code_capture) {
+    char capture_detail[256];
+    std::snprintf(capture_detail, sizeof(capture_detail),
+                  "Renderer fault site code capture: written=%u searched=%u fault_rva=0x%X window_rva=0x%X window_bytes=%u error=%s",
+                  capture->written, capture->searched, capture->match_rva, capture->window_rva, capture->window_bytes, capture->error);
+    log_status(status, capture_detail);
+  }
   log_status(status, "Native graphics initialization started.");
   if (!win::initialize_graphics()) {
     const auto graphics = win::graphics_status();
@@ -107,6 +114,7 @@ DWORD run_impl() {
   CaptureProgress progress;
   StartupTiming startup, warmup_startup;
   win::ScenePrewarm prewarm;
+  std::uint64_t next_background_start = 0;
   bool requested = false, failed = false, last_output = false;
   std::uint64_t last_view_wait_count = 0;
   std::uint64_t next_telemetry{}, next_discovery{}, next_recovery{}, next_log{}, route_request{}, last_frames{};
@@ -293,6 +301,7 @@ DWORD run_impl() {
       intent = {};
       progress = {};
       startup = {};
+      next_background_start = 0;
       exposure = {};
       next_telemetry = next_discovery = 0;
       next_inventory = 0;
@@ -382,10 +391,13 @@ DWORD run_impl() {
         char detail[384]{};
         std::snprintf(
             detail, sizeof(detail),
-            "Prewarm phase=%s elapsed_ms=%llu entries=%llu/%llu created_total=%llu output=%u completed_pairs=%llu/%llu", prewarm.name(),
+            "Prewarm phase=%s elapsed_ms=%llu entries=%llu/%llu created_total=%llu ready=%u/%u outputs=%u/%u output=%u "
+            "completed_pairs=%llu/%llu",
+            prewarm.name(),
             static_cast<unsigned long long>(prewarm.started_ms() && now >= prewarm.started_ms() ? now - prewarm.started_ms() : 0),
             static_cast<unsigned long long>(warm_scene.pair.owned_ids[0]), static_cast<unsigned long long>(warm_scene.pair.owned_ids[1]),
-            static_cast<unsigned long long>(warm_scene.created_total), warm_output.output,
+            static_cast<unsigned long long>(warm_scene.created_total), warm_scene.ready[0], warm_scene.ready[1], warm_scene.output_ready[0],
+            warm_scene.output_ready[1], warm_output.output,
             static_cast<unsigned long long>(
                 warm_output.completed_frames >= prewarm.baseline_pairs() ? warm_output.completed_frames - prewarm.baseline_pairs() : 0),
             static_cast<unsigned long long>(win::ScenePrewarm::RequiredPairs));
@@ -442,7 +454,7 @@ DWORD run_impl() {
     composition.tail_upper = settings.tail_upper;
     composition.tail_corner = settings.tail_corner;
     composition.tail_inner = settings.tail_inner;
-    if (demand.start) {
+    if (demand.start && !(background_warmup && GetTickCount64() < next_background_start)) {
       auto& start_timing = background_warmup ? warmup_startup : startup;
       if (background_warmup) {
         start_timing.observed = true;
@@ -482,11 +494,31 @@ DWORD run_impl() {
         scene_runtime::reset_feed(key);
         scene_runtime::manager().begin_source_tracking();
         native_camera::request_scene_test(true);
-        requested = native_camera::scene_snapshot().accepting_requests;
+        const auto shot = native_camera::scene_snapshot();
+        requested = shot.accepting_requests;
+        const bool retain = win::retain_background_prewarm(background_warmup, requested, shot.readiness_deferred);
         start_timing.request_end_ms = GetTickCount64();
-        log_startup(status, start_timing, requested ? "request_accepted" : "request_refused");
-      }
-      failed = win::finish_scene_start(prewarm, background_warmup, requested);
+        if (retain) {
+          // The contract scan can outlast fresh telemetry. Do not park the only
+          // background attempt; the same start is retried once readiness returns.
+          next_background_start = start_timing.request_end_ms + 500;
+          if (!start_timing.waiting_logged) {
+            start_timing.waiting_logged = true;
+            char phase[320];
+            std::snprintf(phase, sizeof(phase), "request_waiting %.200s", shot.message.c_str());
+            log_startup(status, start_timing, phase);
+          }
+        } else {
+          next_background_start = 0;
+          char phase[320];
+          std::snprintf(phase, sizeof(phase), "%s %.200s", requested ? "request_accepted" : "request_refused",
+                        requested ? "" : shot.message.c_str());
+          log_startup(status, start_timing, phase);
+        }
+        if (!retain)
+          failed = win::finish_scene_start(prewarm, background_warmup, requested);
+      } else
+        failed = win::finish_scene_start(prewarm, background_warmup, requested);
       if (!requested) {
         active = 0;
         win::set_target_mask(0);
@@ -619,7 +651,8 @@ DWORD run_impl() {
         !connected || !settings.enabled ? "Disconnected. Use Connect in the Windows companion."
         : !aircraft_matches             ? aircraft_message
         : cutoff.inhibited ? (manual_only ? "Above 60 knots: camera displays inhibited." : "Above 60 knots: TAXI buttons commanded off.")
-        : failed           ? scene.message.c_str()
+        : failed                                         ? scene.message.c_str()
+        : scene.pose_waiting && requested               ? scene.message.c_str()
         : scene.view_waiting && scene.stop_reason == native_camera::SceneStopReason::resolution_changed ? scene.message.c_str()
         : !manual_only && !buttons.valid                                                                ? buttons.error
         : !manual_only && taxi_request_status.failed && taxi_request_status.serial == settings.taxi_request
@@ -662,7 +695,8 @@ DWORD run_impl() {
       std::snprintf(detail, sizeof(detail),
                     "profile=%u matched=%u connected=%u requested=%u ipc_busy=%llu buttons_valid=%u held=%u expired=%u output=%u "
                     "stop_seq=%llu stop=%s "
-                    "retry=%u pending=%u pose_wait=%u view_wait=%u waits=%llu ready=%u/%u inspection=%s/%s entries=%llu/%llu suspended=%u "
+                    "retry=%u pending=%u pose_wait=%u view_wait=%u waits=%llu ready=%u/%u outputs=%u/%u output_waits=%u inspection=%s/%s "
+                    "entries=%llu/%llu suspended=%u "
                     "gates=%u/%u tail=%s "
                     "draws=%llu unknown_lists=%llu invalid_recordings=%llu scoped_invalidations=%llu invalid_draws=%llu "
                     "lease_failures=%llu global_aliases=%llu overflows=%llu reasons=0x%x capture_stalled=%u "
@@ -673,10 +707,10 @@ DWORD run_impl() {
                     buttons.valid, desired.held, desired.timed_out, output.output, static_cast<unsigned long long>(scene.stop_sequence),
                     native_camera::scene_stop_reason_name(scene.stop_reason), scene.recovery_attempts, scene.recovery_pending,
                     scene.pose_waiting, scene.view_waiting, static_cast<unsigned long long>(scene.view_wait_count), scene.ready[0],
-                    scene.ready[1], scene.inspection_status[0], scene.inspection_status[1],
-                    static_cast<unsigned long long>(scene.pair.owned_ids[0]), static_cast<unsigned long long>(scene.pair.owned_ids[1]),
-                    demand.suspend, scene.gates[0], scene.gates[1], output.capture.tail_status,
-                    static_cast<unsigned long long>(output.capture.source_draws),
+                    scene.ready[1], scene.output_ready[0], scene.output_ready[1], scene.output_waits, scene.inspection_status[0],
+                    scene.inspection_status[1], static_cast<unsigned long long>(scene.pair.owned_ids[0]),
+                    static_cast<unsigned long long>(scene.pair.owned_ids[1]), demand.suspend, scene.gates[0], scene.gates[1],
+                    output.capture.tail_status, static_cast<unsigned long long>(output.capture.source_draws),
                     static_cast<unsigned long long>(output.capture.unknown_submitted_lists),
                     static_cast<unsigned long long>(output.capture.invalid_source_recordings),
                     static_cast<unsigned long long>(output.capture.scoped_source_invalidations),
@@ -693,7 +727,9 @@ DWORD run_impl() {
                     scene.performance.stage_ms[static_cast<std::size_t>(native_camera::ProbeStage::aa)],
                     static_cast<unsigned long long>(scene.inspection_count), static_cast<unsigned long long>(scene.updates),
                     static_cast<unsigned long long>(graphics.clear_states),
-                    scene.stop_reason == native_camera::SceneStopReason::none ? "" : scene.stop_detail.c_str());
+                    scene.stop_reason != native_camera::SceneStopReason::none ? scene.stop_detail.c_str()
+                    : !scene.pair.owned_ids[0] && !scene.pair.owned_ids[1]      ? scene.message.c_str()
+                                                                                : "");
       log_status(status, detail);
       char selection_detail[256];
       std::snprintf(selection_detail, sizeof(selection_detail),
@@ -789,15 +825,20 @@ DWORD run_impl() {
           static_cast<unsigned long long>(graphics.fallback_state_refused), static_cast<unsigned long long>(graphics.recording_end_draws),
           static_cast<unsigned long long>(graphics.shader_deferred), static_cast<unsigned long long>(graphics.close_forward_refused));
       log_status(status, draw_detail);
-      char retention_detail[384];
+      char retention_detail[640];
       std::snprintf(
           retention_detail, sizeof(retention_detail),
           "Camera retention: created_total=%llu snapshot_bytes=%llu quarantined=%llu prewarm=%s patch_requests=%u patch_draws=%llu "
-          "retirement_deferrals=%llu retirement_waiting=%u retirement_status=%s retirement_queues=%u/%u",
+          "retirement_deferrals=%llu retirement_waiting=%u retirement_status=%s retirement_queues=%u/%u "
+          "flags=%llx:%llx/%llx:%llx aa_restores=%llu aa_restore_failures=%llu aa_cleared_pending=%u",
           static_cast<unsigned long long>(scene.created_total), static_cast<unsigned long long>(output.capture.bytes),
           static_cast<unsigned long long>(output.capture.quarantined), prewarm.name(), output.patch_requests,
           static_cast<unsigned long long>(output.patch_draws), static_cast<unsigned long long>(scene.retirement_deferrals),
-          scene.retirement_waiting, scene.retirement_status, scene.retirement_queue_counts[0], scene.retirement_queue_counts[1]);
+          scene.retirement_waiting, scene.retirement_status, scene.retirement_queue_counts[0], scene.retirement_queue_counts[1],
+          static_cast<unsigned long long>(scene.flags[0][0]), static_cast<unsigned long long>(scene.flags[0][1]),
+          static_cast<unsigned long long>(scene.flags[1][0]), static_cast<unsigned long long>(scene.flags[1][1]),
+          static_cast<unsigned long long>(scene.aa_restores), static_cast<unsigned long long>(scene.aa_restore_failures),
+          scene.aa_cleared_pending);
       log_status(status, retention_detail);
       if (graphics_diagnostics) {
         char graphics_detail[512];

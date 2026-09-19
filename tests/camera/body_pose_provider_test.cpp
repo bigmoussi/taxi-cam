@@ -277,6 +277,38 @@ void session_readiness_regressions(Check check) {
   check(!status.loading && status.ready && status.epoch == ended_epoch + 1);
   check(!testing::accept_session_packet(flow.data(), flow.size()));
   check(select_aircraft_profile(1));
+  const auto parked = body_math::ecef(cv[0], cv[1], cv[2]);
+  bool accepted = false;
+  for (unsigned sample = 0; sample < 3; ++sample) {
+    now = GetTickCount64() + sample + 1;
+    supply();
+    check(testing::session_readiness_at(now).ready);
+    CameraMatchReport near_report, far_report, latch;
+    check(public_camera_matches(parked, static_cast<float>(fov), now, &near_report));
+    check(!public_camera_matches(body_math::ecef(0, 0, 0), static_cast<float>(fov), now, &far_report));
+    // A refusal must say how far off the candidate was, so a wrong coordinate
+    // space cannot be mistaken for a camera that has not settled yet.
+    check(near_report.position_valid && near_report.public_ready && near_report.geometry && near_report.horizontal_m <= 0.5);
+    check(far_report.position_valid && far_report.public_ready && !far_report.geometry && far_report.horizontal_m > 1000);
+    accepted = calibrate_body_pose(parked, static_cast<float>(fov), now, &latch);
+    check(sample < 2 ? !accepted : accepted);
+    check(latch.new_public_sample && latch.calibration_samples == sample + 1);
+    if (sample == 0) {
+      // A late public response defers this attempt without discarding the
+      // progress already made; the candidate itself was not contradicted.
+      CameraMatchReport stale;
+      check(!calibrate_body_pose(parked, static_cast<float>(fov), now + 1000, &stale));
+      check(!stale.public_ready && stale.calibration_samples == 1);
+    }
+  }
+  // A camera proven to be somewhere else still loses the latch.
+  now = GetTickCount64() + 4;
+  supply();
+  CameraMatchReport wrong;
+  check(!calibrate_body_pose(body_math::ecef(0, 0, 0), static_cast<float>(fov), now, &wrong));
+  check(wrong.public_ready && !wrong.geometry && wrong.calibration_samples == 0);
+  reset_body_pose_calibration();
+  check(!sample_body_pose(now).valid);
 }
 int offline_tests() {
   unsigned checks = 0;

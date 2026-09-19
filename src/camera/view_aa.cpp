@@ -60,4 +60,37 @@ ViewAaResult disable_owned_view_aa(const engine_camera::OwnedViewSnapshot& view,
   return result;
 }
 
+ViewAaResult restore_view_aa_flag(std::uint64_t view_address) noexcept {
+  ViewAaResult result;
+  const auto fail = [&](const char* error) {
+    result.error = error;
+    return result;
+  };
+  if (!view_address || (view_address & 7) || view_address > UINTPTR_MAX - 64)
+    return fail("aa_invalid_view_address");
+  const auto field = view_address + 48;
+  if (!writable_flags(field))
+    return fail("aa_flags_not_writable");
+  std::array<std::uint64_t, 2> current{};
+  if (!read_flags(field, current))
+    return fail("aa_read_failed");
+  if (!(current[0] & 1u))
+    return fail("aa_gate_open");
+  auto desired = current;
+  desired[0] |= kViewAaFlag;
+  if (desired != current) {
+    SIZE_T written = 0;
+    result.write_attempted = true;
+    if (!WriteProcessMemory(GetCurrentProcess(), reinterpret_cast<void*>(field), &desired[0], 8, &written) || written != 8)
+      return fail("aa_write_failed");
+  }
+  if (!read_flags(field, current))
+    return fail("aa_recheck_failed");
+  if (current != desired)
+    return fail("aa_changed_during_update");
+  result.complete = true;
+  result.error = "";
+  return result;
+}
+
 }  // namespace taxi_camera::native_camera

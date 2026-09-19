@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <iterator>
 #include <limits>
 #include <unordered_map>
 #include <unordered_set>
@@ -16,12 +17,21 @@ using Binding = std::pair<std::uint32_t, std::uint32_t>;
 struct Candidate {
   std::vector<Binding> bindings;
 };
-struct TemplateState {
+// One shipped build's shape of a reviewed body. A template carries the base
+// shape plus any declared variants, in declaration order.
+struct BodyState {
+  const CodeTemplate* code = nullptr;
   std::vector<std::uint8_t> invariant;
   std::uint32_t seed_offset = 0, seed_size = 0;
   bool discoverable = false;
-  std::vector<Candidate> candidates;
+  std::vector<Candidate> found;
   std::unordered_set<std::uint32_t> attempted;
+};
+struct TemplateState {
+  std::vector<BodyState> bodies;
+  std::size_t selected = 0;
+  bool discoverable = false;
+  std::vector<Candidate> candidates;
 };
 
 bool static_code(const discovery::ImageSection& section) {
@@ -163,6 +173,41 @@ class Resolver {
     return true;
   }
 
+  bool build_body(const CodeTemplate& code, std::uint64_t& template_bytes, std::uint64_t& operand_count, BodyState& body) {
+    template_bytes += code.bytes.size();
+    operand_count += code.operands.size();
+    if (code.bytes.empty() || code.bytes.size() > 16384 || template_bytes > 262144 || operand_count > 65536 ||
+        (code.minimum_seed != 7 && code.minimum_seed != 8) || model_.symbols[code.symbol].kind != SectionKind::code ||
+        code.bytes.size() > model_.symbols[code.symbol].extent)
+      return fail("invalid_code_template");
+    body.code = &code;
+    body.invariant.assign(code.bytes.size(), 1);
+    for (const auto& operand : code.operands) {
+      if ((operand.width != 1 && operand.width != 4) || operand.target_symbol >= model_.symbols.size() ||
+          std::uint64_t(operand.offset) + operand.width > code.bytes.size() ||
+          (operand.kind != AddressKind::pc_relative && operand.kind != AddressKind::image_rva) ||
+          (operand.kind == AddressKind::pc_relative &&
+           (operand.pc_offset < std::uint64_t(operand.offset) + operand.width || operand.pc_offset > code.bytes.size())) ||
+          (operand.kind == AddressKind::image_rva && operand.pc_offset != 0))
+        return fail("invalid_address_operand");
+      for (std::uint32_t at = operand.offset; at < operand.offset + operand.width; ++at) {
+        if (!body.invariant[at])
+          return fail("overlapping_address_operands");
+        body.invariant[at] = 0;
+      }
+    }
+    std::uint32_t length = 0;
+    for (std::uint32_t at = 0; at < body.invariant.size(); ++at) {
+      length = body.invariant[at] ? length + 1 : 0;
+      if (length > body.seed_size) {
+        body.seed_offset = at + 1 - length;
+        body.seed_size = length;
+      }
+    }
+    body.discoverable = body.seed_size >= code.minimum_seed;
+    return true;
+  }
+
   bool prepare() {
     if (!image_.valid_image || image_.machine != 0x8664 || !image_.image_size || image_.sections.empty() || image_.sections.size() > 96 ||
         image_.section_count != image_.sections.size())
@@ -199,43 +244,42 @@ class Resolver {
     bool has_seed = false;
     for (std::size_t i = 0; i < model_.code.size(); ++i) {
       const auto& code = model_.code[i];
-      auto& state = states_[i];
-      template_bytes += code.bytes.size();
-      operand_count += code.operands.size();
-      if (code.symbol >= model_.symbols.size() || code.bytes.empty() || code.bytes.size() > 16384 || template_bytes > 262144 ||
-          operand_count > 65536 || (code.minimum_seed != 7 && code.minimum_seed != 8) ||
-          model_.symbols[code.symbol].kind != SectionKind::code || code.bytes.size() > model_.symbols[code.symbol].extent ||
-          template_for_symbol_[code.symbol] != Unknown)
+      if (code.symbol >= model_.symbols.size() || template_for_symbol_[code.symbol] != Unknown)
         return fail("invalid_code_template");
       template_for_symbol_[code.symbol] = static_cast<std::uint32_t>(i);
-      state.invariant.assign(code.bytes.size(), 1);
-      for (const auto& operand : code.operands) {
-        if ((operand.width != 1 && operand.width != 4) || operand.target_symbol >= model_.symbols.size() ||
-            std::uint64_t(operand.offset) + operand.width > code.bytes.size() ||
-            (operand.kind != AddressKind::pc_relative && operand.kind != AddressKind::image_rva) ||
-            (operand.kind == AddressKind::pc_relative &&
-             (operand.pc_offset < std::uint64_t(operand.offset) + operand.width || operand.pc_offset > code.bytes.size())) ||
-            (operand.kind == AddressKind::image_rva && operand.pc_offset != 0))
-          return fail("invalid_address_operand");
-        for (std::uint32_t at = operand.offset; at < operand.offset + operand.width; ++at) {
-          if (!state.invariant[at])
-            return fail("overlapping_address_operands");
-          state.invariant[at] = 0;
-        }
-      }
-      std::uint32_t length = 0;
-      for (std::uint32_t at = 0; at < state.invariant.size(); ++at) {
-        length = state.invariant[at] ? length + 1 : 0;
-        if (length > state.seed_size) {
-          state.seed_offset = at + 1 - length;
-          state.seed_size = length;
-        }
-      }
-      state.discoverable = state.seed_size >= code.minimum_seed;
-      if (state.discoverable) {
-        has_seed = true;
-        maximum_seed_ = std::max(maximum_seed_, state.seed_size);
-        seeds_[key(code.bytes.data() + state.seed_offset)].push_back(i);
+      states_[i].bodies.emplace_back();
+      if (!build_body(code, template_bytes, operand_count, states_[i].bodies.back()))
+        return false;
+    }
+    if (model_.variants.size() > 64)
+      return fail("model_count_limit");
+    for (const auto& variant : model_.variants) {
+      if (variant.symbol >= model_.symbols.size() || template_for_symbol_[variant.symbol] == Unknown)
+        return fail("invalid_code_variant");
+      auto& state = states_[template_for_symbol_[variant.symbol]];
+      if (state.bodies.size() >= 8)
+        return fail("code_variant_limit");
+      state.bodies.emplace_back();
+      if (!build_body(variant, template_bytes, operand_count, state.bodies.back()))
+        return false;
+      // Mixing a discovered shape with an inferred one would let the scan and
+      // the caller graph disagree about which build's copy was resolved. An
+      // unequal length would also move every extent, range and unwind span the
+      // caller derives from the declared body.
+      if (state.bodies.back().discoverable != state.bodies.front().discoverable ||
+          variant.bytes.size() != state.bodies.front().code->bytes.size())
+        return fail("inconsistent_code_variant");
+    }
+    for (std::size_t i = 0; i < states_.size(); ++i) {
+      auto& state = states_[i];
+      state.discoverable = state.bodies.front().discoverable;
+      if (!state.discoverable)
+        continue;
+      has_seed = true;
+      for (std::size_t b = 0; b < state.bodies.size(); ++b) {
+        const auto& body = state.bodies[b];
+        maximum_seed_ = std::max(maximum_seed_, body.seed_size);
+        seeds_[key(body.code->bytes.data() + body.seed_offset)].emplace_back(i, b);
       }
     }
     if (!has_seed)
@@ -332,15 +376,18 @@ class Resolver {
   }
 
   bool match(std::size_t index, std::uint32_t rva, Candidate& candidate) {
-    const auto& code = model_.code[index];
-    const auto& state = states_[index];
+    return match_body(states_[index].bodies[states_[index].selected], rva, candidate);
+  }
+
+  bool match_body(const BodyState& body, std::uint32_t rva, Candidate& candidate) {
+    const auto& code = *body.code;
     if (!symbol_valid(code.symbol, rva))
       return false;
     std::vector<std::uint8_t> bytes(code.bytes.size());
     if (!read(rva, bytes.data(), bytes.size()))
       return false;
     for (std::size_t at = 0; at < bytes.size(); ++at)
-      if (state.invariant[at] && bytes[at] != code.bytes[at])
+      if (body.invariant[at] && bytes[at] != code.bytes[at])
         return false;
     candidate.bindings.emplace_back(code.symbol, rva);
     for (const auto& operand : code.operands) {
@@ -371,20 +418,44 @@ class Resolver {
     return true;
   }
 
-  bool add_candidate(std::size_t index, std::uint32_t rva) {
-    auto& state = states_[index];
-    if (!state.attempted.insert(rva).second)
+  bool add_candidate(std::size_t index, std::size_t body_index, std::uint32_t rva) {
+    auto& body = states_[index].bodies[body_index];
+    if (!body.attempted.insert(rva).second)
       return true;
     if (++attempts_ > 16384)
       return fail("candidate_attempt_limit");
     Candidate candidate;
-    if (match(index, rva, candidate)) {
-      if (state.candidates.size() >= 64)
+    if (match_body(body, rva, candidate)) {
+      if (body.found.size() >= 64)
         return fail("candidate_limit");
-      state.candidates.push_back(std::move(candidate));
+      body.found.push_back(std::move(candidate));
       ++result_.candidate_count;
     }
     return result_.error.empty();
+  }
+
+  // Shapes are ordered most specific first, so the first one the image actually
+  // contains is the one adopted. A later shape is reached only where no earlier
+  // shape is present at all.
+  bool adopt_first_present(std::size_t index, std::uint32_t rva) {
+    auto& state = states_[index];
+    // Once one shape has been adopted, every later location must use it too.
+    const bool settled = !state.candidates.empty();
+    for (std::size_t b = 0; b < state.bodies.size(); ++b) {
+      if (settled && b != state.selected)
+        continue;
+      if (!add_candidate(index, b, rva))
+        return false;
+      auto& body = state.bodies[b];
+      if (body.found.empty())
+        continue;
+      state.selected = b;
+      state.candidates.insert(state.candidates.end(), std::make_move_iterator(body.found.begin()),
+                              std::make_move_iterator(body.found.end()));
+      body.found.clear();
+      return true;
+    }
+    return true;
   }
 
   bool scan() {
@@ -402,29 +473,41 @@ class Resolver {
           const auto seeds = seeds_.find(key(bytes.data() + at));
           if (seeds == seeds_.end())
             continue;
-          for (const auto index : seeds->second) {
-            const auto& state = states_[index];
-            if (std::uint64_t(at) + state.seed_size > size ||
-                std::memcmp(bytes.data() + at, model_.code[index].bytes.data() + state.seed_offset, state.seed_size))
+          for (const auto& [index, body_index] : seeds->second) {
+            const auto& body = states_[index].bodies[body_index];
+            if (std::uint64_t(at) + body.seed_size > size ||
+                std::memcmp(bytes.data() + at, body.code->bytes.data() + body.seed_offset, body.seed_size))
               continue;
             const auto address = std::uint64_t(section.rva) + offset + at;
-            if (address >= state.seed_offset && !add_candidate(index, static_cast<std::uint32_t>(address - state.seed_offset)))
+            if (address >= body.seed_offset &&
+                !add_candidate(index, body_index, static_cast<std::uint32_t>(address - body.seed_offset)))
               return false;
           }
         }
         offset += count;
       }
     }
-    for (const auto& state : states_)
-      if (state.discoverable && state.candidates.empty())
+    for (auto& state : states_) {
+      if (!state.discoverable)
+        continue;
+      for (std::size_t b = 0; b < state.bodies.size(); ++b) {
+        if (state.bodies[b].found.empty())
+          continue;
+        state.selected = b;
+        state.candidates = std::move(state.bodies[b].found);
+        state.bodies[b].found.clear();
+        break;
+      }
+      if (state.candidates.empty())
         return fail("template_not_found");
+    }
     return true;
   }
 
   bool infer_short_templates() {
     for (const auto& [symbol, rva] : fixed_.bindings) {
       const auto target = template_for_symbol_[symbol];
-      if (target != Unknown && !states_[target].discoverable && !add_candidate(target, rva))
+      if (target != Unknown && !states_[target].discoverable && !adopt_first_present(target, rva))
         return false;
     }
     // At most one newly reached template layer per pass is needed. Candidate
@@ -436,7 +519,7 @@ class Resolver {
         for (const auto& candidate : candidates)
           for (const auto& [symbol, rva] : candidate.bindings) {
             const auto target = template_for_symbol_[symbol];
-            if (target != Unknown && !states_[target].discoverable && !add_candidate(target, rva))
+            if (target != Unknown && !states_[target].discoverable && !adopt_first_present(target, rva))
               return false;
           }
       }
@@ -499,7 +582,7 @@ class Resolver {
   ContractResolution result_;
   std::vector<TemplateState> states_;
   std::vector<std::uint32_t> template_for_symbol_;
-  std::unordered_map<std::uint32_t, std::vector<std::size_t>> seeds_;
+  std::unordered_map<std::uint32_t, std::vector<std::pair<std::size_t, std::size_t>>> seeds_;
   std::uint64_t code_size_ = 0;
   std::uint32_t maximum_seed_ = 0, attempts_ = 0;
 };

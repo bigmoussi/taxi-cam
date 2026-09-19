@@ -25,6 +25,8 @@ const std::vector<FunctionBoundary>& boundaries();
 // Returns UINT32_MAX for an unknown name. Names are semantic roles, never
 // build-specific RVAs. Vtable slots still require an independently rechecked
 // static RTTI relationship; short method bodies are not discovered as seeds.
+// Where a reviewed body changed shape between shipped builds, every shape is
+// declared and the loaded image decides which one resolves.
 std::uint32_t symbol_index(std::string_view name) noexcept;
 
 // Copies an already successful resolver result. This is a projection, not a
