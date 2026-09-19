@@ -20,6 +20,13 @@ namespace taxi_camera::standalone {
 // keeps the previous list's RT or UAV state) moves the copy after that last
 // insertable write instead of stamping first.
 //
+// The instrument can already be on the glass from a list that executed before
+// this batch. If no list here touches that display, the caller may copy after
+// the last list using the state the earlier list left behind. That covers the
+// frames between arming the camera and the next instrument write. A list that
+// touches the display keeps the suffix and prefix rules; an older state must
+// not cross that write.
+//
 // The caller observes every recording from a real successful Reset through
 // successful Close, reports every GPU command and pass, and invalidates omitted
 // or unknown commands. It retains exact native object/resource incarnations and
@@ -419,6 +426,52 @@ class PfdSubmissionProof {
           return {};
     }
     return safe;
+  }
+  // True when this closed list recorded any base-mip state for the display.
+  bool mentions(Key key, std::uint64_t generation) const noexcept {
+    if (!complete(generation) || !key.resource)
+      return false;
+    for (const auto& slot : slots_)
+      if (slot.seen && slot.key == key)
+        return true;
+    return false;
+  }
+  struct Settlement {
+    Key key{};
+    D3D12_RESOURCE_STATES after{};
+    bool restorable = false;
+    bool wrote = false;
+  };
+  // States left by a finished list. restorable means a later quiet Execute can
+  // copy and return to `after`. A barrier-only entry into a writable state is
+  // not restorable: the instrument draw is still ahead, and the previous state
+  // is no longer true.
+  UINT settlements(std::uint64_t generation, Settlement* out, UINT capacity) const noexcept {
+    if (!out || !capacity || !complete(generation))
+      return 0;
+    UINT count = 0;
+    for (const auto& slot : slots_) {
+      if (!slot.seen || !slot.key.resource)
+        continue;
+      if (count >= capacity)
+        break;
+      Settlement row;
+      row.key = slot.key;
+      row.after = slot.after;
+      row.wrote = slot.wrote;
+      row.restorable = insertable_after(slot.after) && (suffix_site(slot) || slot.exit || slot.prefix_exit);
+      out[count++] = row;
+    }
+    return count;
+  }
+  // Copy after the last list only when this batch does not touch the display.
+  static Overlay carried_overlay(const Recording* batch, std::size_t count, Key key, D3D12_RESOURCE_STATES carried) noexcept {
+    if (!batch_allows(batch, count) || !key.resource || !key.generation || !insertable_after(carried))
+      return {};
+    for (std::size_t i = 0; i < count; ++i)
+      if (batch[i].proof->mentions(key, batch[i].generation))
+        return {};
+    return {Candidate{key, batch[count - 1].generation, carried, carried, 0}, count - 1, false};
   }
 
  private:
