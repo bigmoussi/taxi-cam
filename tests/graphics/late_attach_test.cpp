@@ -406,6 +406,47 @@ void a350_submission_power_up_case() {
   clear_fixture(r);
 }
 
+void incomplete_backfill_outlives_admit_budget() {
+  auto& r = win::registry();
+  clear_fixture(r);
+  r.live_backfill = true;
+  r.backfill_started_ms = 1000;
+  win::service_live_backfill(1000 + win::LiveBackfillAdmitMs, 0);
+  expect("empty inventory keeps attachment after the admit budget", r.live_backfill.load(), true);
+
+  r.profile = &profiles::A359;
+  for (unsigned i = 0; i < 3; ++i) {
+    auto item = display(i);
+    item->desc.Width = profiles::A359.width;
+    item->desc.Height = profiles::A359.height;
+    item->desc.MipLevels = 5;
+    item->desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    seed_observed_display(r, item);
+    win::replace_view(r, 0x50000 + 32 * i, {item, DXGI_FORMAT_R8G8B8A8_UNORM, 0, 0});
+  }
+  win::maybe_stop_live_backfill(r);
+  expect("five-mip A350 views do not end attachment", r.live_backfill.load(), true);
+  win::service_live_backfill(1000 + win::LiveBackfillAdmitMs * 4, 3);
+  expect("five-mip A350 auxiliaries do not end attachment", r.live_backfill.load(), true);
+
+  for (unsigned i = 3; i < 6; ++i) {
+    auto item = display(i);
+    item->desc.Width = profiles::A359.width;
+    item->desc.Height = profiles::A359.height;
+    item->desc.MipLevels = 1;
+    item->desc.Format = DXGI_FORMAT_R8G8B8A8_TYPELESS;
+    seed_observed_display(r, item);
+  }
+  r.backfill_inventory_ms = 0;
+  r.backfill_full_window = true;
+  constexpr std::uint64_t Ready = 20000;
+  win::service_live_backfill(Ready, 6);
+  expect("complete A350 typeless group keeps the association window", r.live_backfill.load(), true);
+  win::service_live_backfill(Ready + win::LiveBackfillAssociateMs, 6);
+  expect("complete A350 group ends at the association deadline", r.live_backfill.load(), false);
+  clear_fixture(r);
+}
+
 void ini_explicit_discovery_case() {
   auto& r = win::registry();
   clear_fixture(r);
@@ -467,6 +508,7 @@ int main() {
   reconnect_discovery_case();
   a350_power_up_discovery_case();
   a350_submission_power_up_case();
+  incomplete_backfill_outlives_admit_budget();
   ini_explicit_discovery_case();
   std::printf(
       "%s late-attach metadata: checks=%u failures=%u; profile switch, distinct displays, hint lifetimes, unknown views, RT exits.\n",
