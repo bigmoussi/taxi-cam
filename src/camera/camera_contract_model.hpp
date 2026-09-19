@@ -23,8 +23,8 @@ const relocatable::ContractModel& model();
 const std::vector<FunctionBoundary>& boundaries();
 
 // Returns UINT32_MAX for an unknown name. Names are semantic roles, never
-// build-specific RVAs. The seven-byte controller template still requires an
-// independently verified and rechecked static RTTI/vtable slot relationship.
+// build-specific RVAs. Vtable slots still require an independently rechecked
+// static RTTI relationship; short method bodies are not discovered as seeds.
 std::uint32_t symbol_index(std::string_view name) noexcept;
 
 // Copies an already successful resolver result. This is a projection, not a

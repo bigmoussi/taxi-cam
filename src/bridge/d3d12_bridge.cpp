@@ -480,6 +480,7 @@ bool same_device(ID3D12Device* device) noexcept {
 }
 constexpr std::uint64_t LiveBackfillAdmitMs = 3000;
 constexpr std::uint64_t LiveBackfillAssociateMs = 10000;
+static_assert(LiveBackfillAdmitMs < LiveBackfillAssociateMs);
 unsigned live_backfill_needed(const Registry& r) noexcept {
   return r.profile->pfd_detection == profiles::PfdDetectionPolicy::ini_a380_allocation_group ? 8u : 2u;
 }
@@ -533,6 +534,24 @@ unsigned live_display_resources(const Registry& r) noexcept {
   }
   return n;
 }
+// A350 submission ranking ignores five-mip UNORM auxiliaries. Two of those can
+// fill a generic pair while the one-mip typeless EFIS group is still absent.
+bool a350_typeless_group_ready(const Registry& r) noexcept {
+  unsigned typeless = 0;
+  for (const auto& [native, item] : r.resources) {
+    (void)native;
+    if (!item || !display_item(r, *item))
+      continue;
+    if (item->desc.MipLevels == 1 && item->desc.Format == DXGI_FORMAT_R8G8B8A8_TYPELESS && ++typeless == 3)
+      return true;
+  }
+  return false;
+}
+bool backfill_resources_ready(const Registry& r) noexcept {
+  if (r.profile->id == profiles::A359.id || r.profile->id == profiles::A35K.id)
+    return a350_typeless_group_ready(r);
+  return live_display_resources(r) >= live_backfill_needed(r);
+}
 unsigned live_display_rtvs(const Registry& r) noexcept {
   unsigned n = 0;
   for (const auto& [native, item] : r.resources) {
@@ -552,8 +571,8 @@ unsigned live_display_rtvs(const Registry& r) noexcept {
 void maybe_stop_live_backfill(Registry& r) noexcept {
   if (!r.live_backfill.load(std::memory_order_relaxed) || r.backfill_full_window)
     return;
-  const auto resources = live_display_resources(r);
-  if (resources >= live_backfill_needed(r) && live_display_rtvs(r) == resources)
+  // Same set as the timed scan. A generic pair of A350 auxiliaries is not ready.
+  if (backfill_resources_ready(r) && live_display_rtvs(r) == live_display_resources(r))
     r.live_backfill.store(false, std::memory_order_relaxed);
 }
 void remember_backfill_display(Registry& r, ID3D12Resource* native) noexcept {
@@ -2596,28 +2615,29 @@ std::vector<PfdTargetObservation> pfd_inventory() {
   std::sort(result.begin(), result.end(), [](const auto& a, const auto& b) { return a.draws > b.draws; });
   return result;
 }
-void service_live_backfill(std::uint64_t now, std::size_t inventory_count) noexcept {
+void service_live_backfill(std::uint64_t now, std::size_t) noexcept {
   auto& r = registry();
   const std::lock_guard lock(r.mutex);
   if (!r.live_backfill.load(std::memory_order_relaxed))
     return;
-  if (inventory_count != 0) {
-    maybe_stop_live_backfill(r);
-    if (!r.live_backfill.load(std::memory_order_relaxed))
-      return;
-    if (!r.backfill_inventory_ms)
-      r.backfill_inventory_ms = now ? now : 1;
-    // List filled; keep associating RTVs. The empty-list 3 s cut must not
-    // freeze stamps/calibration while candidates are already visible.
-    if (now >= r.backfill_inventory_ms && now - r.backfill_inventory_ms >= LiveBackfillAssociateMs)
-      r.live_backfill.store(false, std::memory_order_relaxed);
+  // The registry, not the previous UI snapshot, decides whether the set exists.
+  // Cockpit textures often already exist when the bridge attaches and are first
+  // used after LiveBackfillAdmitMs. Closing the scan then leaves the dropdown empty.
+  if (!backfill_resources_ready(r)) {
+    if (!r.backfill_started_ms)
+      r.backfill_started_ms = now ? now : 1;
+    // LiveBackfillAdmitMs used to stop this scan. Textures first used after
+    // that budget never reached the dropdown, so an incomplete set stays open.
     return;
   }
-  if (!r.backfill_started_ms) {
-    r.backfill_started_ms = now ? now : 1;
+  maybe_stop_live_backfill(r);
+  if (!r.live_backfill.load(std::memory_order_relaxed))
     return;
-  }
-  if (now >= r.backfill_started_ms && now - r.backfill_started_ms >= LiveBackfillAdmitMs)
+  if (!r.backfill_inventory_ms)
+    r.backfill_inventory_ms = now ? now : 1;
+  // Set present; keep associating RTVs. Do not freeze stamps or calibration
+  // once the profile's displays are visible.
+  if (now >= r.backfill_inventory_ms && now - r.backfill_inventory_ms >= LiveBackfillAssociateMs)
     r.live_backfill.store(false, std::memory_order_relaxed);
 }
 void service_display_patches() noexcept {
