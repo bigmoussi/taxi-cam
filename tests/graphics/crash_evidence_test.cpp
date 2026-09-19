@@ -250,5 +250,29 @@ int main() {
   context.Rbx = 4321;
   assert(ce::capture(&record, &pointers) == EXCEPTION_CONTINUE_SEARCH && record.context.Rbx == 1234);
   assert(ce::capture(nullptr, &pointers) == EXCEPTION_CONTINUE_SEARCH);
-  std::puts("PASS renderer fault evidence: exact-site filter, bounded register copy, one-shot publication, exception continues unchanged.");
+  // The arm-time locator admits the same instruction at the current image's
+  // RVA; without a located site only the observed 1.8.16.0 RVA is accepted.
+  ce::Record located;
+  located.module = 0x10000000;
+  exception.ExceptionAddress = reinterpret_cast<void*>(located.module + 0x3E5C054);
+  context.Rip = reinterpret_cast<std::uint64_t>(exception.ExceptionAddress);
+  assert(ce::capture(&located, &pointers) == EXCEPTION_CONTINUE_SEARCH && located.state == 0);
+  ce::CodeCaptureResult capture_result;
+  capture_result.match_rva = 0x3E5C054;
+  ce::code_capture = &capture_result;
+  assert(ce::capture(&located, &pointers) == EXCEPTION_CONTINUE_SEARCH && located.state == 2 && located.fault_rva == 0x3E5C054);
+  ce::code_capture = nullptr;
+  // This test image does not contain the renderer instruction sequence: the
+  // executable sections are searched, nothing is written, and the error names it.
+  {
+    Directory directory;
+    const auto absent = ce::capture_fault_site_code(directory.path.c_str(), GetModuleHandleW(nullptr), GetCurrentProcessId());
+    assert(absent.searched && !absent.written && absent.match_rva == 0 && !std::strcmp(absent.error, "code_capture_pattern_absent"));
+    assert(!ce::capture_fault_site_code(nullptr, GetModuleHandleW(nullptr), 1).searched);
+    assert(!ce::capture_fault_site_code(directory.path.c_str(), nullptr, 1).searched);
+    assert(directory.count() == 0);
+  }
+  std::puts(
+      "PASS renderer fault evidence: exact-site filter, located-site filter, bounded register copy, one-shot publication, "
+      "code capture pattern search, exception continues unchanged.");
 }

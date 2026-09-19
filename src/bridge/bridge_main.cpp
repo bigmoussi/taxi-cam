@@ -78,6 +78,13 @@ DWORD run_impl() {
   log_status(status, "Bridge worker started.");
   const bool fault_evidence_ready = win::crash_evidence::initialize();
   log_status(status, fault_evidence_ready ? "Renderer fault evidence armed." : "Renderer fault evidence unavailable.");
+  if (const auto* capture = win::crash_evidence::code_capture) {
+    char capture_detail[256];
+    std::snprintf(capture_detail, sizeof(capture_detail),
+                  "Renderer fault site code capture: written=%u searched=%u fault_rva=0x%X window_rva=0x%X window_bytes=%u error=%s",
+                  capture->written, capture->searched, capture->match_rva, capture->window_rva, capture->window_bytes, capture->error);
+    log_status(status, capture_detail);
+  }
   log_status(status, "Native graphics initialization started.");
   if (!win::initialize_graphics()) {
     const auto graphics = win::graphics_status();
@@ -818,15 +825,20 @@ DWORD run_impl() {
           static_cast<unsigned long long>(graphics.fallback_state_refused), static_cast<unsigned long long>(graphics.recording_end_draws),
           static_cast<unsigned long long>(graphics.shader_deferred), static_cast<unsigned long long>(graphics.close_forward_refused));
       log_status(status, draw_detail);
-      char retention_detail[384];
+      char retention_detail[640];
       std::snprintf(
           retention_detail, sizeof(retention_detail),
           "Camera retention: created_total=%llu snapshot_bytes=%llu quarantined=%llu prewarm=%s patch_requests=%u patch_draws=%llu "
-          "retirement_deferrals=%llu retirement_waiting=%u retirement_status=%s retirement_queues=%u/%u",
+          "retirement_deferrals=%llu retirement_waiting=%u retirement_status=%s retirement_queues=%u/%u "
+          "flags=%llx:%llx/%llx:%llx aa_restores=%llu aa_restore_failures=%llu aa_cleared_pending=%u",
           static_cast<unsigned long long>(scene.created_total), static_cast<unsigned long long>(output.capture.bytes),
           static_cast<unsigned long long>(output.capture.quarantined), prewarm.name(), output.patch_requests,
           static_cast<unsigned long long>(output.patch_draws), static_cast<unsigned long long>(scene.retirement_deferrals),
-          scene.retirement_waiting, scene.retirement_status, scene.retirement_queue_counts[0], scene.retirement_queue_counts[1]);
+          scene.retirement_waiting, scene.retirement_status, scene.retirement_queue_counts[0], scene.retirement_queue_counts[1],
+          static_cast<unsigned long long>(scene.flags[0][0]), static_cast<unsigned long long>(scene.flags[0][1]),
+          static_cast<unsigned long long>(scene.flags[1][0]), static_cast<unsigned long long>(scene.flags[1][1]),
+          static_cast<unsigned long long>(scene.aa_restores), static_cast<unsigned long long>(scene.aa_restore_failures),
+          scene.aa_cleared_pending);
       log_status(status, retention_detail);
       if (graphics_diagnostics) {
         char graphics_detail[512];
