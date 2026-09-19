@@ -8,6 +8,7 @@
 
 // clang-format off
 #include <windows.h>
+#include <appmodel.h>
 #include <psapi.h>
 // clang-format on
 
@@ -26,6 +27,9 @@
 
 namespace {
 constexpr wchar_t kSteamSuffix[] = L"\\steamapps\\common\\MSFS2024\\FlightSimulator2024.exe";
+constexpr wchar_t kStoreMarker[] = L"\\WindowsApps\\Microsoft.Limitless_";
+constexpr wchar_t kExecutableSuffix[] = L"\\FlightSimulator2024.exe";
+constexpr wchar_t kStoreVersion[] = L"_1.9.12.0_";
 
 class Handle {
  public:
@@ -113,6 +117,59 @@ bool same_user(HANDLE process) {
                   reinterpret_cast<const TOKEN_USER*>(selected.data())->User.Sid) != FALSE;
 }
 
+bool ends_with(const std::wstring& value, const wchar_t* suffix) {
+  const auto length = std::wcslen(suffix);
+  return value.size() >= length && CompareStringOrdinal(value.c_str() + (value.size() - length), -1, suffix, -1, TRUE) == CSTR_EQUAL;
+}
+
+bool contains_text(const std::wstring& value, const wchar_t* needle) {
+  return FindStringOrdinal(FIND_FROMSTART, value.c_str(), static_cast<int>(value.size()), needle, -1, TRUE) >= 0;
+}
+
+bool file_ids_match(const std::wstring& left, const std::wstring& right) {
+  if (left.empty() || right.empty())
+    return false;
+  if (CompareStringOrdinal(left.c_str(), static_cast<int>(left.size()), right.c_str(), static_cast<int>(right.size()), TRUE) == CSTR_EQUAL)
+    return true;
+  const auto identity = [](const std::wstring& path, FILE_ID_INFO& info) {
+    HANDLE raw = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                             OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (raw == INVALID_HANDLE_VALUE)
+      return false;
+    Handle file(raw);
+    return GetFileInformationByHandleEx(file.get(), FileIdInfo, &info, sizeof(info)) != FALSE;
+  };
+  FILE_ID_INFO first{}, second{};
+  return identity(left, first) && identity(right, second) && first.VolumeSerialNumber == second.VolumeSerialNumber &&
+         std::memcmp(&first.FileId, &second.FileId, sizeof(first.FileId)) == 0;
+}
+
+// Attributes only. The package name comes from the process, not from a directory listing.
+std::wstring store_package_executable(HANDLE process, std::wstring& package_name) {
+  package_name.clear();
+  UINT32 length = 0;
+  if (GetPackageFullName(process, &length, nullptr) != ERROR_INSUFFICIENT_BUFFER || length < 2 || length > 2048)
+    return {};
+  package_name.assign(length, L'\0');
+  if (GetPackageFullName(process, &length, package_name.data()) != ERROR_SUCCESS)
+    return {};
+  while (!package_name.empty() && package_name.back() == L'\0')
+    package_name.pop_back();
+  constexpr wchar_t kPrefix[] = L"Microsoft.Limitless_1.9.12.0_";
+  const auto prefix = static_cast<int>(std::wcslen(kPrefix));
+  if (static_cast<int>(package_name.size()) < prefix ||
+      CompareStringOrdinal(package_name.c_str(), prefix, kPrefix, prefix, TRUE) != CSTR_EQUAL ||
+      !contains_text(package_name, L"8wekyb3d8bbwe")) {
+    package_name.clear();
+    return {};
+  }
+  wchar_t program_files[MAX_PATH]{};
+  const auto root = GetEnvironmentVariableW(L"ProgramFiles", program_files, MAX_PATH);
+  if (!root || root >= MAX_PATH)
+    return {};
+  return std::wstring(program_files) + L"\\WindowsApps\\" + package_name + L"\\FlightSimulator2024.exe";
+}
+
 bool file_version_1_9_12_0(const std::wstring& path) {
   DWORD handle = 0;
   const auto bytes = GetFileVersionInfoSizeW(path.c_str(), &handle);
@@ -127,6 +184,82 @@ bool file_version_1_9_12_0(const std::wstring& path) {
     return false;
   return HIWORD(info->dwFileVersionMS) == 1 && LOWORD(info->dwFileVersionMS) == 9 && HIWORD(info->dwFileVersionLS) == 12 &&
          LOWORD(info->dwFileVersionLS) == 0;
+}
+
+std::uint16_t u16(const std::uint8_t* p);
+std::uint32_t u32(const std::uint8_t* p);
+
+bool fixed_is_1_9_12_0(const std::uint8_t* info) {
+  if (u32(info) != 0xFEEF04BD)
+    return false;
+  const auto ms = u32(info + 8);
+  const auto ls = u32(info + 12);
+  return (ms >> 16) == 1 && (ms & 0xffff) == 9 && (ls >> 16) == 12 && (ls & 0xffff) == 0;
+}
+
+// The Store package file can refuse version.dll. The loaded resource is the
+// same VS_FIXEDFILEINFO, read from the process image only.
+bool loaded_version_1_9_12_0(taxi_camera::discovery::ImageReader& reader) {
+  std::uint8_t dos[64]{};
+  if (!reader.read(0, dos, sizeof(dos)) || dos[0] != 'M' || dos[1] != 'Z')
+    return false;
+  const auto pe = u32(dos + 60);
+  std::uint8_t opt[280]{};
+  if (!reader.read(pe, opt, sizeof(opt)) || u32(opt) != 0x4550 || u16(opt + 24) != 0x20b || u32(opt + 24 + 108) < 3)
+    return false;
+  const auto root = u32(opt + 24 + 112 + 16);
+  const auto root_size = u32(opt + 24 + 112 + 20);
+  if (!root || root_size < 16 || root_size > 8 * 1024 * 1024)
+    return false;
+  const auto child = [&](std::uint32_t directory, std::uint32_t index, std::uint32_t& next, bool& data) {
+    std::uint8_t entry[8]{};
+    if (!reader.read(directory + 16 + index * 8, entry, sizeof(entry)))
+      return false;
+    const auto offset = u32(entry + 4);
+    data = (offset & 0x80000000u) == 0;
+    next = root + (offset & 0x7fffffffu);
+    return next >= root && next - root < root_size;
+  };
+  std::uint8_t header[16]{};
+  if (!reader.read(root, header, sizeof(header)))
+    return false;
+  const auto named = u16(header + 12);
+  const auto ids = u16(header + 14);
+  std::uint32_t version_dir = 0;
+  bool data = false;
+  bool found = false;
+  for (std::uint32_t index = named; index < std::uint32_t(named) + ids; ++index) {
+    std::uint8_t entry[8]{};
+    if (!reader.read(root + 16 + index * 8, entry, sizeof(entry)))
+      return false;
+    if (u32(entry) != 16)
+      continue;
+    found = child(root, index, version_dir, data);
+    break;
+  }
+  if (!found || data)
+    return false;
+  if (!reader.read(version_dir, header, sizeof(header)))
+    return false;
+  if (u16(header + 12) + u16(header + 14) == 0 || !child(version_dir, 0, version_dir, data) || data)
+    return false;
+  if (!child(version_dir, 0, version_dir, data) || !data)
+    return false;
+  std::uint8_t data_entry[16]{};
+  if (!reader.read(version_dir, data_entry, sizeof(data_entry)))
+    return false;
+  const auto blob = u32(data_entry);
+  const auto size = u32(data_entry + 4);
+  if (size < 92 || size > 65536)
+    return false;
+  std::vector<std::uint8_t> version(size);
+  if (!reader.read(blob, version.data(), version.size()))
+    return false;
+  std::uint32_t at = 6;
+  while (at + 1 < version.size() && (version[at] || version[at + 1]))
+    at += 2;
+  at = (at + 2u + 3u) & ~3u;
+  return at + 52 <= version.size() && fixed_is_1_9_12_0(version.data() + at);
 }
 
 std::uint16_t u16(const std::uint8_t* p) {
@@ -217,6 +350,7 @@ std::uint32_t scan_templates(taxi_camera::discovery::ImageReader& reader,
     }
   }
   std::vector<std::vector<BodyHit>> hits(model.code.size());
+  std::vector<std::uint32_t> overflow(model.code.size());
   unique.assign(model.code.size(), 0);
   std::uint32_t setup_rva = 0;
   std::vector<std::uint8_t> chunk(32768 + 16384);
@@ -257,6 +391,8 @@ std::uint32_t scan_templates(taxi_camera::discovery::ImageReader& reader,
               hit.diffs.push_back(n);
           if (hit.diffs.size() <= 8)
             hits[index].push_back(std::move(hit));
+          else
+            ++overflow[index];
         }
       }
       offset += count;
@@ -267,7 +403,7 @@ std::uint32_t scan_templates(taxi_camera::discovery::ImageReader& reader,
     std::uint32_t exact = 0;
     for (const auto& hit : hits[i])
       exact += hit.diffs.empty();
-    std::cout << "template " << name << " exact=" << exact << " near=" << (hits[i].size() - exact)
+    std::cout << "template " << name << " exact=" << exact << " near=" << (hits[i].size() - exact) << " overflow=" << overflow[i]
               << " bytes=" << model.code[i].bytes.size() << " operands=" << model.code[i].operands.size() << "\n";
     if (exact == 1) {
       for (const auto& hit : hits[i])
@@ -279,6 +415,24 @@ std::uint32_t scan_templates(taxi_camera::discovery::ImageReader& reader,
       for (const auto& hit : hits[i])
         if (hit.diffs.empty())
           std::cout << "  candidate rva=" << hit.rva << "\n";
+    }
+    if (exact != 1) {
+      std::uint32_t shown = 0;
+      for (const auto& hit : hits[i]) {
+        if (hit.diffs.empty() || shown >= 3)
+          continue;
+        std::vector<std::uint8_t> body(model.code[i].bytes.size());
+        if (!reader.read(hit.rva, body.data(), body.size()))
+          continue;
+        std::cout << "  mismatch rva=" << hit.rva << " diffs=" << hit.diffs.size();
+        const auto count = std::min<std::size_t>(hit.diffs.size(), 6);
+        for (std::size_t n = 0; n < count; ++n) {
+          const auto at = hit.diffs[n];
+          std::cout << " [" << at << "]=0x" << std::hex << int(body[at]) << "/0x" << int(model.code[i].bytes[at]) << std::dec;
+        }
+        std::cout << "\n";
+        ++shown;
+      }
     }
     if (exact == 0 && name == "setup_entry" && hits[i].size() == 1 && hits[i][0].diffs.size() == 1) {
       setup_rva = hits[i][0].rva;
@@ -385,9 +539,12 @@ void classify_operands(const taxi_camera::native_camera::relocatable::ContractMo
           break;
         }
       }
-      if (overlap)
+      if (overlap) {
         ++reloc_overlap;
-      else if (operand.kind == taxi_camera::native_camera::relocatable::AddressKind::pc_relative)
+        if (reloc_overlap <= 8)
+          std::cout << "  reloc_overlap symbol=" << model.symbols[model.code[i].symbol].name << " offset=" << operand.offset
+                    << " rva=" << field << "\n";
+      } else if (operand.kind == taxi_camera::native_camera::relocatable::AddressKind::pc_relative)
         ++rip;
       else if (operand.kind == taxi_camera::native_camera::relocatable::AddressKind::image_rva)
         ++image_rva;
@@ -421,10 +578,20 @@ void activation_constants(taxi_camera::discovery::ImageReader& reader, const tax
 }  // namespace
 
 int main(int argc, char** argv) {
-  if (argc != 2)
+  const char* pid_text = nullptr;
+  bool store_edition = false;
+  if (argc == 2) {
+    pid_text = argv[1];
+  } else if (argc == 3 && std::strcmp(argv[1], "store") == 0) {
+    store_edition = true;
+    pid_text = argv[2];
+  } else if (argc == 3 && std::strcmp(argv[1], "steam") == 0) {
+    pid_text = argv[2];
+  } else {
     return 2;
+  }
   char* end = nullptr;
-  const auto pid = static_cast<DWORD>(std::strtoul(argv[1], &end, 10));
+  const auto pid = static_cast<DWORD>(std::strtoul(pid_text, &end, 10));
   if (!pid || !end || *end)
     return 2;
   Handle process(OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid));
@@ -439,13 +606,23 @@ int main(int argc, char** argv) {
     return 1;
   }
   const std::wstring executable(path, path_size);
-  const bool steam =
-      executable.size() >= std::wcslen(kSteamSuffix) &&
-      CompareStringOrdinal(executable.c_str() + executable.size() - std::wcslen(kSteamSuffix), -1, kSteamSuffix, -1, TRUE) == CSTR_EQUAL;
-  const bool store = executable.find(L"WindowsApps") != std::wstring::npos;
-  std::cout << "pid=" << pid << " steam_path=" << (steam ? "yes" : "no") << " store_path=" << (store ? "yes" : "no")
-            << " version_1_9_12_0=" << (file_version_1_9_12_0(executable) ? "yes" : "no") << "\n";
-  if (!steam || store || !file_version_1_9_12_0(executable) || !same_user(process.get())) {
+  const bool steam = ends_with(executable, kSteamSuffix) || contains_text(executable, L"\\steamapps\\");
+  std::wstring package_name;
+  const auto package = store_package_executable(process.get(), package_name);
+  const bool store = !steam && ends_with(executable, kExecutableSuffix) && !package.empty() && file_ids_match(executable, package) &&
+                     contains_text(package, kStoreMarker) && contains_text(package, kStoreVersion);
+  const bool file_version = file_version_1_9_12_0(executable);
+  std::wcout << L"image_path=" << executable << L"\n";
+  std::wcout << L"package_name=" << package_name << L"\n";
+  std::wcout << L"package_path=" << package << L"\n";
+  std::cout << "pid=" << pid << " edition=" << (store_edition ? "store" : "steam") << " steam_path=" << (steam ? "yes" : "no")
+            << " store_package=" << (store ? "yes" : "no") << " file_version_1_9_12_0=" << (file_version ? "yes" : "no") << "\n";
+  WIN32_FILE_ATTRIBUTE_DATA attributes{};
+  if (GetFileAttributesExW(executable.c_str(), GetFileExInfoStandard, &attributes)) {
+    const auto file_size = (std::uint64_t(attributes.nFileSizeHigh) << 32) | attributes.nFileSizeLow;
+    std::cout << "file_size=" << file_size << "\n";
+  }
+  if (!same_user(process.get()) || (store_edition ? !store : !steam || store || !file_version)) {
     std::cout << "refused identity\n";
     return 1;
   }
@@ -472,6 +649,14 @@ int main(int argc, char** argv) {
   std::cout << "loaded_base=0x" << std::hex << reinterpret_cast<std::uintptr_t>(module) << std::dec << " timestamp=" << timestamp
             << " image_size=" << image_size << "\n";
   MainImageReader reader(process.get(), module, image_size);
+  const bool loaded_version = loaded_version_1_9_12_0(reader);
+  std::cout << "loaded_version_1_9_12_0=" << (loaded_version ? "yes" : "no") << "\n";
+  if (store_edition && !file_version && !loaded_version)
+    std::cout << "version_resource_absent package_identity=1.9.12.0\n";
+  if (!store_edition && !file_version) {
+    std::cout << "refused version\n";
+    return 1;
+  }
   taxi_camera::discovery::Limits limits;
   limits.scan_bytes = 1;
   limits.export_names = 0;
@@ -482,40 +667,49 @@ int main(int argc, char** argv) {
     return 1;
   }
   std::cout << "sections=" << image.section_count << " exception_rva=" << image.exception_rva << " exception_size=" << image.exception_size
-            << "\n";
+            << " checksum=" << image.checksum << "\n";
   bool unpacked = false;
+  bool file_compared = false;
   for (const auto& section : image.sections) {
     if (section.name == ".text" && section.size >= 16) {
       std::uint8_t live[16]{}, file[16]{};
       HANDLE file_handle = CreateFileW(executable.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
                                        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
       if (file_handle == INVALID_HANDLE_VALUE || !reader.read(section.rva, live, sizeof(live))) {
-        std::cout << "unpack_check_failed\n";
+        std::cout << "unpack_check_failed error=" << GetLastError() << "\n";
         if (file_handle != INVALID_HANDLE_VALUE)
           CloseHandle(file_handle);
-        return 1;
+        if (!store_edition)
+          return 1;
+        break;
       }
       // The packed file's first .text page is not a loaded RVA. Compare only
-      // enough to prove the process page is not the on-disk page.
+      // enough to prove the process page is not the on-disk page. Store may
+      // publish an unpacked file; the bytes below still come from the process.
       DWORD read_file = 0;
       const auto file_offset = 0x1000;
       if (!SetFilePointer(file_handle, file_offset, nullptr, FILE_BEGIN) ||
           !ReadFile(file_handle, file, sizeof(file), &read_file, nullptr) || read_file != sizeof(file)) {
         CloseHandle(file_handle);
         std::cout << "file_page_failed\n";
-        return 1;
+        if (!store_edition)
+          return 1;
+        break;
       }
       CloseHandle(file_handle);
+      file_compared = true;
       unpacked = std::memcmp(live, file, sizeof(live)) != 0;
       std::cout << "text_unpacked=" << (unpacked ? "yes" : "no") << " live0=" << std::hex << int(live[0]) << " file0=" << int(file[0])
                 << std::dec << "\n";
       break;
     }
   }
-  if (!unpacked) {
+  if (!store_edition && !unpacked) {
     std::cout << "refused packed_or_file_image\n";
     return 1;
   }
+  if (store_edition && file_compared && !unpacked)
+    std::cout << "store_file_page_matches_live\n";
   auto model = taxi_camera::native_camera::camera_release_contract::model();
   std::vector<std::uint32_t> unique;
   const auto setup_rva = scan_templates(reader, image, model, unique);
@@ -533,42 +727,63 @@ int main(int argc, char** argv) {
   classify_operands(model, unique, slots);
   live_rtti(reader, image);
   activation_constants(reader, image);
+  bool setup_ok = false;
+  bool model_matches = false;
   if (!setup_rva) {
     std::cout << "setup_entry_not_isolated\n";
-    return 1;
+  } else {
+    std::uint8_t live[7]{};
+    if (!reader.read(setup_rva + 377, live, sizeof(live))) {
+      std::cout << "setup_bytes_unreadable\n";
+    } else {
+      std::cout << "setup_live";
+      for (const auto byte : live)
+        std::cout << " " << std::hex << int(byte);
+      std::cout << std::dec << " rva=" << setup_rva << "\n";
+      setup_ok =
+          live[0] == 0x48 && live[1] == 0x8b && live[2] == 0x81 && live[3] == 0x50 && live[4] == 0x06 && live[5] == 0 && live[6] == 0;
+      if (!setup_ok)
+        std::cout << "setup_displacement_not_650\n";
+      for (const auto& code : model.code) {
+        if (model.symbols[code.symbol].name != "setup_entry" || code.bytes.size() <= 383)
+          continue;
+        model_matches = code.bytes[377] == live[0] && code.bytes[378] == live[1] && code.bytes[379] == live[2] &&
+                        code.bytes[380] == live[3] && code.bytes[381] == live[4] && code.bytes[382] == live[5] &&
+                        code.bytes[383] == live[6];
+      }
+      std::cout << "setup_model_matches_live=" << (model_matches ? "yes" : "no") << "\n";
+    }
   }
-  std::uint8_t live[7]{};
-  if (!reader.read(setup_rva + 377, live, sizeof(live))) {
-    std::cout << "setup_bytes_unreadable\n";
-    return 1;
-  }
-  std::cout << "setup_live";
-  for (const auto byte : live)
-    std::cout << " " << std::hex << int(byte);
-  std::cout << std::dec << " rva=" << setup_rva << "\n";
-  if (live[0] != 0x48 || live[1] != 0x8b || live[2] != 0x81 || live[3] != 0x50 || live[4] != 0x06 || live[5] != 0 || live[6] != 0) {
-    std::cout << "setup_displacement_not_650\n";
-    return 1;
-  }
-  bool model_matches = false;
-  for (const auto& code : model.code) {
-    if (model.symbols[code.symbol].name != "setup_entry" || code.bytes.size() <= 383)
-      continue;
-    model_matches = code.bytes[377] == live[0] && code.bytes[378] == live[1] && code.bytes[379] == live[2] && code.bytes[380] == live[3] &&
-                    code.bytes[381] == live[4] && code.bytes[382] == live[5] && code.bytes[383] == live[6];
-  }
-  std::cout << "setup_model_matches_live=" << (model_matches ? "yes" : "no") << "\n";
-  if (!model_matches)
-    return 1;
   const auto resolved = taxi_camera::native_camera::resolve_camera_contract(reader, image, reinterpret_cast<std::uint64_t>(module));
   std::cout << "contract valid=" << (resolved.valid ? "yes" : "no") << " error=" << resolved.error << " ranges=" << resolved.matched_ranges
             << " scanned=" << resolved.scanned_bytes << "\n";
-  if (!resolved.valid)
+  if (!resolved.valid || !setup_ok || !model_matches)
     return 1;
   std::cout << "bound set_fov=" << resolved.contract.functions.set_fov << " set_target=" << resolved.contract.functions.set_target
             << " set_up=" << resolved.contract.functions.set_up
             << " setup_related_mask=" << resolved.contract.layout.activation_disable_mask
             << " controller_method=" << resolved.contract.layout.aircraft_controller_method
             << " selected_method=" << resolved.contract.layout.aircraft_selected_method << "\n";
+  const auto padding = [&](const char* name, std::uint32_t rva, std::uint32_t skip) {
+    std::uint8_t bytes[4]{};
+    if (!rva || !reader.read(rva + skip, bytes, sizeof(bytes)))
+      return;
+    std::cout << name << "_padding";
+    for (const auto byte : bytes)
+      std::cout << " " << std::hex << int(byte);
+    std::cout << std::dec << "\n";
+  };
+  padding("controller", resolved.contract.layout.aircraft_controller_method, 7);
+  padding("selected", resolved.contract.layout.aircraft_selected_method, 8);
+  std::uint32_t manager = 0;
+  for (std::size_t i = 0; i < model.code.size(); ++i)
+    if (model.symbols[model.code[i].symbol].name == "manager_update")
+      manager = unique[i];
+  std::uint8_t relative[4]{};
+  if (manager && reader.read(manager + 326, relative, sizeof(relative))) {
+    const auto target = static_cast<std::uint32_t>(std::uint64_t(manager) + 330u + static_cast<std::int32_t>(u32(relative)));
+    std::cout << "code_18_from_manager_update=" << target << "\n";
+    padding("code_18", target, 19);
+  }
   return 0;
 }
