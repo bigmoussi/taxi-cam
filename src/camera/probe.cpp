@@ -90,6 +90,11 @@ struct Runtime {
   ViewReadinessWait view_wait;
   ViewRetirement retirement;
   ec::RetiredViewPool retired_views;
+  // Pooled views whose P+48 bit31 this bridge cleared. Restored before the
+  // slot is reused by a creation, or before this bridge's own native erase.
+  ClearedAaLedger cleared_aa;
+  std::uint64_t aa_restores = 0;
+  std::uint64_t aa_restore_failures = 0;
   std::array<std::uint64_t, 2> owned_pool_views{};
   std::uint64_t owned_pool_renderer{};
   ViewCreationWait creation_wait;
@@ -591,6 +596,9 @@ bool prepare_owned_view_aa(Runtime& runtime, ec::EntryId id, ec::OwnedViewSnapsh
     return false;
   }
   if (result.write_attempted) {
+    // The pooled view now carries a bridge-modified flag word. Remember the
+    // exact P so the bit is restored before the slot's next entry or erase.
+    runtime.cleared_aa.note(runtime.renderer, view.view_address);
     const auto confirmed = inspect_entry(runtime, id);
     auto expected_flags = view.flags;
     expected_flags[0] &= ~kViewAaFlag;
@@ -758,8 +766,48 @@ ec::ViewPoolSnapshot creation_pool(Runtime& runtime) {
   return pool;
 }
 
+// Before a creation can select first-free pool slots, hand back every pooled
+// view this bridge left with bit31 cleared. Only a view still present in the
+// fresh pool, currently association-free, not queued or marked for release,
+// and with its gate bit set is written; each write is reread. A view that the
+// pool no longer shows is forgotten; a refused write stays pending for retry.
+void restore_cleared_aa(Runtime& runtime, const ec::ViewPoolSnapshot& pool) {
+  if (!runtime.cleared_aa.pending())
+    return;
+  if (!pool.valid || !pool.release_checked || runtime.cleared_aa.renderer() != runtime.renderer)
+    return;
+  for (const auto view : runtime.cleared_aa.views()) {
+    if (!view)
+      continue;
+    const ec::ViewSlot* slot = nullptr;
+    for (const auto& candidate : pool.slots)
+      if (candidate.view_address == view)
+        slot = &candidate;
+    if (!slot) {
+      runtime.cleared_aa.forget(view);
+      continue;
+    }
+    if (!slot->free || slot->release_pending || slot->release_queued)
+      continue;
+    const auto result = restore_view_aa_flag(view);
+    if (result.complete) {
+      runtime.cleared_aa.forget(view);
+      if (result.write_attempted)
+        ++runtime.aa_restores;
+    } else {
+      ++runtime.aa_restore_failures;
+    }
+  }
+}
+
 bool creation_capacity(Runtime& runtime, unsigned required) {
-  const auto pool = creation_pool(runtime);
+  auto pool = creation_pool(runtime);
+  if (pool.valid && !runtime.retirement_waiting && runtime.cleared_aa.pending()) {
+    restore_cleared_aa(runtime, pool);
+    // The flag write changed pooled-view bytes the creation predicate did not
+    // observe; reread the complete pool before admitting this creation.
+    pool = creation_pool(runtime);
+  }
   const bool ready = !runtime.retirement_waiting && pool.creation_available(required);
   if (!ready) {
     runtime.retirement_waiting = true;
@@ -975,6 +1023,19 @@ bool erase(void* opaque, ec::ManagerToken token, ec::EntryId id) noexcept {
     return false;
   if (!runtime.retired_views.retain(runtime.renderer, view.view_address))
     return false;
+  // Hand the pooled view back with the flag word this bridge found. The gate
+  // is closed here by construction; a refused write leaves the ledger entry
+  // for the pool-reuse path and does not block native retirement.
+  if (runtime.cleared_aa.contains(runtime.renderer, view.view_address)) {
+    const auto restored = restore_view_aa_flag(view.view_address);
+    if (restored.complete) {
+      runtime.cleared_aa.forget(view.view_address);
+      if (restored.write_attempted)
+        ++runtime.aa_restores;
+    } else {
+      ++runtime.aa_restore_failures;
+    }
+  }
   function<void (*)(void*, std::uint64_t)>(runtime, runtime.contract.functions.erase_entry)(reinterpret_cast<void*>(token.identity), id);
   reader.reset_budget();
   entries = inspected(runtime, [&] { return ec::inspect_owned_entries(reader, token.identity, {id, 0}); });
@@ -1689,6 +1750,9 @@ void observer(void* manager) noexcept {
     report.retirement_waiting = runtime.retirement_waiting;
     report.retirement_status = runtime.retirement_status;
     report.retirement_queue_counts = runtime.retirement_queue_counts;
+    report.aa_restores = runtime.aa_restores;
+    report.aa_restore_failures = runtime.aa_restore_failures;
+    report.aa_cleared_pending = runtime.cleared_aa.pending();
     report.view_wait_count = runtime.view_wait.episodes();
     report.observer_last_ms = runtime.observer_last_ms;
     report.observer_max_ms = runtime.observer_max_ms;

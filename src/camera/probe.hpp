@@ -78,6 +78,11 @@ struct ProbeSnapshot {
   bool retirement_waiting = false;
   const char* retirement_status = "not_inspected";
   std::array<std::uint32_t, 2> retirement_queue_counts{};
+  // Pooled views whose bit31 this bridge cleared and later restored (writes
+  // performed), refused restores, and whether any such view is still pending.
+  std::uint64_t aa_restores = 0;
+  std::uint64_t aa_restore_failures = 0;
+  bool aa_cleared_pending = false;
   std::array<bool, 2> ready{};
   std::array<const char*, 2> inspection_status{"not_inspected", "not_inspected"};
   std::array<bool, 2> resource_present{};

@@ -313,6 +313,53 @@ void resolved_layout() {
     invalid.unchanged();
   }
 }
+void restore_after_clear() {
+  // Clear, then hand the pooled view back: exactly bit31 returns, P+56 and every
+  // other bit are untouched, and a second restore is a no-op without a write.
+  Fixture fixture;
+  require(nc::disable_owned_view_aa(fixture.view, fixture.image).complete, "AA disable failed before restore");
+  std::array<std::uint64_t, 2> words{};
+  std::memcpy(words.data(), fixture.view_memory + 48, 16);
+  require((words[0] & nc::kViewAaFlag) == 0 && words[1] == fixture.view.flags[1], "AA disable changed unexpected bits");
+  const auto restored = nc::restore_view_aa_flag(fixture.view.view_address);
+  require(restored.complete && restored.write_attempted && !*restored.error, "AA restore failed");
+  std::memcpy(words.data(), fixture.view_memory + 48, 16);
+  require(words == fixture.view.flags, "AA restore did not return the original flag words");
+  const auto again = nc::restore_view_aa_flag(fixture.view.view_address);
+  require(again.complete && !again.write_attempted, "A set AA bit was rewritten");
+  require(!std::memcmp(fixture.before.data(), fixture.view_memory, fixture.before.size()), "Restore modified bytes beyond bit31");
+  // An open gate (bit0 clear) refuses: only closed views are handed back.
+  Fixture open;
+  open.view.flags[0] &= ~1ull;
+  open.view.flags[0] &= ~nc::kViewAaFlag;
+  open.save();
+  const auto refused = nc::restore_view_aa_flag(open.view.view_address);
+  require(!refused.complete && !refused.write_attempted && !std::strcmp(refused.error, "aa_gate_open"), "Open gate accepted an AA restore");
+  open.unchanged();
+  // Unaligned, null and unwritable addresses refuse without a write.
+  require(!nc::restore_view_aa_flag(0).complete, "Null view restored");
+  require(!nc::restore_view_aa_flag(fixture.view.view_address + 4).complete, "Unaligned view restored");
+  Fixture readonly;
+  DWORD previous = 0;
+  require(VirtualProtect(readonly.allocation, 8192, PAGE_READONLY, &previous) != FALSE, "could not protect the AA fixture");
+  const auto unwritable = nc::restore_view_aa_flag(readonly.view.view_address);
+  require(VirtualProtect(readonly.allocation, 8192, PAGE_READWRITE, &previous) != FALSE, "could not unprotect the AA fixture");
+  require(!unwritable.complete && !unwritable.write_attempted && !std::strcmp(unwritable.error, "aa_flags_not_writable"),
+          "Read-only view accepted an AA restore");
+  // Ledger: one renderer, bounded, exact addresses, forget/pending semantics.
+  nc::ClearedAaLedger ledger;
+  require(!ledger.pending() && !ledger.note(0, 0x1000) && !ledger.note(0x2000, 0), "Empty identities entered the AA ledger");
+  require(ledger.note(0x2000, 0x1000) && ledger.note(0x2000, 0x1000) && ledger.contains(0x2000, 0x1000) && ledger.pending(),
+          "AA ledger did not record a cleared view");
+  require(!ledger.contains(0x3000, 0x1000), "AA ledger matched a different renderer");
+  for (unsigned i = 1; i < nc::ClearedAaLedger::Capacity; ++i)
+    require(ledger.note(0x2000, 0x1000 + i * 8), "AA ledger capacity was too small for a pair and its replacement");
+  require(!ledger.note(0x2000, 0x9000), "AA ledger accepted more than its capacity");
+  ledger.forget(0x1000);
+  require(!ledger.contains(0x2000, 0x1000) && ledger.pending(), "AA ledger forget removed the wrong entry");
+  require(ledger.note(0x3000, 0x4000) && !ledger.contains(0x2000, 0x1008) && ledger.contains(0x3000, 0x4000),
+          "A new renderer did not replace the AA ledger");
+}
 }  // namespace
 int main() {
   try {
@@ -323,6 +370,7 @@ int main() {
     access_changes_during_update();
     refusals();
     resolved_layout();
+    restore_after_clear();
     std::printf("View AA guard tests passed: %u checks\n", checks);
     return 0;
   } catch (const std::exception& error) {
