@@ -444,7 +444,9 @@ std::string validate_capture(const IpcSnapshot& snapshot, const Options& options
   if (!fresh(s.identity_sample_ms, GetTickCount64()) || s.active_profile != options.profile || s.detected_profile != options.profile ||
       settings.profile != options.profile)
     return "aircraft_identity_unready_or_changed";
-  if (!s.aircraft_session_epoch || settings.aircraft_session_epoch != s.aircraft_session_epoch)
+  // A bridge attached into an already loaded flight reports epoch 0 until the
+  // next session event; the companion mirrors it. Only disagreement is a mismatch.
+  if (settings.aircraft_session_epoch != s.aircraft_session_epoch)
     return "session_mismatch";
   if (s.taxi_mask != options.mask)
     return "unexpected_taxi_mask";
