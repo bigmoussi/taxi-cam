@@ -872,8 +872,7 @@ void draw_page(HDC dc) {
     const wchar_t* descriptions[]{L"Exposure compensation in EV. Your calibrated baseline is −8.8.",
                                   L"Gradually brighten the camera display as ambient light drops.",
                                   L"Additional exposure at night, from 0 to +8 EV. Default: +8 EV.",
-                                  L"Per camera, 5–60; default 10. Parked aircraft use the 5 fps floor; higher rates are capped at "
-                                  L"the aircraft's useful maximum."};
+                                  L"Per camera, 5–60; default 10. Parked aircraft use the 5 fps floor; higher rates are capped."};
     for (int i = 0; i < 4; ++i) {
       panel(dc, 244, ys[i], 766, 105);
       text(dc, names[i], 264, ys[i] + 12, 515, 29, heading);
