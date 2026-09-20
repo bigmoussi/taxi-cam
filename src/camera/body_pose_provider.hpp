@@ -59,13 +59,20 @@ std::uint64_t get_aircraft_session_epoch() noexcept;
 struct AircraftSessionReadiness {
   std::uint64_t epoch = 0;
   bool loading = false, ready = false, flow_subscribed = false;
+  // The telemetry cache was busy; this is the last complete reading (same
+  // epoch, at most ReadinessCacheMaxAgeMs old), not a fresh evaluation.
+  bool cached = false;
   std::uint32_t last_flow_event = 0;
   const char* error = "not_initialized";
 };
 // Cache-only and nonblocking. Readiness needs fresh supported aircraft identity,
 // body telemetry and public WORLD camera data; it is independent of the selected
 // profile so draining an old profile cannot prevent choosing the new one.
+// Losing the lock race against the telemetry worker returns the last complete
+// reading (cached=true) rather than "not ready": callers gate render demand on
+// this every control tick, and a one-tick refusal closes and reopens the cameras.
 AircraftSessionReadiness get_aircraft_session_readiness() noexcept;
+inline constexpr std::uint64_t ReadinessCacheMaxAgeMs = 250;
 // Native callbacks may report an actually invalid WORLD sample (not merely old
 // telemetry). This atomically gates readiness; the telemetry worker owns reset
 // and fresh-sample recovery. No SDK call, lock or wait occurs here.
@@ -155,6 +162,10 @@ bool accept_session_packet(const void* packet, std::uint32_t bytes) noexcept;
 bool session_reconnect_required(bool invalidated) noexcept;
 bool accept_camera_packet(const void* packet, std::uint32_t bytes, std::uint64_t sample_ms) noexcept;
 AircraftSessionReadiness session_readiness_at(std::uint64_t now_ms) noexcept;
+// The production nonblocking read with an explicit clock, and a way to make
+// the telemetry lock busy from the test thread (exclusive; release with false).
+AircraftSessionReadiness session_readiness_nonblocking_at(std::uint64_t now_ms) noexcept;
+void hold_telemetry_lock(bool hold) noexcept;
 void service_world_invalidation() noexcept;
 bool accept_identity_packet(const void* packet, std::uint32_t bytes, std::uint64_t sample_ms) noexcept;
 bool accept_aircraft_packet(const void* packet, std::uint32_t bytes, std::uint64_t sample_ms) noexcept;
