@@ -600,6 +600,8 @@ void tail_run(bool warp_requested, bool enhanced, bool born_render_target) {
       require(manager->before_submission(bystander.queue.p, 1, &batch) == 0, label);
       require(model(0) == before_left && model(1) == before_right, label);
     };
+    require_ignored(Boundary::InvalidationPassBegin,
+                    "PassBegin on a list that never named a published camera source prepared a global wipe");
     require_ignored(Boundary::InvalidationPassState,
                     "PassState on a list that never named a published camera source prepared a global wipe");
     require_ignored(Boundary::InvalidationUnobservedWork,
@@ -630,6 +632,7 @@ void tail_run(bool warp_requested, bool enhanced, bool born_render_target) {
       require(model(0) == before_left && model(1) == before_right, label);
       manager->successful_reset(bystander.list.p, BystanderGeneration);
     };
+    require_scoped(Boundary::InvalidationPassBegin, "PassBegin globally invalidated a recording that named one published camera source");
     require_scoped(Boundary::InvalidationPassState, "PassState globally invalidated a recording that named one published camera source");
     require_scoped(Boundary::InvalidationUnobservedWork,
                    "Unsupported command globally invalidated a recording that named one published camera source");

@@ -729,18 +729,21 @@ void SceneCaptureManager::invalidate_source_recording(ID3D12GraphicsCommandList*
   auto* item = list(native);
   if (!item || item->object_generation != generation)
     return;
-  // PassState and unsupported native commands are reported on lists that never
-  // named a published camera source. Applying that invalid recording wipes every
-  // tracked source. Ignore those reports there. A list that did name a published
-  // source loses only that source's RT evidence; unknown state is never stored
-  // as a render target. Barrier, alias, reset and observer-disabled reports
-  // still discard the recording.
+  // PassState, unsupported native commands and a PassBegin whose targets the
+  // observer could not name (the global path taken when a list has no known
+  // render targets, continuous under ReShade's D3D12 layer) are reported on
+  // lists that never named a published camera source. Applying that invalid
+  // recording wipes every tracked source. Ignore those reports there. A list
+  // that did name a published source loses only that source's RT evidence;
+  // unknown state is never stored as a render target. Barrier, alias, reset
+  // and observer-disabled reports still discard the recording.
   using namespace engine_hook::render_boundary;
   constexpr std::uint32_t limited_reasons =
       static_cast<std::uint32_t>(InvalidationPassBegin) | static_cast<std::uint32_t>(InvalidationPassState) |
       static_cast<std::uint32_t>(InvalidationSplitBarrier) | static_cast<std::uint32_t>(InvalidationAliasOrDiscard) |
       static_cast<std::uint32_t>(InvalidationUnobservedWork);
-  const bool limited = (reasons & (static_cast<std::uint32_t>(InvalidationPassState) | InvalidationUnobservedWork)) != 0 &&
+  const bool limited = (reasons & (static_cast<std::uint32_t>(InvalidationPassBegin) | static_cast<std::uint32_t>(InvalidationPassState) |
+                                   InvalidationUnobservedWork)) != 0 &&
                        (reasons & ~limited_reasons) == 0;
   if (limited) {
     const auto& recording = item->source_effects;
