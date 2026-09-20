@@ -214,6 +214,32 @@ void retained_rt_rearm_after_aa_wipe() {
   require(tracker.rearm_retained_rt() == 0, "stale generation retained RT leaked");
 }
 
+void pass_other_keeps_retained_rt() {
+  Tracker tracker;
+  require(tracker.register_source(nose, Model::legacy_rt) && tracker.register_source(tail, Model::enhanced_rt),
+          "pass_other pair registration refused");
+  require(tracker.apply(record({{nose, Kind::legacy_rt}, {nose, Kind::draw}, {tail, Kind::enhanced_rt}, {tail, Kind::draw}})),
+          "pass_other RT setup refused");
+  require(tracker.apply(record({{nose, Kind::pass_other}})), "PassState retirement refused");
+  state_is(tracker, nose, Model::other, false);
+  state_is(tracker, tail, Model::enhanced_rt, true);
+  require(tracker.rearm_retained_rt() == 1, "PassState other cleared retained_rt");
+  state_is(tracker, nose, Model::legacy_rt, false);
+  state_is(tracker, tail, Model::enhanced_rt, true);
+  require(tracker.apply(record({{nose, Kind::draw}})), "draw after PassState rearm refused");
+  state_is(tracker, nose, Model::legacy_rt, true);
+}
+
+void barrier_other_clears_retained_rt() {
+  Tracker tracker;
+  require(tracker.register_source(nose, Model::legacy_rt), "barrier other registration refused");
+  require(tracker.apply(record({{nose, Kind::legacy_rt}, {nose, Kind::draw}})), "barrier other RT setup refused");
+  require(tracker.apply(record({{nose, Kind::other}})), "barrier-style leave-RT refused");
+  state_is(tracker, nose, Model::other, false);
+  require(tracker.rearm_retained_rt() == 0, "barrier/alias/reset other kept retained_rt");
+  state_is(tracker, nose, Model::other, false);
+}
+
 void recording_bounds() {
   Recording log;
   for (unsigned i = 0; i < 10000; ++i)
@@ -275,13 +301,13 @@ void interleaved_draw_compression() {
     Recording raw, compressed;
     for (unsigned step = 0; step < 64; ++step) {
       random = random * 1664525u + 1013904223u;
-      const Effect effect{{(random >> 16) % 4 + 1, (random >> 8) % 7 == 0 ? 8u : 7u}, static_cast<Kind>((random >> 24) % 4)};
+      const Effect effect{{(random >> 16) % 4 + 1, (random >> 8) % 7 == 0 ? 8u : 7u}, static_cast<Kind>((random >> 24) % 5)};
       raw.effects[raw.count++] = effect;
       require(compressed.append(effect), "bounded random recording refused");
       Tracker original, deduplicated;
       for (std::uint64_t key = 1; key <= 4; ++key) {
         require(original.register_source({key, 7}) && deduplicated.register_source({key, 7}), "equivalence source refused");
-        const auto initial = record({{{key, 7}, static_cast<Kind>(scenario % 4)}});
+        const auto initial = record({{{key, 7}, static_cast<Kind>(scenario % 5)}});
         require(original.apply(initial) && deduplicated.apply(initial), "initial equivalence state refused");
       }
       for (unsigned replay = 0; replay < 2; ++replay) {
@@ -328,6 +354,8 @@ int main() {
   registration_generations();
   invalidation();
   retained_rt_rearm_after_aa_wipe();
+  pass_other_keeps_retained_rt();
+  barrier_other_clears_retained_rt();
   recording_bounds();
   interleaved_draw_compression();
   source_bounds();

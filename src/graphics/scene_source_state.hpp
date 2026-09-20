@@ -15,7 +15,11 @@ struct Key {
   bool operator==(const Key&) const = default;
 };
 struct Effect {
-  enum class Kind { legacy_rt, enhanced_rt, other, draw };
+  // other: leave RT and clear retained history (barrier/alias/reset/observer-disabled).
+  // pass_other: leave the live model without clearing retained_rt (PassState/PassBegin/
+  // unsupported-work reports that named a published source). Encoded in Kind so apply()
+  // does not guess from ambient state.
+  enum class Kind { legacy_rt, enhanced_rt, other, pass_other, draw };
   Key key;
   Kind kind = Kind::other;
   bool operator==(const Effect&) const = default;

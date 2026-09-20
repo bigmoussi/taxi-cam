@@ -635,7 +635,7 @@ void tail_run(bool warp_requested, bool enhanced, bool born_render_target) {
       for (std::size_t index = 0; index < untouched->source_effects.count; ++index) {
         const auto& effect = untouched->source_effects.effects[index];
         retired |= effect.key.handle == reinterpret_cast<std::uint64_t>(sources[0].p) &&
-                   effect.kind == taxi_camera::source_state::Effect::Kind::other;
+                   effect.kind == taxi_camera::source_state::Effect::Kind::pass_other;
       }
       require(retired, label);
       require(model(0) == before_left && model(1) == before_right, label);
