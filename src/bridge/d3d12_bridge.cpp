@@ -3092,12 +3092,18 @@ void drain_deferred_lifecycle(Registry& r) {
     r.pfd_inventory_complete = false;
   }
   DeferredSourceCandidate candidate;
+  std::array<DeferredSourceCandidate, 8> retry{};
+  unsigned retries = 0;
   while (r.deferred_sources.pop(candidate)) {
     const auto found = r.resources.find(candidate.native);
     if (found == r.resources.end() || !found->second->alive || found->second->id != candidate.id)
       continue;  // Retired since; its tombstone already reached the manager.
-    runtime::manager().register_source_candidate(r.key, candidate.native, candidate.id, found->second->desc, candidate.initial);
+    if (!runtime::manager().register_source_candidate(r.key, candidate.native, candidate.id, found->second->desc, candidate.initial) &&
+        SceneCaptureManager::last_call_contended() && retries < retry.size())
+      retry[retries++] = candidate;  // The manager was busy even for the worker's budget; next pass.
   }
+  for (unsigned i = 0; i < retries; ++i)
+    r.deferred_sources.push(retry[i]);
   if (r.deferred_sources.take_overflow())
     r.pfd_inventory_complete = false;
   if (r.views_stale.exchange(false, std::memory_order_acq_rel)) {
