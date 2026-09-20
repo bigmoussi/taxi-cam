@@ -4,6 +4,7 @@
 #include "../camera/aircraft_identity.hpp"
 #include <dwmapi.h>
 #include <shellapi.h>
+#include <shobjidl.h>
 #include <uxtheme.h>
 #include <atomic>
 #include <cwchar>
@@ -782,16 +783,49 @@ void tray(bool add) {
     Shell_NotifyIconW(NIM_SETVERSION, &data);
   }
 }
-void update_balloon() {
-  NOTIFYICONDATAW data{};
+// NIM_MODIFY balloons need the icon still registered (NIM_ADD already done) and,
+// under NOTIFYICON_VERSION_4 on Windows 10/11, a process AppUserModelID so the
+// shell can deliver a toast instead of silently dropping the legacy balloon.
+void fill_tray_identity(NOTIFYICONDATAW& data) {
   data.cbSize = sizeof(data);
   data.hWnd = window;
   data.uID = 1;
-  data.uFlags = NIF_INFO;
-  data.dwInfoFlags = NIIF_INFO | NIIF_RESPECT_QUIET_TIME;
-  wcscpy_s(data.szInfoTitle, L"Taxi Cam update downloaded");
-  wcscpy_s(data.szInfo, L"Close Microsoft Flight Simulator, then use Check for updates in the tray menu to install.");
+  data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_INFO;
+  data.uCallbackMessage = TrayMessage;
+  data.hIcon = icon;
+}
+void surface_notification(const std::wstring& body, bool alert) {
+  if (body.empty())
+    return;
+  NOTIFYICONDATAW data{};
+  fill_tray_identity(data);
+  // Never NIIF_RESPECT_QUIET_TIME: Focus Assist "when I'm playing a game" (and
+  // Quiet Hours) suppress those banners while MSFS is fullscreen — exactly when
+  // bridge events matter. Shell_NotifyIcon still returns success when suppressed.
+  data.dwInfoFlags = alert ? NIIF_WARNING : NIIF_INFO;
+  wcscpy_s(data.szInfoTitle, L"Taxi Cam");
+  wcscpy_s(data.szInfo, body.c_str());
+  std::wstring tip = body;
+  if (tip.size() >= 128)
+    tip.resize(127);
+  for (auto& ch : tip)
+    if (ch == L'\n')
+      ch = L' ';
+  wcscpy_s(data.szTip, tip.c_str());
   Shell_NotifyIconW(NIM_MODIFY, &data);
+  // Fallback when the OS still hides the banner (Focus Assist priority, per-app
+  // toast mute on a generated AUMID, full-screen cover): status line + taskbar flash.
+  notice = body;
+  if (window) {
+    FLASHWINFO flash{sizeof(flash), window, FLASHW_TRAY | FLASHW_TIMERNOFG, 4, 0};
+    FlashWindowEx(&flash);
+    InvalidateRect(window, nullptr, FALSE);
+  }
+}
+void update_balloon() {
+  surface_notification(
+      L"Update downloaded. Close Microsoft Flight Simulator, then use Check for updates in the tray menu to install.",
+      false);
 }
 // Bridge events as tray notifications. Events from one sample share a balloon
 // while they fit; a later balloon replaces an earlier one on screen, and the
@@ -804,21 +838,14 @@ void show_notifications() {
   }
   if (events.empty() || preview_ui)
     return;
-  NOTIFYICONDATAW data{};
-  data.cbSize = sizeof(data);
-  data.hWnd = window;
-  data.uID = 1;
-  data.uFlags = NIF_INFO;
-  wcscpy_s(data.szInfoTitle, L"Taxi Cam");
-  constexpr std::size_t capacity = sizeof(data.szInfo) / sizeof(data.szInfo[0]) - 1;
+  NOTIFYICONDATAW sizing{};
+  constexpr std::size_t capacity = sizeof(sizing.szInfo) / sizeof(sizing.szInfo[0]) - 1;
   std::wstring body;
   bool alert = false;
   const auto flush = [&] {
     if (body.empty())
       return;
-    data.dwInfoFlags = (alert ? NIIF_WARNING : NIIF_INFO) | NIIF_RESPECT_QUIET_TIME;
-    wcscpy_s(data.szInfo, body.c_str());
-    Shell_NotifyIconW(NIM_MODIFY, &data);
+    surface_notification(body, alert);
     body.clear();
     alert = false;
   };
@@ -1840,6 +1867,10 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
 }  // namespace
 int WINAPI wWinMain(HINSTANCE app, HINSTANCE, LPWSTR, int) {
   instance = app;
+  // Required for NOTIFYICON_VERSION_4 tray toasts on Windows 10/11. Without an
+  // explicit AppUserModelID the shell assigns a generated one and often drops
+  // NIF_INFO balloons (or stores them under a muteable NotifyIconGeneratedAumid).
+  SetCurrentProcessExplicitAppUserModelID(L"TaxiCam.Companion");
   SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
   int argc{};
   auto** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
