@@ -73,6 +73,9 @@ class SceneCaptureManager {
     std::uint64_t source_candidates = 0, source_draws = 0, tail_submissions = 0, tail_captures = 0;
     const char* tail_status = "not_started";
     std::uint64_t unknown_submitted_lists = 0, invalid_source_recordings = 0, scoped_source_invalidations = 0;
+    // Limited global reports (PassBegin, PassState, unsupported work) on a list
+    // that never named a published camera source; nothing was retired.
+    std::uint64_t ignored_source_recordings = 0;
     std::uint64_t invalid_draws = 0, source_lease_failures = 0, global_aliases = 0, recording_overflows = 0;
     std::uint32_t last_invalidation_reasons = 0;
     // Simulator-thread waits that hit their budget and skipped. evidence: barrier,

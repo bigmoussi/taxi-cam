@@ -761,8 +761,11 @@ void SceneCaptureManager::invalidate_source_recording(ID3D12GraphicsCommandList*
         if (!seen)
           published[published_count++] = key;
       }
-      if (!published_count)
+      if (!published_count) {
+        ++stats_.ignored_source_recordings;
+        stats_.last_invalidation_reasons = reasons;
         return;
+      }
       if (!recording.invalid) {
         for (std::size_t index = 0; index < published_count; ++index)
           item->source_effects.append({published[index], source_state::Effect::Kind::other});

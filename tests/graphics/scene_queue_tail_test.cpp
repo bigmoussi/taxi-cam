@@ -593,9 +593,13 @@ void tail_run(bool warp_requested, bool enhanced, bool born_render_target) {
             "Register list that never observed published camera sources");
     auto* untouched = manager->list(bystander.list.p);
     require(untouched, "Bystander recording missing");
+    const auto ignored_before = manager->statistics().ignored_source_recordings;
     const auto require_ignored = [&](std::uint32_t reasons, const char* label) {
+      const auto ignored = manager->statistics().ignored_source_recordings;
       manager->invalidate_source_recording(bystander.list.p, BystanderGeneration, true, reasons);
       require(!untouched->source_effects.invalid && !untouched->source_touched, label);
+      require(manager->statistics().ignored_source_recordings == ignored + 1, "Ignored limited report was not counted");
+      require(manager->statistics().last_invalidation_reasons == reasons, "Ignored limited report did not record its reasons");
       ID3D12CommandList* batch = bystander.list.p;
       require(manager->before_submission(bystander.queue.p, 1, &batch) == 0, label);
       require(model(0) == before_left && model(1) == before_right, label);
@@ -609,6 +613,11 @@ void tail_run(bool warp_requested, bool enhanced, bool born_render_target) {
     manager->invalidate_source_recording(bystander.list.p, BystanderGeneration, true, Boundary::InvalidationBarrierBatch);
     require(untouched->source_effects.invalid && untouched->source_touched,
             "Barrier invalidation no longer discards an uncertain recording");
+    manager->successful_reset(bystander.list.p, BystanderGeneration);
+    manager->invalidate_source_recording(bystander.list.p, BystanderGeneration, true,
+                                         Boundary::InvalidationPassBegin | Boundary::InvalidationObserverDisabled);
+    require(untouched->source_effects.invalid && untouched->source_touched, "Observer-disabled PassBegin no longer discards the recording");
+    require(manager->statistics().ignored_source_recordings == ignored_before + 3, "Discarding reports were counted as ignored");
     manager->successful_reset(bystander.list.p, BystanderGeneration);
     manager->invalidate_source_recording(bystander.list.p, BystanderGeneration, true,
                                          Boundary::InvalidationUnobservedWork | Boundary::InvalidationResetFailed);

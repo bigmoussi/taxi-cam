@@ -185,6 +185,9 @@ struct Registry {
   UINT rtv_stride{}, dsv_stride{};
   std::atomic<bool> ready{};
   std::atomic<std::uint64_t> failures{}, draws{}, clear_states{};
+  // PassBegin reports that reached the manager's global path: the pass bound
+  // no RTV, or bound RTVs the bridge could not resolve to tracked resources.
+  std::atomic<std::uint64_t> pass_no_targets{}, pass_unresolved_targets{};
   std::atomic<const char*> error{"not_started"};
   std::unordered_map<ID3D12Resource*, std::shared_ptr<Resource>> resources;
   std::unordered_map<ID3D12RootSignature*, std::shared_ptr<Root>> roots;
@@ -1229,6 +1232,16 @@ void invalidate(void*, ID3D12GraphicsCommandList* native, std::uint64_t id, std:
       runtime::manager().invalidate_source_targets(native, id, count, targets.data(), generations.data());
       return;
     }
+  }
+  // A scoped pass falls through to the global report either because it bound
+  // no render target at all or because none of its RTV handles mapped to a
+  // tracked resource. The manager treats both as limited; count them apart so
+  // the log shows which one a layer such as ReShade produces.
+  if (scoped && (reasons & boundary::InvalidationPassBegin)) {
+    if (list->count)
+      ++registry().pass_unresolved_targets;
+    else
+      ++registry().pass_no_targets;
   }
   runtime::manager().invalidate_source_recording(native, id, true, reasons);
 }
@@ -3008,6 +3021,8 @@ GraphicsStatus graphics_status() noexcept {
   result.deferred_lifecycle = r.deferred_lifecycle.load(std::memory_order_relaxed);
   result.admission_halted = r.admission_halted.load(std::memory_order_acquire);
   result.failure_rate_peak = r.failure_rate_peak.load(std::memory_order_relaxed);
+  result.pass_no_targets = r.pass_no_targets.load(std::memory_order_relaxed);
+  result.pass_unresolved_targets = r.pass_unresolved_targets.load(std::memory_order_relaxed);
   result.armed = r.armed.load(std::memory_order_acquire);
   result.frame_pulse = frame_pulse();
   const auto queues = queue_hook::total_statistics();

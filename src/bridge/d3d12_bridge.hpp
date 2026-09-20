@@ -142,6 +142,9 @@ struct GraphicsStatus {
   // one-second count seen.
   bool admission_halted{};
   std::uint64_t failure_rate_peak{};
+  // PassBegin reports the bridge could not scope to tracked render targets and
+  // therefore forwarded as global: the pass bound no RTV, or RTVs unresolved.
+  std::uint64_t pass_no_targets{}, pass_unresolved_targets{};
   bool armed{};
   std::uint64_t frame_pulse{};
   std::uint64_t queue_calls{}, queue_contended{};
