@@ -82,6 +82,9 @@ class SceneCaptureManager {
     // or a closed gate. deferred_retirements: Reset/destroy retired later.
     std::uint64_t contended_evidence = 0, contended_lifecycle = 0, contended_submissions = 0;
     std::uint64_t unordered_submissions = 0, deferred_retirements = 0, gated_submissions = 0;
+    // Consumer recordings forwarded without ordering by a bounded escape: the
+    // source model was invalidated and the device kept, unlike a contended escape.
+    std::uint64_t unordered_consumers = 0;
   };
 
   explicit SceneCaptureManager(SceneHandoff& handoff) noexcept;
@@ -361,8 +364,12 @@ class SceneCaptureManager {
   void publish_list(const List&) noexcept;
   void touch_sources(List&) noexcept;
   std::uint32_t queue_devices(ID3D12CommandQueue*) const noexcept;
-  UnobservedBatch classify_unobserved(ID3D12CommandQueue*, UINT, ID3D12CommandList* const*, bool mark_owned = false) noexcept;
-  void apply_recording_refusal(std::uint32_t effects) noexcept;
+  UnobservedBatch classify_unobserved(ID3D12CommandQueue*,
+                                      UINT,
+                                      ID3D12CommandList* const*,
+                                      bool mark_owned = false,
+                                      bool bounded = false) noexcept;
+  void apply_recording_refusal(std::uint32_t effects, bool fatal) noexcept;
   void apply_deferred() noexcept;
   void apply_source_draw(List&, source_state::Key, bool allowed) noexcept;
   static void release_source_leases(std::array<SourceLease, source_state::Tracker::capacity>&, std::size_t&) noexcept;

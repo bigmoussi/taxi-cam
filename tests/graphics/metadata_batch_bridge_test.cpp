@@ -775,10 +775,79 @@ void unbound_clear_suffix_checks() {
   r.ready = old_ready;
 }
 }  // namespace
+// Regression for the 0.9.34 rollup: a find_list whose registry lookup expired
+// must not let ensure_list admit a duplicate of a live list, and a sustained
+// failure rate must halt admission instead of retrying on every command.
+void contended_admission_checks() {
+  namespace win = taxi_camera::standalone;
+  auto& r = win::registry();
+  auto* native = reinterpret_cast<ID3D12GraphicsCommandList*>(0x8000);
+  auto item = std::make_shared<win::List>();
+  item->native = native;
+  item->id = 80;
+  item->ready = true;
+  item->observation_epoch = r.observation_epoch.load();
+  r.lists[native] = item;
+  r.ready = true;
+  win::set_graphics_observation_demand(true);
+  win::known_lists = {};
+  const auto lists_before = r.lists.size();
+  const auto failures_before = r.failures.load();
+  const auto contended_before = r.contention[static_cast<unsigned>(win::ContentionSite::registry_recording)].load();
+  std::atomic<bool> release{false}, held{false};
+  std::thread owner([&] {
+    const std::lock_guard guard(r.mutex);
+    held.store(true, std::memory_order_release);
+    while (!release.load(std::memory_order_acquire))
+      SwitchToThread();
+  });
+  while (!held.load(std::memory_order_acquire))
+    SwitchToThread();
+  require(!win::find_list(native) && win::lookup_contended, "Contended lookup did not report contention");
+  require(r.contention[static_cast<unsigned>(win::ContentionSite::registry_recording)] == contended_before + 1,
+          "Contended lookup was not counted");
+  // ensure_list must return empty without touching the registry or creating anything.
+  const auto admitted = win::ensure_list(native);
+  require(!admitted, "ensure_list admitted a list on a contended lookup");
+  // The production hook path: forwards once, no admission, no failure.
+  PipelineHook::invoke(forward_pipeline, native, nullptr);
+  release.store(true, std::memory_order_release);
+  owner.join();
+  require(r.lists.size() == lists_before && r.lists[native] == item && item->alive,
+          "Contended admission replaced or duplicated a live list");
+  require(r.failures == failures_before && !r.admission_halted, "Contended admission counted a hook failure");
+  // With the registry free, the same lookup succeeds and the missed observation
+  // invalidates only that recording.
+  require(win::find_list(native) == item && !win::lookup_contended, "Uncontended lookup did not recover the live list");
+  require(win::ensure_list(native) == item && r.lists.size() == lists_before && r.failures == failures_before,
+          "ensure_list did not return the live list once the lookup succeeded");
+
+  // Failure storm: sustained error() calls halt admission and disarm once.
+  require(win::graphics_armed(), "Registry not armed before the storm check");
+  const auto peak_before = r.failure_rate_peak.load();
+  for (unsigned i = 0; i + 1 < win::Registry::FailureStormPerSecond; ++i)
+    win::error("test_failure");
+  require(!r.admission_halted && win::graphics_armed(), "Admission halted below the storm rate");
+  win::error("test_failure");
+  require(r.admission_halted && !win::graphics_armed() && !win::runtime::manager().submission_gate_open(),
+          "A failure storm did not halt admission and disarm");
+  require(r.failure_rate_peak >= peak_before + win::Registry::FailureStormPerSecond, "Storm peak not recorded");
+  require(!win::ensure_list(reinterpret_cast<ID3D12GraphicsCommandList*>(0x8100)), "Halted registry still admits lists");
+  win::set_graphics_armed(true);
+  require(!win::graphics_armed(), "Re-arming a halted registry succeeded");
+  // Restore the fixture for the remaining checks.
+  r.admission_halted = false;
+  win::set_graphics_armed(true);
+  r.lists.erase(native);
+  win::known_lists = {};
+  pipeline_forwards = 0;
+}
+
 int main() {
   namespace win = taxi_camera::standalone;
   namespace boundary = taxi_camera::engine_hook::render_boundary;
   try {
+    contended_admission_checks();
     state_reentry_checks();
     descriptor_identity_checks();
     submission_close_endpoint_checks();

@@ -155,7 +155,16 @@ void run() {
   held_lock(known, false, true);
   recording.packets = 0;
   require(!queue.signals && !queue.waits, "An escaped capture batch queued a timeline operation");
+  // A consumer recording escaped by OUR expired budget keeps the device: the
+  // source model is invalidated and counted, unlike a helper-contended escape.
   recording.consumer = true;
+  held_lock(known, false, true);
+  manager->apply_deferred();
+  require(!owner.failed && manager->statistics().unordered_consumers == 1,
+          "A budget-expiry escape of a consumer recording failed the device for the session");
+  require(owner.source_states.state(source).model == taxi_camera::source_state::Model::unknown,
+          "A budget-expiry consumer escape must still invalidate the source model");
+  require(owner.source_states.rearm_retained_rt() == 1, "Restore source fixture after the consumer escape");
   ordered(known, true);
   recording.consumer = false;
   recording.source_touched = true;

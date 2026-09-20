@@ -177,6 +177,41 @@ void watchdog() {
     now += 250;
     require(!dog.observe(sample(now, pulse, frames)).recover, "Interrupted progress recovered the watchdog");
   }
+  // Hooked presentation goes quiet while SIM_FRAME keeps flowing (flight reload,
+  // or a renderer path we do not hook): noted once, never a trip.
+  FreezeWatchdog reload;
+  now = 50000;
+  std::uint64_t reload_pulse = 100, reload_frames = 1000;
+  for (unsigned i = 0; i < 8; ++i) {
+    now += 250;
+    reload.observe(sample(now, ++reload_pulse, ++reload_frames));
+  }
+  unsigned quiet_notes = 0;
+  for (unsigned i = 0; i < 80; ++i) {
+    now += 250;
+    const auto decision = reload.observe(sample(now, reload_pulse, ++reload_frames));
+    require(!decision.trip, "Quiet hooks with live SIM_FRAME tripped the watchdog (flight-reload false positive)");
+    quiet_notes += decision.presentation_stall_noted;
+  }
+  require(quiet_notes == 1 && !reload.tripped(), "Quiet presentation was not noted exactly once");
+  // When SIM_FRAME then stops too, the trip follows within the stall bound.
+  bool reload_trip = false;
+  for (unsigned i = 0; i < 14; ++i) {
+    now += 250;
+    reload_trip |= reload.observe(sample(now, reload_pulse, reload_frames)).trip;
+  }
+  require(reload_trip, "Both counters stalled without a trip");
+  // Telemetry that never flowed cannot veto a presentation stall.
+  FreezeWatchdog untelemetered;
+  now = 70000;
+  bool no_telemetry_trip = false;
+  for (unsigned i = 0; i < 16; ++i) {
+    now += 250;
+    auto value = sample(now, 9, 0);
+    value.sim_frames_expected = false;
+    no_telemetry_trip |= untelemetered.observe(value).trip;
+  }
+  require(no_telemetry_trip, "A presentation stall without any telemetry did not trip");
   // Disarmed bridge: stalls are ignored and timers restart on re-arm.
   FreezeWatchdog idle;
   for (unsigned i = 0; i < 40; ++i) {

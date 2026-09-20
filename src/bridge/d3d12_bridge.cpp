@@ -171,6 +171,12 @@ struct Registry {
   // A Close skipped recording a display's settled state; carried covers must
   // not trust settled_state until discover_pfds resets every settlement.
   std::atomic<bool> settlement_stale{};
+  // Registration/observation failures are rare and self-limiting; a sustained
+  // rate means a hook is retrying the same failure on every command. Halt
+  // admission and disarm for the rest of the process instead of spinning.
+  static constexpr std::uint64_t FailureStormPerSecond = 100;
+  std::atomic<std::uint64_t> failure_window_ms{}, failure_window_count{}, failure_rate_peak{};
+  std::atomic<bool> admission_halted{};
   // Watchdog gate. False makes every hook idle and every PFD plan not_ready.
   std::atomic<bool> armed{true};
   std::atomic<std::uint64_t> frame_pulse{};
@@ -484,10 +490,29 @@ bool attach(ID3D12Object* object, const std::shared_ptr<Metadata>& metadata) {
   lifetime->Release();
   return SUCCEEDED(hr);
 }
+void halt_admission(Registry& r) noexcept {
+  // Atomic stores only: this can run on a render thread. The worker logs it.
+  if (r.admission_halted.exchange(true, std::memory_order_acq_rel))
+    return;
+  r.armed.store(false, std::memory_order_release);
+  runtime::manager().set_submission_gate(false);
+}
 void error(const char* value) noexcept {
   auto& r = registry();
   ++r.failures;
   r.error.store(value, std::memory_order_release);
+  const auto now = GetTickCount64();
+  auto window = r.failure_window_ms.load(std::memory_order_acquire);
+  if (!window || now - window >= 1000) {
+    if (r.failure_window_ms.compare_exchange_strong(window, now, std::memory_order_acq_rel))
+      r.failure_window_count.store(0, std::memory_order_release);
+  }
+  const auto count = r.failure_window_count.fetch_add(1, std::memory_order_acq_rel) + 1;
+  auto peak = r.failure_rate_peak.load(std::memory_order_relaxed);
+  while (count > peak && !r.failure_rate_peak.compare_exchange_weak(peak, count, std::memory_order_relaxed)) {
+  }
+  if (count >= Registry::FailureStormPerSecond)
+    halt_admission(r);
 }
 template <class F>
 void observe_safely(F&& action) noexcept {
@@ -889,6 +914,9 @@ struct ContendedLists {
   }
 };
 thread_local ContendedLists contended_lists;
+// True after a find_list whose registry lookup expired: the null result says
+// nothing about whether the list is known. Admission must not act on it.
+thread_local bool lookup_contended = false;
 void invalidate_contended_recording(List& list) noexcept {
   list.graphics.invalidate("registry_contended");
   list.copy_proof.invalidate();
@@ -907,6 +935,7 @@ std::shared_ptr<List> find_list(ID3D12GraphicsCommandList* p) {
   ++metadata_lookup_calls;
 #endif
   auto& r = registry();
+  lookup_contended = false;
   const bool diagnostics = r.diagnostics_enabled.load(std::memory_order_relaxed);
   if (diagnostics)
     r.list_lookup_calls.fetch_add(1, std::memory_order_relaxed);
@@ -927,6 +956,7 @@ std::shared_ptr<List> find_list(ID3D12GraphicsCommandList* p) {
     const RegistryLock lock(r, wait_budget::recording_us, ContentionSite::registry_recording);
     if (!lock) {
       contended_lists.remember(p);
+      lookup_contended = true;
       return nullptr;
     }
     const auto it = r.lists.find(p);
@@ -1591,10 +1621,18 @@ const boundary::Callbacks Boundaries{nullptr,
 std::shared_ptr<List> ensure_list(ID3D12GraphicsCommandList* native, bool observed = false) {
   if (auto existing = find_list(native))
     return existing;
+  // An expired lookup is not evidence that the list is unknown. Admitting it
+  // here would replace a live registration with a duplicate the boundary and
+  // capture manager both refuse, and every later hook would retry that.
+  if (lookup_contended)
+    return {};
   auto& r = registry();
+  if (r.admission_halted.load(std::memory_order_acquire))
+    return {};  // Failure storm: no more admission attempts this process.
   // New-list admission on the creating or first-recording thread. A list left
   // unknown here is admitted on its next hook; until then it is unobserved.
-  const BoundedLock observation_lock(r.observation_mutex, wait_budget::lifecycle_us,
+  // Same per-command budget as every other recording hook: never 5 ms here.
+  const BoundedLock observation_lock(r.observation_mutex, wait_budget::recording_us,
                                      &r.contention[static_cast<unsigned>(ContentionSite::observation_recording)]);
   if (!observation_lock)
     return {};
@@ -1602,9 +1640,16 @@ std::shared_ptr<List> ensure_list(ID3D12GraphicsCommandList* native, bool observ
     return {};
   std::shared_ptr<List> item;
   {
-    const RegistryLock lock(r, wait_budget::lifecycle_us, ContentionSite::registry_lifecycle);
+    const RegistryLock lock(r, wait_budget::recording_us, ContentionSite::registry_lifecycle);
     if (!lock)
       return {};
+    // The locked lookup is authoritative: a live entry is the list; a retired
+    // one leaves before its replacement so no duplicate can ever coexist.
+    if (const auto found = r.lists.find(native); found != r.lists.end()) {
+      if (found->second->alive.load(std::memory_order_acquire))
+        return found->second;
+      r.lists.erase(found);
+    }
     if (r.lists.size() >= 4096 || r.next_id == UINT64_MAX) {
       error("command_list_capacity");
       return {};
@@ -2888,8 +2933,14 @@ std::uint64_t frame_pulse() noexcept {
   return registry().frame_pulse.load(std::memory_order_relaxed) + queue_hook::total_statistics().calls;
 }
 void set_graphics_armed(bool armed) noexcept {
-  registry().armed.store(armed, std::memory_order_release);
-  runtime::manager().set_submission_gate(armed);
+  // A halted registry stays disarmed for the process; the watchdog's recovery
+  // must not re-open it.
+  const bool open = armed && !registry().admission_halted.load(std::memory_order_acquire);
+  registry().armed.store(open, std::memory_order_release);
+  runtime::manager().set_submission_gate(open);
+}
+bool graphics_admission_halted() noexcept {
+  return registry().admission_halted.load(std::memory_order_acquire);
 }
 bool graphics_armed() noexcept {
   return registry().armed.load(std::memory_order_acquire);
@@ -2955,6 +3006,8 @@ GraphicsStatus graphics_status() noexcept {
   for (unsigned i = 0; i < result.contention.size(); ++i)
     result.contention[i] = r.contention[i].load(std::memory_order_relaxed);
   result.deferred_lifecycle = r.deferred_lifecycle.load(std::memory_order_relaxed);
+  result.admission_halted = r.admission_halted.load(std::memory_order_acquire);
+  result.failure_rate_peak = r.failure_rate_peak.load(std::memory_order_relaxed);
   result.armed = r.armed.load(std::memory_order_acquire);
   result.frame_pulse = frame_pulse();
   const auto queues = queue_hook::total_statistics();

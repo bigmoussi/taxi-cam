@@ -137,6 +137,11 @@ struct GraphicsStatus {
   // Deferred lifecycle work drained by discover_pfds after a simulator thread
   // could not take its lock: source candidates and handoff retirements.
   std::uint64_t deferred_lifecycle{};
+  // Registration failures exceeded FailureStormPerSecond: admission halted and
+  // the bridge disarmed for this process. failure_rate_peak is the worst
+  // one-second count seen.
+  bool admission_halted{};
+  std::uint64_t failure_rate_peak{};
   bool armed{};
   std::uint64_t frame_pulse{};
   std::uint64_t queue_calls{}, queue_contended{};
@@ -162,6 +167,9 @@ std::uint64_t frame_pulse() noexcept;
 // An atomic store; never waits and never touches a GPU resource.
 void set_graphics_armed(bool armed) noexcept;
 bool graphics_armed() noexcept;
+// True once hook registration failures exceeded the storm rate; the bridge
+// stays disarmed for the rest of the simulator process.
+bool graphics_admission_halted() noexcept;
 std::vector<PfdTargetObservation> pfd_inventory();
 // Control-thread only. Turns off late-attach barrier/copy/OM extras after the
 // profile's complete display set has distinct RTV associations, or after a short empty-list timeout. A filled

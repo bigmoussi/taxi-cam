@@ -93,7 +93,8 @@ void log_contention(const win::Status& status, const win::GraphicsStatus& graphi
       detail, sizeof(detail),
       "Render-thread contention: armed=%u pulse=%llu queue_calls=%llu queue_contended=%llu manager_evidence=%llu "
       "manager_lifecycle=%llu manager_submit=%llu unordered=%llu gated=%llu deferred_retirements=%llu deferred_lifecycle=%llu "
-      "runtime_writes=%llu watchdog_trips=%u last_stall_ms=%llu sim_messages=%u/%llu/%llu/%llu/%llu",
+      "runtime_writes=%llu watchdog_trips=%u last_stall_ms=%llu sim_messages=%u/%llu/%llu/%llu/%llu hook_failures=%llu "
+      "failure_rate_peak=%llu admission_halted=%u",
       graphics.armed, static_cast<unsigned long long>(graphics.frame_pulse), static_cast<unsigned long long>(graphics.queue_calls),
       static_cast<unsigned long long>(graphics.queue_contended), static_cast<unsigned long long>(output.capture.contended_evidence),
       static_cast<unsigned long long>(output.capture.contended_lifecycle),
@@ -105,7 +106,8 @@ void log_contention(const win::Status& status, const win::GraphicsStatus& graphi
       static_cast<unsigned long long>(watchdog_last_stall_ms.load(std::memory_order_relaxed)),
       in_sim_messages_enabled.load(std::memory_order_relaxed), static_cast<unsigned long long>(sim_messages.posted),
       static_cast<unsigned long long>(sim_messages.sent), static_cast<unsigned long long>(sim_messages.dropped),
-      static_cast<unsigned long long>(sim_messages.failed)));
+      static_cast<unsigned long long>(sim_messages.failed), static_cast<unsigned long long>(graphics.hook_failures),
+      static_cast<unsigned long long>(graphics.failure_rate_peak), graphics.admission_halted));
   for (unsigned i = 0; i < graphics.contention.size() && used < sizeof(detail); ++i) {
     const auto written =
         std::snprintf(detail + used, sizeof(detail) - used, " %s=%llu", win::contention_site_name(static_cast<win::ContentionSite>(i)),
@@ -131,7 +133,7 @@ DWORD WINAPI watchdog_run(void*) noexcept {
     const auto decision = watchdog.observe({now, pulse, pulse != 0, telemetry.accepted_samples, session.ready,
                                             win::graphics_ready() && bridge_connected.load(std::memory_order_acquire),
                                             heartbeat != 0 && now >= heartbeat && now - heartbeat < WorkerAliveMs});
-    if (!decision.trip && !decision.recover && !decision.telemetry_stall_noted)
+    if (!decision.trip && !decision.recover && !decision.telemetry_stall_noted && !decision.presentation_stall_noted)
       continue;
     win::Status status{};
     status.heartbeat = now;
@@ -152,16 +154,18 @@ DWORD WINAPI watchdog_run(void*) noexcept {
     std::snprintf(detail, sizeof(detail),
                   "Presentation watchdog: event=%s reason=%s stalled_ms=%llu worker_alive=%u pulse=%llu sim_frames=%llu "
                   "session_ready=%u trips=%u",
-                  decision.trip      ? "tripped"
-                  : decision.recover ? "recovered"
-                                     : "telemetry_stall",
+                  decision.trip                       ? "tripped"
+                  : decision.recover                  ? "recovered"
+                  : decision.presentation_stall_noted ? "presentation_quiet"
+                                                      : "telemetry_stall",
                   decision.reason, static_cast<unsigned long long>(decision.stalled_ms), decision.worker_alive,
                   static_cast<unsigned long long>(pulse), static_cast<unsigned long long>(telemetry.accepted_samples), session.ready,
                   watchdog.trips());
     std::snprintf(status.message, sizeof(status.message), "%s",
-                  decision.trip      ? "Presentation stalled: cameras disarmed so the simulator can keep running."
-                  : decision.recover ? "Presentation resumed: cameras re-armed."
-                                     : "Simulator frame telemetry paused while presentation continues.");
+                  decision.trip                       ? "Presentation stalled: cameras disarmed so the simulator can keep running."
+                  : decision.recover                  ? "Presentation resumed: cameras re-armed."
+                  : decision.presentation_stall_noted ? "Hooked presentation went quiet while simulator frames continue."
+                                                      : "Simulator frame telemetry paused while presentation continues.");
     log_status(status, detail);
     log_contention(status, graphics, output);
   }
@@ -241,7 +245,7 @@ DWORD run_impl() {
   win::CompanionSetupSession connection_session;
   std::uint64_t applied_connection{}, pending_connection{};
   win::Status last_logged{};
-  bool logged = false, last_connected = false, last_requested = false, last_degraded = false;
+  bool logged = false, last_connected = false, last_requested = false, last_degraded = false, halted_logged = false;
   SimEventTracker sim_events;
   SimMessageLimiter sim_limiter;
   const auto announce_all = [&](const SimEventInputs& inputs, std::uint64_t at) {
@@ -772,6 +776,8 @@ DWORD run_impl() {
     const auto stopped_camera = camera_stop_message(scene);
     const char* message =
         !connected || !settings.enabled ? "Disconnected. Use Connect in the Windows companion."
+        : degraded && graphics.admission_halted
+            ? "Native hook failures exceeded the safe rate; Taxi Cam is disarmed for this simulator session. Restart MSFS to re-enable it."
         : degraded          ? "Presentation stalled: cameras disarmed so the simulator can keep running; they re-arm when frames resume."
         : !aircraft_matches ? aircraft_message
         : cutoff.inhibited  ? (manual_only ? "Above 60 knots: camera displays inhibited." : "Above 60 knots: TAXI buttons commanded off.")
@@ -797,6 +803,17 @@ DWORD run_impl() {
       mailbox.data()->status = status;
       mailbox.unlock();
     }
+    if (graphics.admission_halted && !halted_logged) {
+      halted_logged = true;
+      char halt_detail[384];
+      std::snprintf(halt_detail, sizeof(halt_detail),
+                    "Hook admission halted: registration failures reached %llu in one second (total %llu). Cameras disarmed and "
+                    "admission stopped for this simulator process.",
+                    static_cast<unsigned long long>(graphics.failure_rate_peak), static_cast<unsigned long long>(graphics.hook_failures));
+      log_status(status, halt_detail);
+      log_contention(status, graphics, output);
+    }
+    sim_inputs.hook_storm = graphics.admission_halted;
     sim_inputs.cameras_ready = output.output;
     sim_inputs.simulator_unsupported =
         scene.pair.state == engine_camera::State::blocked || scene.stop_reason == native_camera::SceneStopReason::identity_refused;

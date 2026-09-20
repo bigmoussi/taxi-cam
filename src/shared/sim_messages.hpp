@@ -20,6 +20,7 @@ enum class SimEvent : unsigned {
   aircraft_mismatch,
   camera_startup_failed,
   capture_paused,
+  hook_storm,  // Registration failures exceeded the safe rate; disarmed for the session.
   count
 };
 
@@ -53,6 +54,8 @@ inline constexpr SimMessage sim_message_for(SimEvent event) noexcept {
       return {"Taxi Cam: camera startup stopped; see the companion Diagnostics.", 8.0f, true};
     case SimEvent::capture_paused:
       return {"Taxi Cam: camera capture paused; waiting for verified GPU state.", 6.0f, false};
+    case SimEvent::hook_storm:
+      return {"Taxi Cam: native hook failures exceeded the safe rate; cameras disarmed for this session.", 12.0f, true};
     default:
       return {};
   }
@@ -61,7 +64,7 @@ inline constexpr SimMessage sim_message_for(SimEvent event) noexcept {
 inline constexpr const char* sim_event_name(SimEvent event) noexcept {
   constexpr const char* names[]{"bridge_connected",     "cameras_ready",         "connection_stopped",   "simulator_unsupported",
                                 "presentation_stalled", "cameras_disarmed",      "presentation_resumed", "speed_cutoff",
-                                "aircraft_mismatch",    "camera_startup_failed", "capture_paused"};
+                                "aircraft_mismatch",    "camera_startup_failed", "capture_paused",       "hook_storm"};
   return static_cast<unsigned>(event) < static_cast<unsigned>(SimEvent::count) ? names[static_cast<unsigned>(event)] : "invalid_event";
 }
 
@@ -129,6 +132,7 @@ struct SimEventInputs {
   bool aircraft_mismatch = false;
   bool camera_startup_failed = false;
   bool capture_paused = false;
+  bool hook_storm = false;
 };
 class SimEventTracker {
  public:
@@ -143,6 +147,11 @@ class SimEventTracker {
       emit(SimEvent::connection_stopped);
     if (in.connected && !previous_.connected)
       emit(SimEvent::bridge_connected);
+    // Independent of the connection, announced once for the process.
+    if (in.hook_storm && !storm_announced_) {
+      storm_announced_ = true;
+      emit(SimEvent::hook_storm);
+    }
     // The degraded gate is independent of the connection: it is applied and
     // lifted by the watchdog and must be announced exactly once per transition.
     if (in.degraded && !degraded_announced_) {
@@ -178,6 +187,7 @@ class SimEventTracker {
  private:
   SimEventInputs previous_{};
   bool degraded_announced_ = false;
+  bool storm_announced_ = false;
 };
 
 }  // namespace taxi_camera

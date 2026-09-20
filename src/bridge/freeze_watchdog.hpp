@@ -31,6 +31,9 @@ class FreezeWatchdog {
     bool recover = false;
     // SIM_FRAME stopped while presentation continued: pause or menu, logged once.
     bool telemetry_stall_noted = false;
+    // Hooked lists and queues went quiet while SIM_FRAME continued: flight
+    // reload or a renderer path we do not hook, logged once, never a trip.
+    bool presentation_stall_noted = false;
     bool worker_alive = false;
     const char* reason = "";
     std::uint64_t stalled_ms = 0;
@@ -43,13 +46,14 @@ class FreezeWatchdog {
       // Nothing to guard; forget stall timers so re-arming starts a fresh window.
       pulse_since_ = sim_since_ = 0;
       recover_since_ = 0;
-      telemetry_noted_ = false;
+      telemetry_noted_ = presentation_noted_ = false;
       return decision;
     }
     const bool pulse_advanced = sample.pulse_available && (pulse_since_ == 0 || sample.frame_pulse != last_pulse_);
     if (pulse_advanced || !sample.pulse_available) {
       last_pulse_ = sample.frame_pulse;
       pulse_since_ = sample.now_ms;
+      presentation_noted_ = false;
     }
     const bool sim_advanced = sim_since_ == 0 || sample.sim_frames != last_sim_;
     if (sim_advanced) {
@@ -58,9 +62,15 @@ class FreezeWatchdog {
       telemetry_noted_ = false;
     }
     const auto pulse_stalled_ms = sample.pulse_available && sample.now_ms >= pulse_since_ ? sample.now_ms - pulse_since_ : 0;
-    const auto sim_stalled_ms = sample.sim_frames_expected && sample.now_ms >= sim_since_ ? sample.now_ms - sim_since_ : 0;
+    const auto sim_stalled_ms = sample.now_ms >= sim_since_ ? sample.now_ms - sim_since_ : 0;
     const bool pulse_stalled = sample.pulse_available && pulse_stalled_ms >= StallMs;
-    const bool sim_stalled = sample.sim_frames_expected && sim_stalled_ms >= StallMs;
+    // SIM_FRAME advancing proves the simulator is alive even when our hooked
+    // lists and queues see nothing (flight reload). A soft freeze stops both
+    // within half a second (issue 53), so requiring both loses no real trip.
+    // Telemetry that has never flowed cannot veto a presentation stall.
+    const bool sim_known = sample.sim_frames != 0;
+    const bool sim_stalled = sim_stalled_ms >= StallMs;
+    const bool telemetry_stalled = sample.sim_frames_expected && sim_stalled;
     if (tripped_) {
       const bool progressing = sample.pulse_available ? pulse_advanced : sim_advanced;
       if (!progressing) {
@@ -77,17 +87,23 @@ class FreezeWatchdog {
       }
       return decision;
     }
-    if (pulse_stalled || (!sample.pulse_available && sim_stalled)) {
+    if ((pulse_stalled && (sim_stalled || !sim_known)) || (!sample.pulse_available && telemetry_stalled)) {
       tripped_ = true;
       ++trips_;
       recover_since_ = 0;
       decision.trip = true;
-      decision.reason = pulse_stalled ? (sim_stalled ? "presentation_and_sim_frame_stalled" : "presentation_stalled")
+      decision.reason = pulse_stalled ? (sim_known ? "presentation_and_sim_frame_stalled" : "presentation_stalled_no_telemetry")
                                       : "sim_frame_stalled_before_first_submit";
       decision.stalled_ms = pulse_stalled ? pulse_stalled_ms : sim_stalled_ms;
       return decision;
     }
-    if (sim_stalled && !telemetry_noted_) {
+    if (pulse_stalled && !presentation_noted_) {
+      presentation_noted_ = true;
+      decision.presentation_stall_noted = true;
+      decision.reason = "presentation_stalled_sim_frame_alive";
+      decision.stalled_ms = pulse_stalled_ms;
+    }
+    if (telemetry_stalled && !telemetry_noted_) {
       telemetry_noted_ = true;
       decision.telemetry_stall_noted = true;
       decision.reason = "sim_frame_stalled_presentation_alive";
@@ -106,6 +122,7 @@ class FreezeWatchdog {
   unsigned trips_ = 0;
   bool tripped_ = false;
   bool telemetry_noted_ = false;
+  bool presentation_noted_ = false;
 };
 
 }  // namespace taxi_camera

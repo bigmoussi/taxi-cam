@@ -27,6 +27,12 @@ constexpr std::uint32_t ConsumerEffect = 1u << 16, SourceEffect = 1u << 17, Unob
 constexpr unsigned DeviceShift = 24;
 constexpr std::uint64_t EscapedRecording = 1u << 28, RecordingVersion = 1ull << 32;
 constexpr std::uint64_t ExhaustedRecording = 1u << 29, RecordingVersionMask = 0xffffffff00000000ull;
+// Escaped because OUR wait budget expired or the watchdog gate was closed, not
+// because another submitter owned the queue. The same packets are quarantined,
+// but a consumer recording invalidates the source model instead of failing the
+// device: the stable output it read is process-lifetime, so the worst case is
+// one torn camera frame, and the session must be able to continue.
+constexpr std::uint64_t BoundedEscapedRecording = 1u << 30;
 bool same_description(const D3D12_RESOURCE_DESC& a, const D3D12_RESOURCE_DESC& b) noexcept {
   return a.Dimension == b.Dimension && a.Width == b.Width && a.Height == b.Height && a.DepthOrArraySize == b.DepthOrArraySize &&
          a.MipLevels == b.MipLevels && a.Format == b.Format && a.SampleDesc.Count == b.SampleDesc.Count &&
@@ -60,10 +66,12 @@ bool SceneCaptureManager::evidence_lock(std::unique_lock<std::mutex>& lock,
   return true;
 }
 void SceneCaptureManager::escape_unordered(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists) noexcept {
-  // Same contract as the PR 31 contended path: owned recordings are marked
-  // escaped before the forward, source effects publish after it.
-  escaped_sources |=
-      static_cast<std::uint32_t>(submission_refused_batch(queue, engine_hook::queue_submit::Refusal::contended_submission, count, lists));
+  // Same shape as the PR 31 contended path: owned recordings are marked before
+  // the forward, source effects publish after it. The mark is the bounded one:
+  // this escape is our budget or gate, so it never fails the device.
+  const auto batch = classify_unobserved(queue, count, lists, true, true);
+  deferred_sources_.fetch_or(batch.uncertain, std::memory_order_release);
+  escaped_sources |= batch.sources;
   unordered_submissions_.fetch_add(1, std::memory_order_relaxed);
 }
 void SceneCaptureManager::forwarded_unordered(ID3D12CommandQueue*) noexcept {
@@ -311,8 +319,8 @@ void SceneCaptureManager::publish_list(const List& item) noexcept {
                                                    (item.awaiting_native_reset ? UnobservedEffect : 0u) | (devices << DeviceShift));
   // Retirement/Reset must consume a notice before its packet slots can be
   // recycled, even if the notifying thread has not yet published the wake bit.
-  if (previous & EscapedRecording)
-    apply_recording_refusal(static_cast<std::uint32_t>(previous));
+  if (previous & (EscapedRecording | BoundedEscapedRecording))
+    apply_recording_refusal(static_cast<std::uint32_t>(previous), (previous & EscapedRecording) != 0);
   published.native.store(item.native);
   published.revision.fetch_add(1);
 }
@@ -335,8 +343,10 @@ std::uint32_t SceneCaptureManager::queue_devices(ID3D12CommandQueue* queue) cons
 SceneCaptureManager::UnobservedBatch SceneCaptureManager::classify_unobserved(ID3D12CommandQueue* queue,
                                                                               UINT count,
                                                                               ID3D12CommandList* const* native_lists,
-                                                                              bool mark_owned) noexcept {
+                                                                              bool mark_owned,
+                                                                              bool bounded) noexcept {
   UnobservedBatch result;
+  const auto mark = bounded ? BoundedEscapedRecording : EscapedRecording;
   if (!native_lists || !count || count > engine_hook::queue_submit::kMaximumCommandLists) {
     result.unrelated = false;
     result.uncertain = queue_devices(queue);
@@ -363,8 +373,10 @@ SceneCaptureManager::UnobservedBatch SceneCaptureManager::classify_unobserved(ID
       if (owned && mark_owned) {
         // One CAS, no retry/spin. The version binds the notice to this recording
         // and makes concurrent Reset consume it before reusing any packet.
-        if (published.effects.compare_exchange_strong(word, word | EscapedRecording))
+        if (published.effects.compare_exchange_strong(word, word | mark))
           deferred_recordings_.store(true, std::memory_order_release);
+        else if (bounded)
+          result.sources |= devices;
         else
           result.uncertain |= devices;
       }
@@ -383,23 +395,32 @@ SceneCaptureManager::UnobservedBatch SceneCaptureManager::classify_unobserved(ID
   }
   return result;
 }
-void SceneCaptureManager::apply_recording_refusal(std::uint32_t effects) noexcept {
+void SceneCaptureManager::apply_recording_refusal(std::uint32_t effects, bool fatal) noexcept {
   const auto packets = static_cast<std::uint16_t>(effects);
   for (std::size_t index = 0; index < packets_.size(); ++index)
     if ((packets & (1u << index)) && packets_[index].assigned)
       quarantine(packets_[index]);
-  if (effects & ConsumerEffect)
-    for (std::size_t index = 0; index < devices_.size(); ++index)
-      if (((effects >> DeviceShift) & (1u << index)) && devices_[index].active)
-        fail_device(devices_[index]);
+  if (!(effects & ConsumerEffect))
+    return;
+  for (std::size_t index = 0; index < devices_.size(); ++index) {
+    if (!((effects >> DeviceShift) & (1u << index)) || !devices_[index].active)
+      continue;
+    if (fatal) {
+      fail_device(devices_[index]);
+    } else {
+      devices_[index].source_states.invalidate_all();
+      ++stats_.unordered_consumers;
+    }
+  }
 }
 void SceneCaptureManager::apply_deferred() noexcept {
   apply_deferred_retirements();
   if (deferred_recordings_.exchange(false, std::memory_order_acq_rel))
     for (auto& published : published_lists_) {
       auto word = published.effects.load();
-      if ((word & EscapedRecording) && published.effects.compare_exchange_strong(word, word & ~EscapedRecording))
-        apply_recording_refusal(static_cast<std::uint32_t>(word));
+      const auto marks = word & (EscapedRecording | BoundedEscapedRecording);
+      if (marks && published.effects.compare_exchange_strong(word, word & ~marks))
+        apply_recording_refusal(static_cast<std::uint32_t>(word), (marks & EscapedRecording) != 0);
     }
   const auto failed = deferred_uncertain_.exchange(0, std::memory_order_acq_rel);
   const auto sources = deferred_sources_.exchange(0, std::memory_order_acq_rel);
@@ -1692,6 +1713,7 @@ SceneCaptureManager::Statistics SceneCaptureManager::statistics() const noexcept
   result.unordered_submissions = unordered_submissions_.load(std::memory_order_relaxed);
   result.deferred_retirements = deferred_retirement_count_.load(std::memory_order_relaxed);
   result.gated_submissions = gated_submissions_.load(std::memory_order_relaxed);
+  result.unordered_consumers = stats_.unordered_consumers;
   return result;
 }
 engine_hook::queue_submit::Callbacks SceneCaptureManager::callbacks() noexcept {

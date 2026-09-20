@@ -131,6 +131,16 @@ void tracker() {
   require(count == 4 && has(count, SimEvent::simulator_unsupported) && has(count, SimEvent::camera_startup_failed) &&
               has(count, SimEvent::aircraft_mismatch) && has(count, SimEvent::capture_paused),
           "Fault levels not announced");
+  // A failure storm is announced once for the process, even across reconnects.
+  in.hook_storm = true;
+  count = observe(track, in);
+  require(count == 1 && has(count, SimEvent::hook_storm), "Hook storm not announced");
+  require(observe(track, in) == 0, "Hook storm repeated");
+  in.connected = false;
+  observe(track, in);
+  in.connected = true;
+  count = observe(track, in);
+  require(!has(count, SimEvent::hook_storm) && has(count, SimEvent::bridge_connected), "Hook storm repeated after reconnect");
   // Bounded output: a small buffer truncates instead of overflowing.
   SimEventTracker small;
   SimEventInputs burst;
