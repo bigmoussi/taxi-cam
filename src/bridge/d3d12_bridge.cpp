@@ -168,6 +168,9 @@ struct Registry {
   // resource the descriptor no longer references. No PFD write may trust the
   // view maps until discover_pfds clears them and live backfill relearns.
   std::atomic<bool> views_stale{};
+  // A Close skipped recording a display's settled state; carried covers must
+  // not trust settled_state until discover_pfds resets every settlement.
+  std::atomic<bool> settlement_stale{};
   // Watchdog gate. False makes every hook idle and every PFD plan not_ready.
   std::atomic<bool> armed{true};
   std::atomic<std::uint64_t> frame_pulse{};
@@ -1759,7 +1762,8 @@ void plan_display_submission(void*,
     // write. Copy after this batch only when nothing here touches the display,
     // and only until that content has been covered. A same-batch write still
     // uses the suffix/prefix site above; crossing it would flash the instrument.
-    if (!overlay && target->content_serial.load(std::memory_order_acquire) != target->covered_serial.load(std::memory_order_acquire)) {
+    if (!overlay && !r.settlement_stale.load(std::memory_order_acquire) &&
+        target->content_serial.load(std::memory_order_acquire) != target->covered_serial.load(std::memory_order_acquire)) {
       const auto state_bits = target->settled_state.load(std::memory_order_acquire);
       if (state_bits != Resource::kSettledStateUnknown)
         overlay = PfdSubmissionProof::carried_overlay(batch.data(), count, key, static_cast<D3D12_RESOURCE_STATES>(state_bits));
@@ -2112,7 +2116,14 @@ void remember_display_settlement(List& item) noexcept {
   if (!count)
     return;
   auto& r = registry();
-  const std::lock_guard lock(r.mutex);
+  // Close-time bookkeeping on a simulator thread: bounded like the rest of the
+  // Close path. A skipped settlement could leave a stale settled state, so the
+  // carried cover is refused until discover_pfds resets every settlement.
+  const RegistryLock lock(r, wait_budget::close_us, ContentionSite::registry_close);
+  if (!lock) {
+    r.settlement_stale.store(true, std::memory_order_release);
+    return;
+  }
   for (UINT i = 0; i < count; ++i) {
     auto* native = reinterpret_cast<ID3D12Resource*>(rows[i].key.resource);
     const auto found = r.resources.find(native);
@@ -3160,6 +3171,15 @@ void drain_deferred_lifecycle(Registry& r) {
     clear_views(r);
     r.dsvs.clear();
     rearm_live_backfill(r);
+  }
+  if (r.settlement_stale.exchange(false, std::memory_order_acq_rel)) {
+    // Forget every settled display state; the next observed Close records it
+    // again and a later write re-arms the quiet-Execute cover.
+    for (const auto& [native, item] : r.resources) {
+      (void)native;
+      item->settled_state.store(Resource::kSettledStateUnknown, std::memory_order_release);
+      item->covered_serial.store(item->content_serial.load(std::memory_order_acquire), std::memory_order_release);
+    }
   }
 }
 void discover_pfds(std::uint64_t now) noexcept {
