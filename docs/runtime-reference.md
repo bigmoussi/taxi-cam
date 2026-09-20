@@ -201,7 +201,7 @@ Mutex:   Local\380TaxiCamera.Control.<MSFS_PID>
 Mapping: Local\380TaxiCamera.Data.<MSFS_PID>
 ~~~
 
-The header contains `magic`, `version`, `bytes`, `owner_pid` and `owner_heartbeat`. Magic is `0x54415849`, protocol version is `10` and size must equal `sizeof(Shared)`. The payload is the native C++ `Settings` and `Status` layout, so the EXE and DLL must be shipped as a compatible pair. Session-only TAXI requests carry a serial, selected sides and desired states. Status returns fresh button telemetry and request acknowledgement; these commands are never saved in aircraft calibration.
+The header contains `magic`, `version`, `bytes`, `owner_pid` and `owner_heartbeat`. Magic is `0x54415849`, protocol version is `11` and size must equal `sizeof(Shared)`. The payload is the native C++ `Settings` and `Status` layout, so the EXE and DLL must be shipped as a compatible pair. Protocol 10 added `in_sim_messages`; protocol 11 appends `parked_rate` to `Settings` and `effective_rate`, `useful_rate`, `rate_limits` and `parked` to `Status` after the protocol 10 layout. Session-only TAXI requests carry a serial, selected sides and desired states. Status returns fresh button telemetry and request acknowledgement; these commands are never saved in aircraft calibration.
 
 The mapping carries values, IDs and bounded text. It carries no camera pixels or native object pointers. Routine access tries the mutex without blocking. A busy mutex retains the last validated settings only until their original heartbeat expires; a failed read never extends that deadline. Heartbeat age is measured after the read. An abandoned mutex immediately invalidates the bridge cache and clears enable and heartbeat rather than consuming a partial write.
 
