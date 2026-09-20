@@ -5,6 +5,7 @@
 #include <dwmapi.h>
 #include <shellapi.h>
 #include <uxtheme.h>
+#include <algorithm>
 #include <atomic>
 #include <cwchar>
 #include <mutex>
@@ -55,6 +56,10 @@ HANDLE worker{}, show_event{}, singleton{};
 bool dirty = false, refreshing = false, background_start = false, preview_ui = false;
 std::atomic<bool> auto_connect{true};
 std::atomic<bool> connection_requested{}, connection_disconnected{};
+// MSFS runs elevated while this companion does not; only a restart with the
+// same rights can attach. Cleared whenever the simulator session changes.
+std::atomic<bool> elevation_required{};
+DWORD wait_for_exit_pid{};
 win::ConnectCommandQueue connect_commands;
 win::CameraHotkeys hotkey_draft = win::DefaultCameraHotkeys, hotkey_saved = win::DefaultCameraHotkeys;
 win::CameraHotkeyRegistration hotkey_registration;
@@ -176,6 +181,18 @@ void publish(const win::Settings& value) {
 }
 void refresh_connection_button() {
   SetDlgItemTextW(window, 241, win::connection_button_label(connection_requested.load(std::memory_order_acquire)));
+}
+// The administrator restart control exists only while the rights mismatch
+// does. It is added or removed on its own so unsaved edits on the page survive.
+void sync_elevation_button() {
+  const bool wanted = page == 0 && elevation_required.load(std::memory_order_acquire);
+  const HWND existing = GetDlgItem(window, 242);
+  if (wanted && !existing)
+    button(L"Restart as administrator", 242, 430, 236, 250, 34);
+  else if (!wanted && existing) {
+    DestroyWindow(existing);
+    controls.erase(std::remove(controls.begin(), controls.end(), existing), controls.end());
+  }
 }
 void request_connection(win::ConnectCommand command) {
   {
@@ -703,6 +720,8 @@ void build_controls() {
     toggle(L"Auto aircraft", 230, s.auto_profile, 707, 318, 140);
     toggle(L"Auto-connect", 240, auto_connect.load(std::memory_order_acquire), 707, 236, 155);
     button(win::connection_button_label(connection_requested.load(std::memory_order_acquire)), 241, 260, 236, 155, 34);
+    if (elevation_required.load(std::memory_order_acquire))
+      button(L"Restart as administrator", 242, 430, 236, 250, 34);
     const auto* profile = profiles::find(s.profile);
     const bool manual = profile && profile->taxi_control == profiles::TaxiControl::manual_only;
     toggle(L"TAXI buttons", 221, s.follow_taxi && !manual, 800, 412, 180);
@@ -1035,6 +1054,7 @@ DWORD WINAPI connection_worker(void*) {
       ignore_heartbeat_through = 0;
       startup_retry.reset();
       simulator_pid = 0;
+      elevation_required.store(false, std::memory_order_release);
       {
         const std::lock_guard lock(app_mutex);
         status = {};
@@ -1057,6 +1077,7 @@ DWORD WINAPI connection_worker(void*) {
       manual_armed = manual_armed || command == win::ConnectCommand::connect || command == win::ConnectCommand::reset;
       ignore_heartbeat_through = 0;
       startup_retry = {};
+      elevation_required.store(false, std::memory_order_release);
       process = OpenProcess(SYNCHRONIZE, FALSE, pid);
       if (!auto_on && !manual_armed) {
         {
@@ -1122,6 +1143,7 @@ DWORD WINAPI connection_worker(void*) {
           if (!retrying)
             manual_armed = false;
         }
+        elevation_required.store(!loaded.ok && loaded.elevation_required, std::memory_order_release);
         {
           const std::lock_guard lock(app_mutex);
           if (!connection_disconnected.load(std::memory_order_acquire)) {
@@ -1134,7 +1156,7 @@ DWORD WINAPI connection_worker(void*) {
               connection += L" Retrying startup preflight.";
             else if (loaded.retry_before_load && !loaded.ok)
               connection += L" Automatic retries paused; choose Disconnect, then Connect to retry.";
-            else if (!loaded.ok)
+            else if (!loaded.ok && !loaded.elevation_required)
               connection += L" Choose Disconnect, then Connect to try again.";
           }
         }
@@ -1206,6 +1228,31 @@ void stop_service() {
       mailbox.unlock();
     }
   }
+}
+// Starts an elevated copy through UAC, then exits so it can take the single-
+// instance mutex and attach to the elevated simulator. A refused consent
+// prompt leaves this instance running unchanged.
+void restart_as_administrator() {
+  if (dirty) {
+    const int choice = MessageBoxW(window,
+                                   L"Save your unsaved settings before restarting?\n\nYes: save and restart.\nNo: discard "
+                                   L"changes.\nCancel: keep the app open.",
+                                   L"Unsaved settings", MB_YESNOCANCEL | MB_ICONQUESTION);
+    if (choice == IDCANCEL || (choice == IDYES && !apply()))
+      return;
+  }
+  auto arguments = win::relaunch_arguments(GetCurrentProcessId());
+  if (!expected_simulator.empty())
+    arguments += L" --simulator \"" + expected_simulator + L"\"";
+  DWORD error{};
+  if (win::relaunch_elevated(installation + L"\\taxi-cam.exe", arguments, error)) {
+    stop_service();
+    DestroyWindow(window);
+    return;
+  }
+  notice = error == ERROR_CANCELLED ? L"Administrator restart cancelled. MSFS still runs as administrator, so Taxi Cam cannot attach."
+                                    : L"Could not restart as administrator (Windows " + std::to_wstring(error) + L").";
+  InvalidateRect(window, nullptr, FALSE);
 }
 void check_updates(bool manual) {
   if (preview_ui || update_prompt)
@@ -1443,6 +1490,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       refresh_connection_button();
       sync_aircraft_session();
       auto_profile();
+      sync_elevation_button();
       if (page == 3)
         target_combos(draft());
       if (IsWindowVisible(hwnd))
@@ -1457,6 +1505,8 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         AppendMenuW(menu, MF_STRING, 600, L"Settings");
         AppendMenuW(menu, MF_STRING | (preview_ui ? MF_GRAYED : 0), 604,
                     win::connection_button_label(connection_requested.load(std::memory_order_acquire)));
+        if (elevation_required.load(std::memory_order_acquire))
+          AppendMenuW(menu, MF_STRING | (preview_ui ? MF_GRAYED : 0), 605, L"Restart as administrator");
         AppendMenuW(menu, MF_STRING | (preview_ui || updater.busy() || update_prompt ? MF_GRAYED : 0), 603,
                     updater.busy() ? L"Checking for updates..." : L"Check for updates");
         AppendMenuW(menu, MF_STRING, 512, L"Report a bug");
@@ -1472,6 +1522,8 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         if (selected == 604) {
           toggle_connection();
         }
+        if (selected == 605)
+          restart_as_administrator();
         if (selected == 603)
           check_updates(true);
         if (selected == 512)
@@ -1607,6 +1659,10 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       }
       if (id == 241) {
         toggle_connection();
+        return 0;
+      }
+      if (id == 242 || id == 605) {
+        restart_as_administrator();
         return 0;
       }
       if (id >= 221 && id <= 229) {
@@ -1771,12 +1827,16 @@ int WINAPI wWinMain(HINSTANCE app, HINSTANCE, LPWSTR, int) {
       preview_ui = true;
     else if (!std::wcscmp(argv[i], L"--simulator") && i + 1 < argc)
       expected_simulator = argv[++i];
+    else if (!std::wcscmp(argv[i], win::WaitForExitArgument) && i + 1 < argc && win::parse_wait_for_exit(argv[i + 1]))
+      wait_for_exit_pid = win::parse_wait_for_exit(argv[++i]);
     else {
       LocalFree(argv);
       return ERROR_INVALID_PARAMETER;
     }
   }
   LocalFree(argv);
+  // An administrator restart must let its predecessor release the mutex first.
+  win::wait_for_previous_instance(wait_for_exit_pid, 10000);
   // Retain coordination names so an older installed app cannot run alongside this one.
   singleton = CreateMutexW(nullptr, FALSE, preview_ui ? L"Local\\380TaxiCamera.Preview" : L"Local\\380TaxiCamera.Companion");
   const DWORD existing = GetLastError();
