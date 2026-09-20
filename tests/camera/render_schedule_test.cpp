@@ -175,21 +175,32 @@ void parked_policy_hysteresis() {
   for (std::uint64_t now = 0; now < ParkedRatePolicy::kParkedSettleMs; now += 22)
     require(!policy.update(now, true, 0.0), "Zero speed parked before the settle time");
   require(policy.update(ParkedRatePolicy::kParkedSettleMs, true, 0.0), "Sustained zero speed did not park");
-  require(policy.update(ParkedRatePolicy::kParkedSettleMs + 22, true, 0.3), "Creep below the parked threshold unparked");
-  require(policy.update(ParkedRatePolicy::kParkedSettleMs + 44, true, 0.7), "Speed inside the hysteresis band unparked");
-  require(!policy.update(ParkedRatePolicy::kParkedSettleMs + 66, true, 1.0), "Reaching the moving threshold did not restore the rate");
+  require(policy.update(ParkedRatePolicy::kParkedSettleMs + 22, true, 0.09), "Standstill GROUND VELOCITY noise unparked");
+  require(policy.update(ParkedRatePolicy::kParkedSettleMs + 44, true, 0.19), "Noise just below the threshold unparked");
+  // 0.9.42 live: the earlier 0.5/1.0 kt band parked an aircraft still rolling
+  // at 0.4 kt and held 5 fps until 1 kt. Any measurable motion now restores the
+  // saved rate on the same update.
+  require(!policy.update(ParkedRatePolicy::kParkedSettleMs + 66, true, 0.4), "A rolling aircraft stayed at the parked floor");
   require(!policy.update(ParkedRatePolicy::kParkedSettleMs + 88, true, 0.0), "A brief stop re-parked without settling");
   // Alternating stopped/creeping samples at taxi start must never park.
   ParkedRatePolicy creeping;
   for (std::uint64_t now = 0; now < 20000; now += 22)
-    require(!creeping.update(now, true, (now / 22) % 2 ? 0.8 : 0.0), "Creeping taxi start parked the schedule");
-  // Once parked, samples inside the band hold the parked state.
+    require(!creeping.update(now, true, (now / 22) % 2 ? 0.3 : 0.0), "Creeping taxi start parked the schedule");
+  // Once parked, standstill noise below the threshold holds the parked state.
   ParkedRatePolicy holding;
   for (std::uint64_t now = 0; now <= ParkedRatePolicy::kParkedSettleMs; now += 20)
     holding.update(now, true, 0.0);
   require(holding.parked(), "Holding fixture did not park");
   for (std::uint64_t now = 4000; now < 10000; now += 22)
-    require(holding.update(now, true, (now / 22) % 2 ? 0.8 : 0.0), "Band jitter flapped a parked schedule");
+    require(holding.update(now, true, (now / 22) % 2 ? 0.15 : 0.0), "Standstill jitter flapped a parked schedule");
+  // Rolling to a stop: the floor engages only after the aircraft has actually
+  // stopped for the settle time, not while it is still coasting.
+  ParkedRatePolicy coasting;
+  for (std::uint64_t now = 0; now < 6000; now += 22)
+    require(!coasting.update(now, true, 0.6 - 0.4 * (now / 6000.0)), "Coasting to a stop parked before the aircraft stopped");
+  for (std::uint64_t now = 6000; now < 6000 + ParkedRatePolicy::kParkedSettleMs; now += 22)
+    require(!coasting.update(now, true, 0.0), "Stopped aircraft parked before the settle time");
+  require(coasting.update(6000 + ParkedRatePolicy::kParkedSettleMs, true, 0.0), "Stopped aircraft did not park after settling");
   // Missing or stale telemetry is moving, never a reason to lower the rate.
   require(!holding.update(10000, false, 0.0), "Invalid telemetry kept the parked floor");
   require(!holding.update(10022, true, 0.0), "Telemetry return re-parked without settling");
@@ -253,7 +264,7 @@ void adaptive_parked_schedule() {
     if (now < 20500)
       return 0.3;  // Brake release creep.
     if (now < 21000)
-      return 0.7;  // Inside the hysteresis band.
+      return 0.4;  // Brake release: creeping is already moving.
     if (now < 40000)
       return 8.0;  // Taxiing.
     return 0.0;    // Holding.
@@ -271,9 +282,9 @@ void adaptive_parked_schedule() {
     // Settling completes on the first manager update at or after the settle
     // time, so allow one update of slack at each parked-window start.
     constexpr auto settle = ParkedRatePolicy::kParkedSettleMs;
-    if (now < settle || (now >= 21000 && now < 40000 + settle))
+    if (now < settle || (now >= 20000 && now < 40000 + settle))
       require(!parked, "Parked outside the expected windows");
-    else if (now >= settle + step && (now < 21000 || now >= 40000 + settle + 2 * step))
+    else if (now >= settle + step && (now < 20000 || now >= 40000 + settle + 2 * step))
       require(parked, "Not parked inside the expected windows");
     const auto effective = taxi_camera::effective_camera_rate(user_rate, 0, parked);
     require(effective.rate == (parked ? 5u : user_rate), "Adaptive rate selection");
@@ -302,9 +313,9 @@ void adaptive_parked_schedule() {
     last[feed] = now;
     (parked ? parked_pulses : moving_pulses)[feed]++;
   }
-  // Parked windows: 3–20 s and 43–60 s = 34 s; moving: 0–3 s and 21–43 s = 25 s.
+  // Parked windows: 3–20 s and 43–60 s = 34 s; moving: 0–3 s and 20–43 s = 26 s (creep counts as moving).
   const auto total = [](const std::array<unsigned, 2>& count) { return count[0] + count[1]; };
-  const double parked_per_second = total(parked_pulses) / 34.0, moving_per_second = total(moving_pulses) / 25.0;
+  const double parked_per_second = total(parked_pulses) / 34.0, moving_per_second = total(moving_pulses) / 26.0;
   require(parked_pulses[0] > 0 && parked_pulses[1] > 0, "Parked floor closed a camera view");
   require(longest_parked_gap <= 2 * ((1000 + 9) / 10) + step, "Parked schedule stopped pulsing");
   require(total(parked_pulses) <= 5 * 2 * 34, "Parked window exceeded the floor budget");

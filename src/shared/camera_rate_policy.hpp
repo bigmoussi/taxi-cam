@@ -80,24 +80,21 @@ constexpr const wchar_t* camera_rate_limit_text(unsigned reasons) noexcept {
 
 // Ground-speed hysteresis for the parked floor. Parked needs the public GROUND
 // VELOCITY below kParkedBelowKnots continuously for kParkedSettleMs; any sample
-// at or above kMovingAboveKnots restores the moving rate at once. Missing or
-// stale telemetry is treated as moving so a telemetry gap never lowers the rate.
-// The band between the two thresholds holds the current state, so creeping
-// speed at taxi start cannot flap the schedule.
+// at or above it restores the moving rate at once. Missing or stale telemetry is
+// treated as moving so a telemetry gap never lowers the rate. The settle time is
+// the only hysteresis: a parked aircraft's GROUND VELOCITY reads 0.00–0.09 kt on
+// the live A350, while 0.4 kt is an aircraft still rolling to a stop, which the
+// earlier 0.5/1.0 kt band parked at 5 fps while it was visibly moving (0.9.42
+// low-speed report). Re-parking after any motion needs the full settle again, so
+// creep at taxi start cannot flap the schedule faster than once per settle.
 class ParkedRatePolicy {
  public:
-  static constexpr double kParkedBelowKnots = 0.5;
-  static constexpr double kMovingAboveKnots = 1.0;
+  static constexpr double kParkedBelowKnots = 0.2;
   static constexpr std::uint64_t kParkedSettleMs = 3000;
 
   bool update(std::uint64_t now_ms, bool speed_valid, double knots) noexcept {
-    if (!speed_valid || !std::isfinite(knots) || knots < 0 || knots >= kMovingAboveKnots) {
+    if (!speed_valid || !std::isfinite(knots) || knots < 0 || knots >= kParkedBelowKnots) {
       reset();
-      return parked_;
-    }
-    if (knots >= kParkedBelowKnots) {
-      if (!parked_)
-        still_ = false;
       return parked_;
     }
     if (!still_ || now_ms < still_since_) {
