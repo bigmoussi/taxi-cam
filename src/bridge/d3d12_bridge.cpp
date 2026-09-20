@@ -21,6 +21,7 @@
 #include "../graphics/taxi_button_routes.hpp"
 #include "../graphics/write_budget.hpp"
 #include "../hooks/render_boundary_observer.hpp"
+#include "../shared/bounded_lock.hpp"
 #include "native_hooks.hpp"
 #include "root_layout.hpp"
 
@@ -36,6 +37,7 @@ struct Metadata {
   virtual void retire() noexcept { alive.store(false); }
   virtual ~Metadata() = default;
 };
+void defer_handoff_retirement(std::uint64_t key, std::uint64_t handle) noexcept;
 struct Resource : Metadata {
   ID3D12Resource* native{};
   std::uint64_t key{};
@@ -46,7 +48,11 @@ struct Resource : Metadata {
   void retire() noexcept override {
     alive.store(false, std::memory_order_release);
     runtime::manager().unregister_source_candidate(key, native, id);
-    scene_handoff().unregister_resource(key, reinterpret_cast<std::uint64_t>(native));
+    // The last Release runs on whichever thread drops it, inside the runtime's
+    // own destruction path. Wait within budget, then let the worker finish it.
+    const auto handle = reinterpret_cast<std::uint64_t>(native);
+    if (!scene_handoff().try_unregister_resource(key, handle, wait_budget::lifecycle_us))
+      defer_handoff_retirement(key, handle);
   }
 };
 struct Root : Metadata {
@@ -126,6 +132,14 @@ class Lifetime final : public IUnknown {
   std::atomic<ULONG> references_{1};
   std::shared_ptr<Metadata> value_;
 };
+struct DeferredSourceCandidate {
+  ID3D12Resource* native{};
+  std::uint64_t id{};
+  source_state::Model initial{};
+};
+struct DeferredHandoffRetirement {
+  std::uint64_t key{}, handle{};
+};
 struct Registry {
   std::recursive_mutex mutex;
   // Only demand transitions and publication of a real Reset/new-list proof
@@ -136,12 +150,25 @@ struct Registry {
   std::atomic<bool> diagnostics_enabled{};
   std::atomic<std::uint64_t> list_lookup_calls{}, list_cache_hits{}, list_registry_lookups{};
   std::atomic<std::uint64_t> idle_state_bypasses{}, idle_callback_bypasses{}, observation_invalidations{};
+  // Simulator threads wait on the locks above only within wait_budget. These
+  // count the expired waits per site; the worker drains the deferred rings.
+  std::array<std::atomic<std::uint64_t>, static_cast<unsigned>(ContentionSite::count)> contention{};
+  DeferredRing<DeferredSourceCandidate, 64> deferred_sources;
+  DeferredRing<DeferredHandoffRetirement, 256> deferred_handoff;
+  std::atomic<std::uint64_t> deferred_lifecycle{};
+  // A descriptor hook skipped its bookkeeping, so an RTV/DSV entry may name a
+  // resource the descriptor no longer references. No PFD write may trust the
+  // view maps until discover_pfds clears them and live backfill relearns.
+  std::atomic<bool> views_stale{};
+  // Watchdog gate. False makes every hook idle and every PFD plan not_ready.
+  std::atomic<bool> armed{true};
+  std::atomic<std::uint64_t> frame_pulse{};
   ID3D12Device* device{};
   std::uint64_t key{}, next_id = 0;
   UINT rtv_stride{}, dsv_stride{};
   std::atomic<bool> ready{};
   std::atomic<std::uint64_t> failures{}, draws{}, clear_states{};
-  const char* error = "not_started";
+  std::atomic<const char*> error{"not_started"};
   std::unordered_map<ID3D12Resource*, std::shared_ptr<Resource>> resources;
   std::unordered_map<ID3D12RootSignature*, std::shared_ptr<Root>> roots;
   std::unordered_map<ID3D12GraphicsCommandList*, std::shared_ptr<List>> lists;
@@ -306,8 +333,24 @@ Registry& registry() {
 void clear_live_bind(ID3D12GraphicsCommandList* native) noexcept {
   registry().live_bind.clear(native);
 }
+void defer_handoff_retirement(std::uint64_t key, std::uint64_t handle) noexcept {
+  auto& r = registry();
+  r.contention[static_cast<unsigned>(ContentionSite::handoff_lifecycle)].fetch_add(1, std::memory_order_relaxed);
+  r.deferred_lifecycle.fetch_add(1, std::memory_order_relaxed);
+  r.deferred_handoff.push({key, handle});
+}
+// Bounded registry acquisition for simulator threads. The registry is recursive,
+// so an owning thread always succeeds; only cross-thread contention can expire.
+struct RegistryLock : BoundedLock<std::recursive_mutex> {
+  RegistryLock(Registry& r, std::uint32_t budget_us, ContentionSite site) noexcept
+      : BoundedLock(r.mutex, budget_us, &r.contention[static_cast<unsigned>(site)]) {}
+};
+void count_contention(ContentionSite site) noexcept {
+  registry().contention[static_cast<unsigned>(site)].fetch_add(1, std::memory_order_relaxed);
+}
 bool observation_enabled() noexcept {
-  return (registry().observation_epoch.load(std::memory_order_acquire) & 1u) != 0;
+  auto& r = registry();
+  return (r.observation_epoch.load(std::memory_order_acquire) & 1u) != 0 && r.armed.load(std::memory_order_acquire);
 }
 bool recording_observed(const List& list) noexcept {
   const auto epoch = registry().observation_epoch.load(std::memory_order_acquire);
@@ -408,7 +451,9 @@ void selected_metadata(ID3D12Resource* native, std::uint32_t scope, bool base, b
   if (!maybe_selected(native))
     return;
   auto& r = registry();
-  const std::lock_guard lock(r.mutex);
+  const RegistryLock lock(r, wait_budget::recording_us, ContentionSite::registry_recording);
+  if (!lock)
+    return;  // Diagnostics only.
   refresh_selected(r);
   for (unsigned side = 0; side < 2; ++side)
     if (((r.active_mask | r.calibration_mask) & (1u << side)) && r.selected_resources[side] && r.selected_resources[side]->alive &&
@@ -431,8 +476,7 @@ bool attach(ID3D12Object* object, const std::shared_ptr<Metadata>& metadata) {
 void error(const char* value) noexcept {
   auto& r = registry();
   ++r.failures;
-  const std::lock_guard lock(r.mutex);
-  r.error = value;
+  r.error.store(value, std::memory_order_release);
 }
 template <class F>
 void observe_safely(F&& action) noexcept {
@@ -441,9 +485,13 @@ void observe_safely(F&& action) noexcept {
   } catch (...) {
     auto& r = registry();
     r.ready = false;
-    const std::lock_guard lock(r.mutex);
-    r.active_mask = r.calibration_mask = 0;
+    // Selection is read through selected_mask; clearing it disarms the hooks
+    // immediately even when the masks themselves cannot be taken right now.
+    r.selected_mask.store(0, std::memory_order_release);
     error("native_observation_allocation_failed");
+    const RegistryLock lock(r, wait_budget::close_us, ContentionSite::registry_recording);
+    if (lock)
+      r.active_mask = r.calibration_mask = 0;
   }
 }
 bool relevant(const D3D12_RESOURCE_DESC& d) noexcept {
@@ -665,7 +713,11 @@ void consider_live_resource(ID3D12GraphicsCommandList* list, ID3D12Resource* nat
     r.live_bind.clear(list);
     return;
   }
-  const std::lock_guard lock(r.mutex);
+  const RegistryLock lock(r, wait_budget::recording_us, ContentionSite::registry_recording);
+  if (!lock) {
+    r.live_bind.clear(list);  // An unverified bind hint must not survive.
+    return;
+  }
   const auto found = r.resources.find(native);
   if (is_backfill_display(r, native) && found != r.resources.end() && display_item(r, *found->second))
     r.live_bind.note(list, native, found->second->id);
@@ -707,7 +759,13 @@ bool observe_resource(ID3D12Device* device, IUnknown* object, source_state::Mode
   if (relevant(desc)) {
     std::shared_ptr<Resource> item;
     {
-      const std::lock_guard lock(r.mutex);
+      // Creation hooks run on loader or render threads. A miss here is picked
+      // up by the later RTV creation or barrier that first uses the resource.
+      const RegistryLock lock(r, wait_budget::lifecycle_us, ContentionSite::registry_creation);
+      if (!lock) {
+        native->Release();
+        return false;
+      }
       auto found = r.resources.find(native);
       if (found != r.resources.end() && found->second->alive) {
         native->Release();
@@ -733,7 +791,13 @@ bool observe_resource(ID3D12Device* device, IUnknown* object, source_state::Mode
         r.pfd_inventory_complete = false;
     }
     if (item && scene_handoff().register_resource(r.key, reinterpret_cast<std::uint64_t>(native), item->id)) {
-      runtime::manager().register_source_candidate(r.key, native, item->id, desc, initial);
+      if (!runtime::manager().register_source_candidate(r.key, native, item->id, desc, initial) &&
+          SceneCaptureManager::last_call_contended()) {
+        // Identity only, no lease: the worker registers it from discover_pfds
+        // after re-checking that this exact registry incarnation is still alive.
+        r.deferred_lifecycle.fetch_add(1, std::memory_order_relaxed);
+        r.deferred_sources.push({native, item->id, initial});
+      }
       if (!attach(native, item)) {
         r.pfd_inventory_complete = false;
         error("resource_lifetime_notification_failed");
@@ -747,9 +811,13 @@ bool observe_resource(ID3D12Device* device, IUnknown* object, source_state::Mode
   native->Release();
   return true;
 }
+// Recording-thread lookup. Null on contention as well as on an unknown
+// resource; every caller treats null as "no proof" and skips.
 std::shared_ptr<Resource> resource(ID3D12Resource* p) {
   auto& r = registry();
-  const std::lock_guard lock(r.mutex);
+  const RegistryLock lock(r, wait_budget::recording_us, ContentionSite::registry_recording);
+  if (!lock)
+    return nullptr;
   const auto it = r.resources.find(p);
   return it != r.resources.end() && it->second->alive ? it->second : nullptr;
 }
@@ -787,6 +855,42 @@ struct KnownListCache {
   }
 };
 thread_local KnownListCache known_lists;
+// Lists whose lookup expired on this recording thread. Whatever the hook would
+// have tracked for that call is missing, so the next successful lookup of the
+// same list here invalidates its recording once. Recording is caller-serialized
+// per list, so the thread that missed is the thread that records it.
+struct ContendedLists {
+  std::array<ID3D12GraphicsCommandList*, 8> lists{};
+  unsigned next{};
+  void remember(ID3D12GraphicsCommandList* native) noexcept {
+    for (auto* entry : lists)
+      if (entry == native)
+        return;
+    lists[next++ % lists.size()] = native;
+  }
+  bool take(ID3D12GraphicsCommandList* native) noexcept {
+    for (auto& entry : lists)
+      if (entry == native) {
+        entry = nullptr;
+        return true;
+      }
+    return false;
+  }
+};
+thread_local ContendedLists contended_lists;
+void invalidate_contended_recording(List& list) noexcept {
+  list.graphics.invalidate("registry_contended");
+  list.copy_proof.invalidate();
+  list.submission_proof.invalidate(PfdSubmissionProof::Refusal::contended);
+  list.pfd_dirty = false;
+  list.pending_pfds = {};
+  list.pending_rt = {};
+  list.raw_om_known = false;
+  list.targets = {};
+  list.count = 0;
+  list.depth_known = false;
+  boundary::invalidate_recording(list.native, list.id);
+}
 std::shared_ptr<List> find_list(ID3D12GraphicsCommandList* p) {
 #ifdef TAXI_METADATA_BATCH_VALIDATION
   ++metadata_lookup_calls;
@@ -795,26 +899,34 @@ std::shared_ptr<List> find_list(ID3D12GraphicsCommandList* p) {
   const bool diagnostics = r.diagnostics_enabled.load(std::memory_order_relaxed);
   if (diagnostics)
     r.list_lookup_calls.fetch_add(1, std::memory_order_relaxed);
+  std::shared_ptr<List> item;
 #ifdef TAXI_METADATA_BATCH_VALIDATION
   if (!bypass_known_list_cache)
 #endif
-    if (auto item = known_lists.find(p)) {
+    if ((item = known_lists.find(p))) {
       if (diagnostics)
         r.list_cache_hits.fetch_add(1, std::memory_order_relaxed);
-      return item;
     }
+  if (!item) {
 #ifdef TAXI_METADATA_BATCH_VALIDATION
-  ++registry_lookup_calls;
+    ++registry_lookup_calls;
 #endif
-  if (diagnostics)
-    r.list_registry_lookups.fetch_add(1, std::memory_order_relaxed);
-  const std::lock_guard lock(r.mutex);
-  const auto it = r.lists.find(p);
-  auto item = it != r.lists.end() && it->second->alive ? it->second : nullptr;
+    if (diagnostics)
+      r.list_registry_lookups.fetch_add(1, std::memory_order_relaxed);
+    const RegistryLock lock(r, wait_budget::recording_us, ContentionSite::registry_recording);
+    if (!lock) {
+      contended_lists.remember(p);
+      return nullptr;
+    }
+    const auto it = r.lists.find(p);
+    item = it != r.lists.end() && it->second->alive ? it->second : nullptr;
 #ifdef TAXI_METADATA_BATCH_VALIDATION
-  if (!bypass_known_list_cache)
+    if (!bypass_known_list_cache)
 #endif
-    known_lists.remember(item);
+      known_lists.remember(item);
+  }
+  if (item && contended_lists.take(p))
+    invalidate_contended_recording(*item);
   return item;
 }
 thread_local MetadataBatchCache<List, ID3D12GraphicsCommandList*> metadata_batches;
@@ -1139,7 +1251,13 @@ void stage_pfd(ID3D12GraphicsCommandList* native, std::uint64_t id) noexcept {
   if (!list->depth_known || !list->count || list->count > 8)
     return;
   auto& r = registry();
-  const std::lock_guard lock(r.mutex);
+  if (r.views_stale.load(std::memory_order_acquire))
+    return;
+  const RegistryLock lock(r, wait_budget::close_us, ContentionSite::registry_close);
+  if (!lock) {
+    count_contention(ContentionSite::skipped_pfd_writes);
+    return;  // The next draw on this target dirties it again.
+  }
   for (UINT slot = 0; slot < list->count; ++slot) {
     const auto& view = list->targets[slot];
     if (!view.resource || !view.resource->alive || view.mip)
@@ -1206,11 +1324,17 @@ void drain_pfds(ID3D12GraphicsCommandList* native, std::uint64_t id, bool record
   if (!pending)
     return;
   auto& r = registry();
-  if (!boundary::recording_allows_injection(native, id)) {
+  if (!boundary::recording_allows_injection(native, id) || r.views_stale.load(std::memory_order_acquire)) {
     ++r.fallback_state_refused;
     return;
   }
-  const std::lock_guard lock(r.mutex);
+  // Close-time delivery. copy_patch/stamp below also wait on the runtime lock
+  // within their own budget while this one is held; both waits are bounded.
+  const RegistryLock lock(r, wait_budget::close_us, ContentionSite::registry_close);
+  if (!lock) {
+    count_contention(ContentionSite::skipped_pfd_writes);
+    return;
+  }
   for (unsigned side = 0; side < 2; ++side) {
     const auto view = list->pending_pfds[side];
     if (!list->pending_rt[side] || !view.resource || !view.resource->alive || !view.rtv || view.mip || !(r.active_mask & (1u << side)) ||
@@ -1299,7 +1423,9 @@ UINT selected_legacy_targets(void*, ID3D12GraphicsCommandList* native, std::uint
   if (!list || list->id != id || !list->ready || !recording_observed(*list))
     return 0;
   auto& r = registry();
-  const std::lock_guard lock(r.mutex);
+  const RegistryLock lock(r, wait_budget::recording_us, ContentionSite::registry_recording);
+  if (!lock)
+    return 0;  // No selected targets: the boundary observer emits no RT-exit callback.
   refresh_selected(r);
   UINT count = 0;
   for (unsigned side = 0; side < 2; ++side) {
@@ -1319,8 +1445,8 @@ void copy_pending_pfd(ID3D12GraphicsCommandList* native,
     return;
   flush_pfd(native, id, false);
   auto list = find_list(native);
-  if (!registry().ready || !list || list->id != id || !list->ready || !recording_observed(*list) ||
-      !boundary::recording_allows_injection(native, id))
+  if (!registry().ready || registry().views_stale.load(std::memory_order_acquire) || !list || list->id != id || !list->ready ||
+      !recording_observed(*list) || !boundary::recording_allows_injection(native, id))
     return;
   auto& r = registry();
   View pending;
@@ -1335,7 +1461,11 @@ void copy_pending_pfd(ID3D12GraphicsCommandList* native,
   bool selected = false;
   profiles::DisplayRect area{}, content{};
   {
-    const std::lock_guard lock(r.mutex);
+    const RegistryLock lock(r, wait_budget::close_us, ContentionSite::registry_close);
+    if (!lock) {
+      count_contention(ContentionSite::skipped_pfd_writes);
+      return;
+    }
     refresh_selected(r);
     std::shared_ptr<Resource> item;
     unsigned side = 0;
@@ -1451,12 +1581,19 @@ std::shared_ptr<List> ensure_list(ID3D12GraphicsCommandList* native, bool observ
   if (auto existing = find_list(native))
     return existing;
   auto& r = registry();
-  const std::lock_guard observation_lock(r.observation_mutex);
+  // New-list admission on the creating or first-recording thread. A list left
+  // unknown here is admitted on its next hook; until then it is unobserved.
+  const BoundedLock observation_lock(r.observation_mutex, wait_budget::lifecycle_us,
+                                     &r.contention[static_cast<unsigned>(ContentionSite::observation_recording)]);
+  if (!observation_lock)
+    return {};
   if (!r.ready || native->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT || !same_native_device(native, r.device))
     return {};
   std::shared_ptr<List> item;
   {
-    const std::lock_guard lock(r.mutex);
+    const RegistryLock lock(r, wait_budget::lifecycle_us, ContentionSite::registry_lifecycle);
+    if (!lock)
+      return {};
     if (r.lists.size() >= 4096 || r.next_id == UINT64_MAX) {
       error("command_list_capacity");
       return {};
@@ -1479,6 +1616,12 @@ std::shared_ptr<List> ensure_list(ID3D12GraphicsCommandList* native, bool observ
                                    : runtime::manager().register_unobserved_command_list(native, r.key, item->id);
   if (!hooked.ready || !hooked.protection_restored || !registered || !attach(native, item)) {
     item->retire();
+    if (!registered && SceneCaptureManager::last_call_contended()) {
+      // Not a hook fault: the manager lock was busy. The list is retried on its
+      // next hook call; hook_failures must not count a bounded skip.
+      count_contention(ContentionSite::registry_lifecycle);
+      return {};
+    }
     error("native_list_registration_failed");
     return {};
   }
@@ -1506,7 +1649,7 @@ void plan_display_submission(void*,
   const auto outcome = [&](DisplaySubmissionOutcome value) noexcept {
     r.queue_outcomes[static_cast<unsigned>(value)].fetch_add(1, std::memory_order_relaxed);
   };
-  if (!r.ready) {
+  if (!r.ready || !r.armed.load(std::memory_order_acquire)) {
     outcome(DisplaySubmissionOutcome::not_ready);
     return;
   }
@@ -1715,14 +1858,17 @@ HRESULT STDMETHODCALLTYPE root_create(ID3D12Device* device, UINT node, const voi
         auto item = std::make_shared<Root>();
         item->layout = native_root_layout(blob, bytes);
         auto& r = registry();
+        bool contended = false;
         {
-          const std::lock_guard lock(r.mutex);
-          if (r.roots.size() < 16384 && r.next_id != UINT64_MAX) {
+          const RegistryLock lock(r, wait_budget::lifecycle_us, ContentionSite::registry_creation);
+          contended = !lock;
+          if (lock && r.roots.size() < 16384 && r.next_id != UINT64_MAX) {
             item->id = ++r.next_id;
             r.roots[native] = item;
           }
         }
-        if (!item->id || !attach(native, item))
+        // A root missed here is learned on its first SetGraphicsRootSignature.
+        if (!contended && (!item->id || !attach(native, item)))
           error("root_lifetime_registration_failed");
         native->Release();
       }
@@ -1747,7 +1893,11 @@ void STDMETHODCALLTYPE rtv_create(ID3D12Device* device,
     if (item && (!desc || desc->ViewDimension == D3D12_RTV_DIMENSION_TEXTURE2D)) {
       view = {item, desc ? desc->Format : item->desc.Format, desc ? desc->Texture2D.MipSlice : 0};
     }
-    const std::lock_guard lock(r.mutex);
+    const RegistryLock lock(r, wait_budget::lifecycle_us, ContentionSite::registry_creation);
+    if (!lock) {
+      r.views_stale.store(true, std::memory_order_release);  // handle may still map an older view.
+      return;
+    }
     replace_view(r, handle.ptr, view);
     maybe_stop_live_backfill(r);
   });
@@ -1763,20 +1913,26 @@ void STDMETHODCALLTYPE dsv_create(ID3D12Device* device,
   observe_safely([&] {
     DXGI_FORMAT format = desc ? desc->Format : native ? native->GetDesc().Format : DXGI_FORMAT_UNKNOWN;
     auto& r = registry();
-    const std::lock_guard lock(r.mutex);
+    const RegistryLock lock(r, wait_budget::lifecycle_us, ContentionSite::registry_creation);
+    if (!lock) {
+      r.views_stale.store(true, std::memory_order_release);
+      return;
+    }
     if (r.dsvs.size() < 16384)
       r.dsvs[handle.ptr] = format;
   });
 }
-void copy_descriptors(UINT count, D3D12_CPU_DESCRIPTOR_HANDLE dest, D3D12_CPU_DESCRIPTOR_HANDLE src, D3D12_DESCRIPTOR_HEAP_TYPE type) {
-  auto& r = registry();
+// Called with the registry held by descriptors(); descriptors_simple takes it here.
+void copy_descriptors_locked(Registry& r,
+                             UINT count,
+                             D3D12_CPU_DESCRIPTOR_HANDLE dest,
+                             D3D12_CPU_DESCRIPTOR_HANDLE src,
+                             D3D12_DESCRIPTOR_HEAP_TYPE type) {
   if (count > 65536) {
-    const std::lock_guard lock(r.mutex);
     clear_views(r);
     error("descriptor_copy_capacity");
     return;
   }
-  const std::lock_guard lock(r.mutex);
   const UINT stride = type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV ? r.rtv_stride : r.dsv_stride;
   for (UINT i = 0; i < count; ++i) {
     if (type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV) {
@@ -1803,7 +1959,15 @@ void STDMETHODCALLTYPE descriptors_simple(ID3D12Device* device,
   descriptor_copy_simple.forward<F>()(device, count, dest, src, type);
   if (!owned_depth && registry().ready && (type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV || type == D3D12_DESCRIPTOR_HEAP_TYPE_DSV) &&
       same_device(device))
-    observe_safely([&] { copy_descriptors(count, dest, src, type); });
+    observe_safely([&] {
+      auto& r = registry();
+      const RegistryLock lock(r, wait_budget::lifecycle_us, ContentionSite::registry_creation);
+      if (!lock) {
+        r.views_stale.store(true, std::memory_order_release);
+        return;
+      }
+      copy_descriptors_locked(r, count, dest, src, type);
+    });
 }
 void STDMETHODCALLTYPE descriptors(ID3D12Device* device,
                                    UINT nd,
@@ -1821,8 +1985,12 @@ void STDMETHODCALLTYPE descriptors(ID3D12Device* device,
     return;
   observe_safely([&] {
     auto& r = registry();
+    const RegistryLock lock(r, wait_budget::lifecycle_us, ContentionSite::registry_creation);
+    if (!lock) {
+      r.views_stale.store(true, std::memory_order_release);
+      return;
+    }
     if (nd > 4096 || ns > 4096 || !dest || !src) {
-      const std::lock_guard lock(r.mutex);
       clear_views(r);
       r.dsvs.clear();
       error("descriptor_ranges_refused");
@@ -1844,13 +2012,12 @@ void STDMETHODCALLTYPE descriptors(ID3D12Device* device,
       }
       const UINT n = std::min(dcount - dp, scount - sp);
       if (n > 65536 - total) {
-        const std::lock_guard lock(r.mutex);
         clear_views(r);
         r.dsvs.clear();
         error("descriptor_ranges_overflow");
         return;
       }
-      copy_descriptors(n, {dest[di].ptr + SIZE_T{dp} * stride}, {src[si].ptr + SIZE_T{sp} * stride}, type);
+      copy_descriptors_locked(r, n, {dest[di].ptr + SIZE_T{dp} * stride}, {src[si].ptr + SIZE_T{sp} * stride}, type);
       dp += n;
       sp += n;
       total += n;
@@ -1916,6 +2083,7 @@ HRESULT STDMETHODCALLTYPE close(ID3D12GraphicsCommandList* native) noexcept {
   using F = HRESULT(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*);
   if (!owned_depth && registry().ready) {
     const OwnedWork guard;
+    registry().frame_pulse.fetch_add(1, std::memory_order_relaxed);
     clear_live_bind(native);
     observe_safely([&] {
       if (auto item = find_list(native); item && item->ready && !item->closing) {
@@ -1956,8 +2124,11 @@ HRESULT STDMETHODCALLTYPE reset(ID3D12GraphicsCommandList* native, ID3D12Command
   if (item) {
     // Demand cannot change between qualifying this native Reset and publishing
     // its PFD-state proof. Source state remains continuously observed separately.
-    const std::lock_guard observation_lock(registry().observation_mutex);
-    item->observation_epoch = observation_epoch == registry().observation_epoch.load(std::memory_order_acquire) ? observation_epoch : 0;
+    // Without the lock the recording is simply unobserved until the next Reset.
+    const BoundedLock observation_lock(registry().observation_mutex, wait_budget::recording_us,
+                                       &registry().contention[static_cast<unsigned>(ContentionSite::observation_recording)]);
+    item->observation_epoch =
+        observation_lock && observation_epoch == registry().observation_epoch.load(std::memory_order_acquire) ? observation_epoch : 0;
     item->pfd_dirty = false;
     item->pending_pfds = {};
     item->pending_rt = {};
@@ -2030,7 +2201,11 @@ struct Heaps {
 struct GraphicsRoot {
   static void apply(List& l, ID3D12RootSignature* p) {
     auto& r = registry();
-    const std::lock_guard lock(r.mutex);
+    const RegistryLock lock(r, wait_budget::recording_us, ContentionSite::registry_recording);
+    if (!lock) {
+      l.graphics.bind_observed_root(nullptr, 0);  // Incomplete state refuses the stamp.
+      return;
+    }
     auto it = r.roots.find(p);
     if (p && (it == r.roots.end() || !it->second->alive) && r.roots.size() < 16384 && r.next_id != UINT64_MAX &&
         same_native_device(p, r.device)) {
@@ -2079,7 +2254,6 @@ struct Targets {
                      const D3D12_CPU_DESCRIPTOR_HANDLE* depth,
                      bool snapshots) {
     auto& r = registry();
-    const std::lock_guard lock(r.mutex);
     l.pfd_dirty = false;
     l.pfd_transition = false;
     l.targets = {};
@@ -2091,6 +2265,17 @@ struct Targets {
     l.raw_rtv_count = 0;
     l.raw_has_dsv = depth != nullptr;
     l.raw_dsv = {};
+    const RegistryLock lock(r, wait_budget::recording_us, ContentionSite::registry_recording);
+    if (!lock || r.views_stale.load(std::memory_order_acquire)) {
+      // Untracked binding: nothing in this recording may be written through it,
+      // and the submit-time proof must not treat a later exit as verified.
+      l.depth_known = false;
+      l.submission_proof.invalidate(PfdSubmissionProof::Refusal::contended);
+      l.copy_proof.invalidate();
+      if (r.live_backfill.load(std::memory_order_relaxed))
+        r.live_bind.clear(l.native);
+      return;
+    }
     if (depth) {
       const auto found = r.dsvs.find(depth->ptr);
       if (found != r.dsvs.end()) {
@@ -2260,7 +2445,13 @@ struct ClearRenderTarget {
     View view{};
     {
       auto& r = registry();
-      const std::lock_guard lock(r.mutex);
+      const RegistryLock lock(r, wait_budget::recording_us, ContentionSite::registry_recording);
+      if (!lock || r.views_stale.load(std::memory_order_acquire)) {
+        // A clear of a possibly selected display went unattributed; a queue
+        // copy placed before it would be overwritten by the clear colour.
+        l.submission_proof.invalidate(PfdSubmissionProof::Refusal::contended);
+        return;
+      }
       const auto it = r.rtvs.find(handle.ptr);
       if (it == r.rtvs.end())
         return;
@@ -2279,7 +2470,13 @@ struct ClearUnorderedAccess {
     if (!target || !maybe_selected(target))
       return;
     const auto item = resource(target);
-    if (!item || !(item->desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS))
+    if (!item) {
+      // Selected but unresolved (contended or retiring): the write cannot be
+      // attributed, so this recording's exit proof must not admit a queue copy.
+      l.submission_proof.invalidate(PfdSubmissionProof::Refusal::contended);
+      return;
+    }
+    if (!(item->desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS))
       return;
     l.submission_proof.note_unordered_access_write({reinterpret_cast<std::uint64_t>(item->native), item->id}, Operation);
   }
@@ -2628,6 +2825,16 @@ void set_graphics_observation_demand(bool enabled) noexcept {
 void set_graphics_diagnostics_enabled(bool enabled) noexcept {
   registry().diagnostics_enabled.store(enabled, std::memory_order_relaxed);
 }
+std::uint64_t frame_pulse() noexcept {
+  return registry().frame_pulse.load(std::memory_order_relaxed) + queue_hook::total_statistics().calls;
+}
+void set_graphics_armed(bool armed) noexcept {
+  registry().armed.store(armed, std::memory_order_release);
+  runtime::manager().set_submission_gate(armed);
+}
+bool graphics_armed() noexcept {
+  return registry().armed.load(std::memory_order_acquire);
+}
 GraphicsStatus graphics_status() noexcept {
   auto& r = registry();
   const std::lock_guard lock(r.mutex);
@@ -2686,6 +2893,14 @@ GraphicsStatus graphics_status() noexcept {
   result.queue_last_proof_flags = r.queue_last_proof_flags.load(std::memory_order_relaxed);
   for (unsigned i = 0; i < result.queue_prefix_blockers.size(); ++i)
     result.queue_prefix_blockers[i] = r.queue_prefix_blockers[i].load(std::memory_order_relaxed);
+  for (unsigned i = 0; i < result.contention.size(); ++i)
+    result.contention[i] = r.contention[i].load(std::memory_order_relaxed);
+  result.deferred_lifecycle = r.deferred_lifecycle.load(std::memory_order_relaxed);
+  result.armed = r.armed.load(std::memory_order_acquire);
+  result.frame_pulse = frame_pulse();
+  const auto queues = queue_hook::total_statistics();
+  result.queue_calls = queues.calls;
+  result.queue_contended = queues.contended;
   return result;
 }
 static std::vector<PfdTargetObservation> pfd_inventory_locked(Registry& r) {
@@ -2864,10 +3079,40 @@ void set_aircraft_profile(std::uint32_t id) noexcept {
   if (!runtime::set_patch_profile(r.key, id))
     error("private_patch_profile_failed");
 }
+// Worker-side completion of lifecycle work a simulator thread skipped.
+void drain_deferred_lifecycle(Registry& r) {
+  DeferredHandoffRetirement retirement;
+  while (r.deferred_handoff.pop(retirement))
+    scene_handoff().unregister_resource(retirement.key, retirement.handle);
+  if (r.deferred_handoff.take_overflow()) {
+    // Unknown retirements: a zero handle is the handoff's global lifecycle
+    // event, invalidating every open match and publication without touching a
+    // native object. Later creations re-register their own handles.
+    scene_handoff().unregister_resource(r.key, 0);
+    r.pfd_inventory_complete = false;
+  }
+  DeferredSourceCandidate candidate;
+  while (r.deferred_sources.pop(candidate)) {
+    const auto found = r.resources.find(candidate.native);
+    if (found == r.resources.end() || !found->second->alive || found->second->id != candidate.id)
+      continue;  // Retired since; its tombstone already reached the manager.
+    runtime::manager().register_source_candidate(r.key, candidate.native, candidate.id, found->second->desc, candidate.initial);
+  }
+  if (r.deferred_sources.take_overflow())
+    r.pfd_inventory_complete = false;
+  if (r.views_stale.exchange(false, std::memory_order_acq_rel)) {
+    // Same recovery as descriptor-range refusal: forget every view and relearn
+    // display associations from live binds. No recording proof is touched.
+    clear_views(r);
+    r.dsvs.clear();
+    rearm_live_backfill(r);
+  }
+}
 void discover_pfds(std::uint64_t now) noexcept {
   observe_safely([&] {
     auto& r = registry();
     const std::lock_guard lock(r.mutex);
+    drain_deferred_lifecycle(r);
     for (auto i = r.resources.begin(); i != r.resources.end();) {
       if (!i->second->alive) {
         r.routes.forget(i->second->id);

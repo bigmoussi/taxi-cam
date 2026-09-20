@@ -31,6 +31,7 @@ struct Device {
 };
 struct Runtime {
   std::mutex mutex;
+  std::atomic<std::uint64_t> contended_writes{0};
   bool gpu_timing_enabled = false;
   std::array<Device, SceneCaptureManager::MaximumDevices> devices;
 };
@@ -219,8 +220,9 @@ bool init_queue(std::uint64_t key, ID3D12CommandQueue* queue) {
                                                     result.status == engine_hook::queue_submit::Status::already_registered);
   if (!ready) {
     manager().submission_refused(queue, engine_hook::queue_submit::Refusal::invalid_batch);
-    const std::lock_guard lock(runtime().mutex);
-    if (auto* item = find(key)) {
+    // Discovery runs on the application's first submit of this queue.
+    const BoundedLock lock(runtime().mutex, wait_budget::submit_us, &runtime().contended_writes);
+    if (auto* item = lock ? find(key) : nullptr) {
       item->status.failed = true;
       item->status.message = "Native queue observation failed; scene capture disabled.";
     }
@@ -284,7 +286,11 @@ bool copy_patch(ID3D12GraphicsCommandList* list,
                 const D3D12_RECT& destination,
                 const D3D12_RECT& content,
                 ID3D12GraphicsCommandList7* enhanced) {
-  const std::lock_guard lock(runtime().mutex);
+  // Recording-thread entry (barrier callback or Close). service() may hold this
+  // mutex across a private compose submit; skip this write rather than wait.
+  const BoundedLock lock(runtime().mutex, wait_budget::close_us, &runtime().contended_writes);
+  if (!lock)
+    return false;
   auto* item = find(key);
   if (!list || !target || !item || !current_output(*item) || item->status.failed ||
       (enhanced && static_cast<ID3D12GraphicsCommandList*>(enhanced) != list) || desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
@@ -565,6 +571,7 @@ Snapshot snapshot(std::uint64_t key) {
   }
   result.capture = manager().statistics();
   result.stamps += result.capture.display_copies;
+  result.contended_writes = runtime().contended_writes.load(std::memory_order_relaxed);
   return result;
 }
 bool stamp_at_recording_end(ID3D12GraphicsCommandList* list,
@@ -576,7 +583,9 @@ bool stamp_at_recording_end(ID3D12GraphicsCommandList* list,
                             DXGI_FORMAT depth_format,
                             const D3D12_RECT* destination,
                             const D3D12_RECT* content) {
-  const std::lock_guard lock(runtime().mutex);
+  const BoundedLock lock(runtime().mutex, wait_budget::close_us, &runtime().contended_writes);
+  if (!lock)
+    return false;
   auto* item = find(key);
   if (!item || !current_output(*item) || item->status.failed)
     return false;

@@ -49,6 +49,9 @@ class PfdSubmissionProof {
     enhanced_barrier,
     unsupported_command,
     boundary_invalidation,
+    // A recording hook could not take the bridge registry within its budget, so
+    // part of this recording's state is untracked. Never a GPU or app fault.
+    contended,
     count
   };
   static constexpr const char* refusal_name(Refusal value) noexcept {
@@ -69,7 +72,8 @@ class PfdSubmissionProof {
                                   "barrier_uncertainty",
                                   "enhanced_barrier",
                                   "unsupported_command",
-                                  "boundary_invalidation"};
+                                  "boundary_invalidation",
+                                  "contended"};
     return static_cast<unsigned>(value) < static_cast<unsigned>(Refusal::count) ? names[static_cast<unsigned>(value)] : "invalid_reason";
   }
   Refusal refusal() const noexcept { return refusal_; }

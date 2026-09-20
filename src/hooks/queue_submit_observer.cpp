@@ -18,7 +18,7 @@ struct QueueState {
   Callbacks callbacks;
   std::atomic<ID3D12CommandQueue*> queue{nullptr};
   std::atomic<bool> enabled{false};
-  std::atomic<std::uint64_t> submissions{0}, receipts{0}, refusals{0};
+  std::atomic<std::uint64_t> submissions{0}, receipts{0}, refusals{0}, calls{0}, contended{0};
 };
 
 SRWLOCK control_lock = SRWLOCK_INIT;
@@ -191,6 +191,8 @@ void STDMETHODCALLTYPE submit(ID3D12CommandQueue* queue, UINT count, ID3D12Comma
     forward(queue, count, lists);
     return;
   }
+  if (entry)
+    entry->calls.fetch_add(1, std::memory_order_relaxed);
   if (!entry || !entry->enabled.load(std::memory_order_acquire)) {
     forward(queue, count, lists);
     return;
@@ -199,6 +201,7 @@ void STDMETHODCALLTYPE submit(ID3D12CommandQueue* queue, UINT count, ID3D12Comma
   if (!lock.owned) {
     // Frame-generation and Present helpers share this queue. Waiting here
     // deadlocks DXGI when the owner is already inside original Execute.
+    entry->contended.fetch_add(1, std::memory_order_relaxed);
     const auto notify = entry->callbacks.contended;
     const bool notified = notify && entry->enabled.load(std::memory_order_acquire);
     std::uint64_t token = 0;
@@ -234,6 +237,8 @@ void STDMETHODCALLTYPE submit(ID3D12CommandQueue* queue, UINT count, ID3D12Comma
   if (!receipt && !oversized && !invalid) {
     lock.release();
     forward(queue, count, lists);
+    if (entry->callbacks.forwarded_unordered)
+      entry->callbacks.forwarded_unordered(entry->callbacks.context, queue);
     return;
   }
   std::array<Insertion, kMaximumInsertions> insertions{};
@@ -294,7 +299,7 @@ Result exchange(void** slot, void* expected, void* replacement, bool installing)
 bool same_callbacks(const Callbacks& left, const Callbacks& right) noexcept {
   return left.context == right.context && left.before == right.before && left.after == right.after && left.refused == right.refused &&
          left.contended == right.contended && left.contended_completed == right.contended_completed && left.augment == right.augment &&
-         left.augmentation_result == right.augmentation_result;
+         left.augmentation_result == right.augmentation_result && left.forwarded_unordered == right.forwarded_unordered;
 }
 
 }  // namespace
@@ -429,8 +434,23 @@ Result restore_protection() noexcept {
 Statistics statistics(ID3D12CommandQueue* queue) noexcept {
   if (auto* entry = find_queue(queue))
     return {entry->submissions.load(std::memory_order_relaxed), entry->receipts.load(std::memory_order_relaxed),
-            entry->refusals.load(std::memory_order_relaxed)};
+            entry->refusals.load(std::memory_order_relaxed), entry->calls.load(std::memory_order_relaxed),
+            entry->contended.load(std::memory_order_relaxed)};
   return {};
+}
+
+Statistics total_statistics() noexcept {
+  Statistics total;
+  for (auto& entry : queues) {
+    if (!entry.queue.load(std::memory_order_acquire))
+      continue;
+    total.submissions += entry.submissions.load(std::memory_order_relaxed);
+    total.receipts += entry.receipts.load(std::memory_order_relaxed);
+    total.refusals += entry.refusals.load(std::memory_order_relaxed);
+    total.calls += entry.calls.load(std::memory_order_relaxed);
+    total.contended += entry.contended.load(std::memory_order_relaxed);
+  }
+  return total;
 }
 
 const char* status_name(Status status) noexcept {

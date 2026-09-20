@@ -12,15 +12,31 @@
 #include "../shared/protocol.hpp"
 #include "../shared/rotating_log.hpp"
 #include "../shared/scene_demand.hpp"
+#include "../shared/sim_messages.hpp"
 #include "camera_status.hpp"
 #include "crash_evidence.hpp"
 #include "d3d12_bridge.hpp"
+#include "freeze_watchdog.hpp"
 #include "native_hooks.hpp"
 
 namespace {
 using namespace taxi_camera;
 namespace win = standalone;
 std::atomic<bool> started{};
+// Published by the bridge worker for the presentation watchdog thread.
+std::atomic<std::uint64_t> worker_heartbeat_ms{};
+std::atomic<bool> bridge_connected{};
+std::atomic<unsigned> watchdog_trips{};
+std::atomic<std::uint64_t> watchdog_last_stall_ms{};
+std::atomic<bool> in_sim_messages_enabled{};
+constexpr std::uint64_t WorkerAliveMs = 10000;  // Contract scans have taken 4 s per iteration.
+// Queue an in-simulator notice for the SimConnect worker. Never sends here.
+void announce(SimEvent event, SimMessageLimiter& limiter, std::uint64_t now) noexcept {
+  if (!in_sim_messages_enabled.load(std::memory_order_acquire) || !limiter.admit(event, now))
+    return;
+  const auto message = sim_message_for(event);
+  native_camera::post_simulator_message(message.text, message.seconds, message.alert, now);
+}
 void log_status(const win::Status& s, const char* detail = "") noexcept {
   try {
     wchar_t directory[32768]{};
@@ -70,6 +86,86 @@ void log_startup(const win::Status& status, const StartupTiming& timing, const c
                 static_cast<unsigned long long>(timing.stamped ? timing.stamp_ms - timing.intent_ms : 0));
   log_status(status, detail);
 }
+void log_contention(const win::Status& status, const win::GraphicsStatus& graphics, const scene_runtime::Snapshot& output) {
+  const auto sim_messages = native_camera::get_simulator_message_status();
+  char detail[1024];
+  auto used = static_cast<std::size_t>(std::snprintf(
+      detail, sizeof(detail),
+      "Render-thread contention: armed=%u pulse=%llu queue_calls=%llu queue_contended=%llu manager_evidence=%llu "
+      "manager_lifecycle=%llu manager_submit=%llu unordered=%llu gated=%llu deferred_retirements=%llu deferred_lifecycle=%llu "
+      "runtime_writes=%llu watchdog_trips=%u last_stall_ms=%llu sim_messages=%u/%llu/%llu/%llu/%llu",
+      graphics.armed, static_cast<unsigned long long>(graphics.frame_pulse), static_cast<unsigned long long>(graphics.queue_calls),
+      static_cast<unsigned long long>(graphics.queue_contended), static_cast<unsigned long long>(output.capture.contended_evidence),
+      static_cast<unsigned long long>(output.capture.contended_lifecycle),
+      static_cast<unsigned long long>(output.capture.contended_submissions),
+      static_cast<unsigned long long>(output.capture.unordered_submissions),
+      static_cast<unsigned long long>(output.capture.gated_submissions),
+      static_cast<unsigned long long>(output.capture.deferred_retirements), static_cast<unsigned long long>(graphics.deferred_lifecycle),
+      static_cast<unsigned long long>(output.contended_writes), watchdog_trips.load(std::memory_order_relaxed),
+      static_cast<unsigned long long>(watchdog_last_stall_ms.load(std::memory_order_relaxed)),
+      in_sim_messages_enabled.load(std::memory_order_relaxed), static_cast<unsigned long long>(sim_messages.posted),
+      static_cast<unsigned long long>(sim_messages.sent), static_cast<unsigned long long>(sim_messages.dropped),
+      static_cast<unsigned long long>(sim_messages.failed)));
+  for (unsigned i = 0; i < graphics.contention.size() && used < sizeof(detail); ++i) {
+    const auto written =
+        std::snprintf(detail + used, sizeof(detail) - used, " %s=%llu", win::contention_site_name(static_cast<win::ContentionSite>(i)),
+                      static_cast<unsigned long long>(graphics.contention[i]));
+    if (written < 0 || static_cast<std::size_t>(written) >= sizeof(detail) - used)
+      break;
+    used += static_cast<std::size_t>(written);
+  }
+  log_status(status, detail);
+}
+// Dedicated thread: reads counters, never takes a bridge lock, and flips the
+// graphics gate. The worker applies the camera disarm on its next iteration.
+DWORD WINAPI watchdog_run(void*) noexcept {
+  FreezeWatchdog watchdog;
+  SimMessageLimiter limiter;
+  for (;;) {
+    Sleep(250);
+    const auto now = GetTickCount64();
+    const auto heartbeat = worker_heartbeat_ms.load(std::memory_order_acquire);
+    const auto telemetry = native_camera::get_body_telemetry_timing();
+    const auto session = native_camera::get_aircraft_session_readiness();
+    const auto pulse = win::frame_pulse();
+    const auto decision = watchdog.observe({now, pulse, pulse != 0, telemetry.accepted_samples, session.ready,
+                                            win::graphics_ready() && bridge_connected.load(std::memory_order_acquire),
+                                            heartbeat != 0 && now >= heartbeat && now - heartbeat < WorkerAliveMs});
+    if (!decision.trip && !decision.recover && !decision.telemetry_stall_noted)
+      continue;
+    win::Status status{};
+    status.heartbeat = now;
+    if (decision.trip) {
+      // Atomic gate only: observation idles, PFD plans refuse, the capture
+      // manager escapes every submission. No wait, no GPU resource touched.
+      win::set_graphics_armed(false);
+      watchdog_trips.fetch_add(1, std::memory_order_relaxed);
+      watchdog_last_stall_ms.store(decision.stalled_ms, std::memory_order_relaxed);
+      // Posted here so the notice does not depend on the worker being free.
+      announce(SimEvent::presentation_stalled, limiter, now);
+    } else if (decision.recover) {
+      win::set_graphics_armed(true);
+    }
+    const auto graphics = win::graphics_status();
+    const auto output = scene_runtime::snapshot(graphics.device);
+    char detail[512];
+    std::snprintf(detail, sizeof(detail),
+                  "Presentation watchdog: event=%s reason=%s stalled_ms=%llu worker_alive=%u pulse=%llu sim_frames=%llu "
+                  "session_ready=%u trips=%u",
+                  decision.trip      ? "tripped"
+                  : decision.recover ? "recovered"
+                                     : "telemetry_stall",
+                  decision.reason, static_cast<unsigned long long>(decision.stalled_ms), decision.worker_alive,
+                  static_cast<unsigned long long>(pulse), static_cast<unsigned long long>(telemetry.accepted_samples), session.ready,
+                  watchdog.trips());
+    std::snprintf(status.message, sizeof(status.message), "%s",
+                  decision.trip      ? "Presentation stalled: cameras disarmed so the simulator can keep running."
+                  : decision.recover ? "Presentation resumed: cameras re-armed."
+                                     : "Simulator frame telemetry paused while presentation continues.");
+    log_status(status, detail);
+    log_contention(status, graphics, output);
+  }
+}
 DWORD run_impl() {
   win::Mailbox mailbox;
   if (!mailbox.open(GetCurrentProcessId(), false))
@@ -108,6 +204,12 @@ DWORD run_impl() {
                                     graphics_diagnostics_option[0] == L'1';
   win::set_graphics_diagnostics_enabled(graphics_diagnostics);
   win::set_graphics_observation_demand(false);
+  worker_heartbeat_ms.store(GetTickCount64(), std::memory_order_release);
+  if (HANDLE watchdog = CreateThread(nullptr, 0, watchdog_run, nullptr, 0, nullptr)) {
+    CloseHandle(watchdog);
+    log_status(status, "Presentation watchdog started.");
+  } else
+    log_status(status, "Presentation watchdog unavailable.");
   // The Windows companion owns mount settings for native sessions.
   TaxiButtonIntent intent;
   DisplayExposureController exposure;
@@ -139,15 +241,31 @@ DWORD run_impl() {
   win::CompanionSetupSession connection_session;
   std::uint64_t applied_connection{}, pending_connection{};
   win::Status last_logged{};
-  bool logged = false, last_connected = false, last_requested = false;
+  bool logged = false, last_connected = false, last_requested = false, last_degraded = false;
+  SimEventTracker sim_events;
+  SimMessageLimiter sim_limiter;
+  const auto announce_all = [&](const SimEventInputs& inputs, std::uint64_t at) {
+    std::array<SimEvent, 8> events{};
+    const auto count = sim_events.observe(inputs, events.data(), events.size());
+    for (std::size_t i = 0; i < count; ++i)
+      announce(events[i], sim_limiter, at);
+  };
   std::uint64_t last_stop_sequence{};
   std::array<std::array<double, 6>, 2> applied_mounts{};
   for (;;) {
     control.refresh(mailbox);
     const auto now = GetTickCount64();
+    worker_heartbeat_ms.store(now, std::memory_order_release);
     const auto& settings = control.settings();
     const auto owner_pid = control.owner_pid();
     const bool connected = control.connected(now);
+    bridge_connected.store(connected && settings.enabled != 0, std::memory_order_release);
+    in_sim_messages_enabled.store(settings.in_sim_messages != 0, std::memory_order_release);
+    SimEventInputs sim_inputs;
+    sim_inputs.connected = connected && settings.enabled;
+    // Watchdog trip: the gate is already closed on every hook; this iteration
+    // also takes the cameras down through the ordinary demand path.
+    const bool degraded = !win::graphics_armed();
     const auto connection = connection_session.observe(connected, settings.enabled != 0, control.owner_pid(), settings.profile_request);
     if (connection.stopped) {
       win::set_target_mask(0);
@@ -171,6 +289,7 @@ DWORD run_impl() {
       startup = warmup_startup = {};
       route_request = 0;
       log_status(status, "Connection stopped: camera output closed; next Connect will rescan and set up again.");
+      sim_inputs.connection_stopped = true;
     }
     const auto session_epoch = native_camera::get_aircraft_session_epoch();
     const auto session = native_camera::get_aircraft_session_readiness();
@@ -276,6 +395,9 @@ DWORD run_impl() {
           native_camera::initialize_body_pose_provider();
           next_telemetry = now + 2000;
         }
+        sim_inputs.degraded = degraded;
+        sim_inputs.simulator_unsupported = transition.profile_transition_failed;
+        announce_all(sim_inputs, now);
         Sleep(25);
         continue;
       }
@@ -332,14 +454,14 @@ DWORD run_impl() {
     const auto buttons = native_camera::get_taxi_buttons();
     const auto cutoff = native_camera::get_taxi_cutoff();
     const auto desired = intent.observe(now, buttons.valid, buttons.left_on, buttons.right_on);
-    const unsigned mask =
-        connected && session_settings && session.ready && settings.enabled && aircraft_matches && win::graphics_ready() && !cutoff.inhibited
-            ? (settings.follow_taxi && !manual_only ? desired.buttons
-               : session_settings                   ? settings.manual_mask
-                                                    : 0)
-            : 0;
-    const bool test_scene =
-        connected && session_settings && session.ready && settings.enabled && aircraft_matches && settings.scene_test && !cutoff.inhibited;
+    const unsigned mask = connected && session_settings && session.ready && settings.enabled && aircraft_matches && win::graphics_ready() &&
+                                  !cutoff.inhibited && !degraded
+                              ? (settings.follow_taxi && !manual_only ? desired.buttons
+                                 : session_settings                   ? settings.manual_mask
+                                                                      : 0)
+                              : 0;
+    const bool test_scene = connected && session_settings && session.ready && settings.enabled && aircraft_matches && settings.scene_test &&
+                            !cutoff.inhibited && !degraded;
     const auto intent_observed_ms = GetTickCount64();
     if (!mask && !test_scene && !prewarm.active())
       failed = false;
@@ -404,11 +526,12 @@ DWORD run_impl() {
         log_status(status, detail);
       }
     }
-    const auto demand = win::scene_demand(mask, test_scene, assigned, requested, failed, background_warmup);
+    const auto demand = win::scene_demand(mask, test_scene, assigned, requested, failed, background_warmup && !degraded);
     unsigned active = demand.stamp_mask;
-    const unsigned calibration = connected && session_settings && session.ready && settings.enabled && aircraft_matches && !cutoff.inhibited
-                                     ? settings.calibration_mask
-                                     : 0;
+    const unsigned calibration =
+        connected && session_settings && session.ready && settings.enabled && aircraft_matches && !cutoff.inhibited && !degraded
+            ? settings.calibration_mask
+            : 0;
     // Warmup and scene-only diagnostics need capture observation without PFD
     // writes. Settled OFF may bypass PFD state while lifetime tracking remains.
     win::set_graphics_observation_demand(!demand.suspend || calibration != 0);
@@ -649,10 +772,11 @@ DWORD run_impl() {
     const auto stopped_camera = camera_stop_message(scene);
     const char* message =
         !connected || !settings.enabled ? "Disconnected. Use Connect in the Windows companion."
-        : !aircraft_matches             ? aircraft_message
-        : cutoff.inhibited ? (manual_only ? "Above 60 knots: camera displays inhibited." : "Above 60 knots: TAXI buttons commanded off.")
-        : failed                                         ? scene.message.c_str()
-        : scene.pose_waiting && requested               ? scene.message.c_str()
+        : degraded          ? "Presentation stalled: cameras disarmed so the simulator can keep running; they re-arm when frames resume."
+        : !aircraft_matches ? aircraft_message
+        : cutoff.inhibited  ? (manual_only ? "Above 60 knots: camera displays inhibited." : "Above 60 knots: TAXI buttons commanded off.")
+        : failed            ? scene.message.c_str()
+        : scene.pose_waiting && requested                                                               ? scene.message.c_str()
         : scene.view_waiting && scene.stop_reason == native_camera::SceneStopReason::resolution_changed ? scene.message.c_str()
         : !manual_only && !buttons.valid                                                                ? buttons.error
         : !manual_only && taxi_request_status.failed && taxi_request_status.serial == settings.taxi_request
@@ -673,7 +797,17 @@ DWORD run_impl() {
       mailbox.data()->status = status;
       mailbox.unlock();
     }
-    const bool changed = !logged || connected != last_connected || requested != last_requested ||
+    sim_inputs.cameras_ready = output.output;
+    sim_inputs.simulator_unsupported =
+        scene.pair.state == engine_camera::State::blocked || scene.stop_reason == native_camera::SceneStopReason::identity_refused;
+    sim_inputs.degraded = degraded;
+    sim_inputs.speed_cutoff = cutoff.inhibited;
+    sim_inputs.aircraft_mismatch = !aircraft_matches && identity.fresh;
+    sim_inputs.camera_startup_failed =
+        (failed && requested) || (stopped_camera != nullptr && !native_camera::retryable_scene_stop(scene.stop_reason));
+    sim_inputs.capture_paused = active && requested && progress.stalled();
+    announce_all(sim_inputs, now);
+    const bool changed = !logged || connected != last_connected || requested != last_requested || degraded != last_degraded ||
                          status.taxi_mask != last_logged.taxi_mask || status.left_id != last_logged.left_id ||
                          status.right_id != last_logged.right_id || status.speed_inhibited != last_logged.speed_inhibited ||
                          scene.stop_sequence != last_stop_sequence || output.output != last_output ||
@@ -728,8 +862,8 @@ DWORD run_impl() {
                     static_cast<unsigned long long>(scene.inspection_count), static_cast<unsigned long long>(scene.updates),
                     static_cast<unsigned long long>(graphics.clear_states),
                     scene.stop_reason != native_camera::SceneStopReason::none ? scene.stop_detail.c_str()
-                    : !scene.pair.owned_ids[0] && !scene.pair.owned_ids[1]      ? scene.message.c_str()
-                                                                                : "");
+                    : !scene.pair.owned_ids[0] && !scene.pair.owned_ids[1]    ? scene.message.c_str()
+                                                                              : "");
       log_status(status, detail);
       char selection_detail[256];
       std::snprintf(selection_detail, sizeof(selection_detail),
@@ -877,6 +1011,7 @@ DWORD run_impl() {
                     static_cast<unsigned long long>(graphics.dynamic_strip_cut_calls),
                     static_cast<unsigned long long>(graphics.sample_position_calls));
       log_status(status, copy_detail);
+      log_contention(status, graphics, output);
       if (!logged || status.active_profile != last_logged.active_profile || std::strcmp(status.aircraft_type, last_logged.aircraft_type) ||
           std::strcmp(status.aircraft_path, last_logged.aircraft_path)) {
         char identity_detail[640];
@@ -887,6 +1022,7 @@ DWORD run_impl() {
       last_logged = status;
       last_connected = connected;
       last_requested = requested;
+      last_degraded = degraded;
       last_stop_sequence = scene.stop_sequence;
       last_output = output.output;
       last_view_wait_count = scene.view_wait_count;

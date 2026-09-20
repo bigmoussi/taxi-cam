@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../hooks/queue_submit_observer.hpp"
+#include "../shared/bounded_lock.hpp"
 #include "../shared/camera_rate.hpp"
 #include "owned_gpu_timing.hpp"
 #include "pfd_submission_pool.hpp"
@@ -74,6 +75,13 @@ class SceneCaptureManager {
     std::uint64_t unknown_submitted_lists = 0, invalid_source_recordings = 0, scoped_source_invalidations = 0;
     std::uint64_t invalid_draws = 0, source_lease_failures = 0, global_aliases = 0, recording_overflows = 0;
     std::uint32_t last_invalidation_reasons = 0;
+    // Simulator-thread waits that hit their budget and skipped. evidence: barrier,
+    // draw, copy and invalidation observers; lifecycle: list Reset/destroy and
+    // source registration; submissions: ExecuteCommandLists ordering fallbacks.
+    // unordered: batches forwarded without a transaction because of the budget
+    // or a closed gate. deferred_retirements: Reset/destroy retired later.
+    std::uint64_t contended_evidence = 0, contended_lifecycle = 0, contended_submissions = 0;
+    std::uint64_t unordered_submissions = 0, deferred_retirements = 0, gated_submissions = 0;
   };
 
   explicit SceneCaptureManager(SceneHandoff& handoff) noexcept;
@@ -219,6 +227,17 @@ class SceneCaptureManager {
   // device. Proven unrelated helpers need neither lock nor invalidation.
   std::uint64_t before_submission(ID3D12CommandQueue*, UINT, ID3D12CommandList* const*) noexcept;
   void after_submission(ID3D12CommandQueue*, std::uint64_t receipt) noexcept;
+  // Paired with a zero before receipt after the native forward: publishes the
+  // post-forward source invalidation of a batch before could not order.
+  void forwarded_unordered(ID3D12CommandQueue*) noexcept;
+  // Closed by the presentation watchdog. While closed, before_submission opens
+  // no transaction and treats every batch as an escaped contended batch; the
+  // simulator thread returns immediately. Atomic; callable from any thread.
+  void set_submission_gate(bool open) noexcept;
+  bool submission_gate_open() const noexcept;
+  // True when the most recent evidence or registration call on this thread
+  // skipped because its bounded wait expired, not because it was refused.
+  static bool last_call_contended() noexcept;
   void submission_refused(ID3D12CommandQueue*, engine_hook::queue_submit::Refusal) noexcept;
   std::uint64_t submission_refused_batch(ID3D12CommandQueue*, engine_hook::queue_submit::Refusal, UINT, ID3D12CommandList* const*) noexcept;
   void submission_refused_completed(std::uint64_t token) noexcept;
@@ -322,6 +341,18 @@ class SceneCaptureManager {
     std::uint32_t sources = 0, uncertain = 0;
     bool unrelated = true;
   };
+  struct DeferredRetirement {
+    ID3D12GraphicsCommandList* native = nullptr;
+    std::uint64_t generation = 0;
+    bool destroy = false;
+  };
+  // Simulator-thread lock acquisition with a budget. Failure publishes a
+  // conservative source invalidation for every device and records contention.
+  bool evidence_lock(std::unique_lock<std::mutex>& lock, std::uint32_t budget_us, std::atomic<std::uint64_t>& counter) noexcept;
+  void publish_source_uncertainty() noexcept;
+  void escape_unordered(ID3D12CommandQueue*, UINT, ID3D12CommandList* const*) noexcept;
+  void apply_deferred_retirements() noexcept;
+  void retire_native_list(List&, bool destroy) noexcept;
   Device* device(std::uint64_t) noexcept;
   List* list(ID3D12GraphicsCommandList*) noexcept;
   bool register_list(ID3D12GraphicsCommandList*, std::uint64_t, std::uint64_t, bool observed) noexcept;
@@ -370,6 +401,10 @@ class SceneCaptureManager {
   std::array<std::atomic<ID3D12Device*>, MaximumDevices> published_devices_{};
   std::atomic<std::uint32_t> deferred_sources_{}, deferred_uncertain_{};
   std::atomic<bool> deferred_recordings_{};
+  DeferredRing<DeferredRetirement, 64> deferred_retirements_;
+  std::atomic<bool> submission_gate_{true};
+  std::atomic<std::uint64_t> contended_evidence_{}, contended_lifecycle_{}, contended_submissions_{};
+  std::atomic<std::uint64_t> unordered_submissions_{}, deferred_retirement_count_{}, gated_submissions_{};
   std::unordered_map<ID3D12GraphicsCommandList*, std::size_t> list_indices_;
   std::array<Packet, MaximumPackets> packets_{};
   std::array<SourceCandidate, MaximumDevices * 128> sources_{};
