@@ -86,6 +86,10 @@ struct ProbeSnapshot {
   std::uint64_t aa_restores = 0;
   std::uint64_t aa_restore_failures = 0;
   bool aa_cleared_pending = false;
+  // Consecutive pulses and cumulative holds where the diffuse texture had no
+  // render-target record (inspection=rt_record_absent).
+  unsigned rt_record_refusals = 0;
+  std::uint64_t rt_record_holds = 0;
   std::array<bool, 2> ready{};
   std::array<const char*, 2> inspection_status{"not_inspected", "not_inspected"};
   std::array<bool, 2> resource_present{};
@@ -94,6 +98,9 @@ struct ProbeSnapshot {
   std::array<bool, 2> output_ready{};
   // Observer updates spent waiting for the initial pane output after resizing.
   unsigned output_waits = 0;
+  // Per view, three hex digits (diffuse, add-diffuse, depth-stencil): 1 Bitmap,
+  // 2 texture, 4 render-target record, as the captured replay resolves them.
+  std::array<std::uint32_t, 2> output_slots{};
   bool outputs_matched = false;
   std::array<std::array<std::array<std::int32_t, 2>, 3>, 2> dimensions{};
   std::array<std::array<std::uint64_t, 2>, 2> flags{};

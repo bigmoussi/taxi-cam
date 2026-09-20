@@ -2,6 +2,7 @@
 #include <cassert>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 namespace ce = taxi_camera::standalone::crash_evidence;
 namespace {
@@ -69,7 +70,7 @@ void raw_record(const Directory& directory, unsigned ticks, LONG state, bool zer
   const auto file = CreateFileW(directory.record(ticks).c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
   assert(file != INVALID_HANDLE_VALUE);
   if (!zero_length) {
-    std::array<unsigned char, 4096> bytes{};
+    std::array<unsigned char, ce::record_file_bytes> bytes{};
     ce::Record record;
     record.process = 123;
     record.state = state;
@@ -165,7 +166,7 @@ void retention_cases() {
     for (unsigned i = 1; i <= ce::retained_records; ++i) {
       const auto file = CreateFileW(directory.record(i).c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
       assert(file != INVALID_HANDLE_VALUE);
-      std::array<unsigned char, 4096> unknown{};
+      std::array<unsigned char, ce::record_file_bytes> unknown{};
       DWORD written{};
       assert(WriteFile(file, unknown.data(), static_cast<DWORD>(unknown.size()), &written, nullptr) && written == unknown.size());
       CloseHandle(file);
@@ -247,8 +248,73 @@ int main() {
   context.Rbx = 1234;
   assert(ce::capture(&record, &pointers) == EXCEPTION_CONTINUE_SEARCH && record.state == 2);
   assert(record.information[1] == 16 && record.context.Rdi == 0 && record.context.Rbx == 1234);
+  // RBX did not name committed memory: registers are kept, nothing was copied.
+  assert(record.evidence_flags == 0 && record.slot1_record_address == 0);
   context.Rbx = 4321;
   assert(ce::capture(&record, &pointers) == EXCEPTION_CONTINUE_SEARCH && record.context.Rbx == 1234);
+  // With RBX naming a readable render context, the output-merger state, the
+  // bound-target count and the slot-1 record are copied after VirtualQuery.
+  {
+    auto* context_memory = static_cast<unsigned char*>(VirtualAlloc(nullptr, 0x9000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+    auto* record_memory = static_cast<unsigned char*>(VirtualAlloc(nullptr, 0x1000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+    assert(context_memory && record_memory);
+    for (unsigned i = 0; i < 0xA0; ++i)
+      context_memory[ce::output_merger_state_offset + i] = static_cast<unsigned char>(0x30 + i);
+    for (unsigned i = 0; i < 0x100; ++i)
+      record_memory[i] = static_cast<unsigned char>(0xC0 + i);
+    const std::uint64_t slot1 = reinterpret_cast<std::uint64_t>(record_memory);
+    std::memcpy(context_memory + ce::slot1_record_offset, &slot1, sizeof(slot1));
+    const std::uint32_t count = 1;
+    std::memcpy(context_memory + ce::bound_target_count_offset, &count, sizeof(count));
+    ce::Record copied;
+    copied.module = 0x10000000;
+    context.Rbx = reinterpret_cast<std::uint64_t>(context_memory);
+    assert(ce::capture(&copied, &pointers) == EXCEPTION_CONTINUE_SEARCH && copied.state == 2);
+    assert(copied.evidence_flags == 7 && copied.bound_targets == 1 && copied.slot1_record_address == slot1);
+    assert(std::memcmp(copied.output_merger_state, context_memory + ce::output_merger_state_offset, 0xA0) == 0);
+    assert(std::memcmp(copied.slot1_record, record_memory, 0x100) == 0);
+    // A slot-1 pointer into unreadable memory is recorded but not followed.
+    ce::Record unreadable;
+    unreadable.module = 0x10000000;
+    DWORD previous = 0;
+    assert(VirtualProtect(record_memory, 0x1000, PAGE_NOACCESS, &previous));
+    assert(ce::capture(&unreadable, &pointers) == EXCEPTION_CONTINUE_SEARCH && unreadable.state == 2);
+    assert(unreadable.evidence_flags == 5 && unreadable.slot1_record_address == slot1);
+    assert(VirtualProtect(record_memory, 0x1000, PAGE_READWRITE, &previous));
+    // A context whose state straddles the end of its committed region is skipped.
+    ce::Record straddled;
+    straddled.module = 0x10000000;
+    context.Rbx = reinterpret_cast<std::uint64_t>(context_memory) + 0x9000 - ce::output_merger_state_offset - 0x10;
+    assert(ce::capture(&straddled, &pointers) == EXCEPTION_CONTINUE_SEARCH && straddled.state == 2 && (straddled.evidence_flags & 1u) == 0);
+    context.Rbx = 1234;
+    VirtualFree(record_memory, 0, MEM_RELEASE);
+    VirtualFree(context_memory, 0, MEM_RELEASE);
+  }
+  // Legacy 4 KiB version-1 records remain valid retention candidates; a
+  // current 8 KiB record is one too, and other sizes or versions are not.
+  {
+    Directory directory;
+    const auto write = [&](unsigned ticks, std::size_t size, std::uint32_t version, std::uint32_t bytes) {
+      const auto file = CreateFileW(directory.record(ticks).c_str(), GENERIC_WRITE | GENERIC_READ, 0, nullptr, CREATE_NEW,
+                                    FILE_ATTRIBUTE_NORMAL, nullptr);
+      assert(file != INVALID_HANDLE_VALUE);
+      std::vector<unsigned char> image(size);
+      const std::uint32_t header[4]{0x54434352, version, bytes, 123};
+      std::memcpy(image.data(), header, sizeof(header));
+      DWORD written{};
+      assert(WriteFile(file, image.data(), static_cast<DWORD>(image.size()), &written, nullptr) && written == image.size());
+      assert(SetFilePointer(file, 0, nullptr, FILE_BEGIN) == 0);
+      ce::Candidate candidate;
+      const bool valid = ce::inspect_record(file, candidate);
+      CloseHandle(file);
+      return valid;
+    };
+    assert(write(1, ce::legacy_record_file_bytes, 1, 1400));
+    assert(write(2, ce::record_file_bytes, 2, static_cast<std::uint32_t>(sizeof(ce::Record))));
+    assert(!write(3, ce::legacy_record_file_bytes, 3, 1400));
+    assert(!write(4, 2048, 1, 1400));
+    assert(!write(5, ce::legacy_record_file_bytes, 1, 4097));
+  }
   assert(ce::capture(nullptr, &pointers) == EXCEPTION_CONTINUE_SEARCH);
   // The arm-time locator admits the same instruction at the current image's
   // RVA; without a located site only the observed 1.8.16.0 RVA is accepted.
