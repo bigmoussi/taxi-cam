@@ -131,6 +131,17 @@ TaxiCutoffStatus get_taxi_cutoff() noexcept;
 // Optional public lighting values sampled at2Hz, independent of pose/TAXI.
 // AMBIENT LIGHT SENSOR is a Number, not a claimed radiometric/lux measurement.
 LightingSample get_lighting() noexcept;
+// In-simulator text through this worker's existing SimConnect connection
+// (SimConnect_Text). Callers are bridge-owned threads; the call only queues into
+// a bounded ring and never waits on SimConnect. The worker sends at most one
+// message per loop iteration; a message older than 15 s when the worker gets to
+// it is dropped. This shares nothing with graphics resources.
+bool post_simulator_message(const char* text, float seconds, bool alert, std::uint64_t now_ms) noexcept;
+struct SimulatorMessageStatus {
+  std::uint64_t posted = 0, sent = 0, dropped = 0, failed = 0;
+  bool print_fallback = false;  // MESSAGE_WINDOW refused once; PRINT text is used instead.
+};
+SimulatorMessageStatus get_simulator_message_status() noexcept;
 #ifdef TAXI_BODY_POSE_PROVIDER_TESTING
 namespace body_pose_provider_testing {
 struct LifecycleSnapshot {

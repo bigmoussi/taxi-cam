@@ -1459,6 +1459,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
                     win::connection_button_label(connection_requested.load(std::memory_order_acquire)));
         AppendMenuW(menu, MF_STRING | (preview_ui || updater.busy() || update_prompt ? MF_GRAYED : 0), 603,
                     updater.busy() ? L"Checking for updates..." : L"Check for updates");
+        AppendMenuW(menu, MF_STRING | (draft().in_sim_messages ? MF_CHECKED : MF_UNCHECKED), 605, L"Show messages in simulator");
         AppendMenuW(menu, MF_STRING, 512, L"Report a bug");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING, 601, L"Exit");
@@ -1474,6 +1475,15 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         }
         if (selected == 603)
           check_updates(true);
+        if (selected == 605) {
+          // Global preference; persisted with the other selections in settings.ini.
+          auto s = draft();
+          s.in_sim_messages = s.in_sim_messages ? 0u : 1u;
+          publish(s);
+          if (!win::save_settings(draft()))
+            notice = L"Could not save settings. Check access to your local settings folder.";
+          InvalidateRect(hwnd, nullptr, FALSE);
+        }
         if (selected == 512)
           report_bug();
         if (selected == 601) {

@@ -84,6 +84,8 @@ inline bool load_settings(Settings& s, const std::wstring& installation, std::ui
   value.speed_color = profile->composition.speed_color;
   reset_guide_settings(value, *profile);
   value.auto_profile = GetPrivateProfileIntW(L"aircraft", L"automatic", 1, (settings_directory() + L"\\settings.ini").c_str());
+  value.in_sim_messages =
+      GetPrivateProfileIntW(L"messages", L"in_simulator", 1, (settings_directory() + L"\\settings.ini").c_str()) ? 1u : 0u;
   const auto destination = settings_path(value);
   auto path = destination;
   if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
@@ -210,6 +212,7 @@ inline bool save_settings(const Settings& s) {
   std::swprintf(profile_text, 16, L"%u", s.profile);
   const auto selection = settings_directory() + L"\\settings.ini";
   return WritePrivateProfileStringW(L"aircraft", L"profile", profile_text, selection.c_str()) &&
-         WritePrivateProfileStringW(L"aircraft", L"automatic", s.auto_profile ? L"1" : L"0", selection.c_str());
+         WritePrivateProfileStringW(L"aircraft", L"automatic", s.auto_profile ? L"1" : L"0", selection.c_str()) &&
+         WritePrivateProfileStringW(L"messages", L"in_simulator", s.in_sim_messages ? L"1" : L"0", selection.c_str());
 }
 }  // namespace taxi_camera::standalone
