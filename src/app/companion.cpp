@@ -1237,7 +1237,8 @@ DWORD WINAPI connection_worker(void*) {
         const std::lock_guard lock(app_mutex);
         std::array<SimEvent, 8> events{};
         const auto count = notification_reader.take(sample.notifications, GetTickCount64(), events.data(), events.size());
-        if (pending_notifications.size() + count <= 32)
+        // The bridge stops publishing once it reads the setting; this covers the poll in between.
+        if (current.notifications && pending_notifications.size() + count <= 32)
           pending_notifications.insert(pending_notifications.end(), events.begin(), events.begin() + static_cast<std::ptrdiff_t>(count));
         if (!connection_disconnected.load(std::memory_order_acquire)) {
           status = sample;
