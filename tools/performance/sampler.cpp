@@ -97,11 +97,14 @@ Cpu process_cpu(HANDLE process) {
     throw std::runtime_error("Target process exited or CPU counters unavailable");
   return {number(created), number(user), number(kernel), clock_ms()};
 }
-std::string sha256(const std::wstring& path) {
+std::string sha256(const std::wstring& path, bool required = true) {
   Handle file(CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
                           FILE_FLAG_SEQUENTIAL_SCAN, nullptr));
-  if (!file)
+  if (!file) {
+    if (!required)
+      return "unreadable";
     throw std::runtime_error("Cannot open verified binary for hashing");
+  }
   BCRYPT_ALG_HANDLE algorithm{};
   if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0) < 0)
     throw std::runtime_error("SHA256 unavailable");
@@ -491,7 +494,8 @@ int capture(const Options& options) {
     throw std::runtime_error("IPC owner is not the Taxi Cam companion");
   const auto companion_created = process_cpu(companion.value).created;
   // Hashing happens outside the CPU interval; these are backing files, not in-memory images.
-  const auto image_hash = sha256(path), bridge_hash = sha256(module.path), companion_hash = sha256(companion_path);
+  // Store/WindowsApps simulator images may deny CreateFile; bridge + companion remain required.
+  const auto image_hash = sha256(path, false), bridge_hash = sha256(module.path), companion_hash = sha256(companion_path);
   std::ofstream samples(std::filesystem::path(options.output + L"/samples.jsonl"), std::ios::binary | std::ios::trunc);
   if (!samples)
     throw std::runtime_error("Cannot create samples.jsonl");
@@ -615,7 +619,7 @@ int capture(const Options& options) {
     const auto final_module = bridge_module(options.pid);
     if (final_module.path != module.path || final_module.base != module.base || final_module.size != module.size)
       issue("bridge_module_changed");
-    if (sha256(path) != image_hash || sha256(module.path) != bridge_hash || sha256(companion_path) != companion_hash)
+    if (sha256(path, false) != image_hash || sha256(module.path) != bridge_hash || sha256(companion_path) != companion_hash)
       issue("binary_backing_file_changed");
   } catch (const std::exception& error) {
     issue(error.what());
