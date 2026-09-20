@@ -15,6 +15,7 @@
 #include "connection_recoverability.hpp"
 #include "../shared/camera_rate_policy.hpp"
 #include "../shared/protocol.hpp"
+#include "../shared/sim_messages.hpp"
 #include "settings_store.hpp"
 #include "startup_state.hpp"
 #include "camera_hotkeys.hpp"
@@ -49,6 +50,11 @@ std::mutex app_mutex;
 win::Settings current;
 win::Status status;
 bool received_bridge_status{};  // Guarded by app_mutex; retained across simulator sessions.
+// Guarded by app_mutex. The connection worker takes unseen bridge events from
+// every status sample; the UI thread shows them (Shell_NotifyIcon from the
+// window thread only) and clears the queue.
+NotificationReader notification_reader;
+std::vector<SimEvent> pending_notifications;
 std::wstring connection = L"Waiting for Microsoft Flight Simulator 2024";
 std::atomic<bool> running{true};
 std::atomic<DWORD> simulator_pid{};
@@ -787,6 +793,51 @@ void update_balloon() {
   wcscpy_s(data.szInfo, L"Close Microsoft Flight Simulator, then use Check for updates in the tray menu to install.");
   Shell_NotifyIconW(NIM_MODIFY, &data);
 }
+// Bridge events as tray notifications. Events from one sample share a balloon
+// while they fit; a later balloon replaces an earlier one on screen, and the
+// notification centre keeps them. The bridge applied the repeat limiter.
+void show_notifications() {
+  std::vector<SimEvent> events;
+  {
+    const std::lock_guard lock(app_mutex);
+    events.swap(pending_notifications);
+  }
+  if (events.empty() || preview_ui)
+    return;
+  NOTIFYICONDATAW data{};
+  data.cbSize = sizeof(data);
+  data.hWnd = window;
+  data.uID = 1;
+  data.uFlags = NIF_INFO;
+  wcscpy_s(data.szInfoTitle, L"Taxi Cam");
+  constexpr std::size_t capacity = sizeof(data.szInfo) / sizeof(data.szInfo[0]) - 1;
+  std::wstring body;
+  bool alert = false;
+  const auto flush = [&] {
+    if (body.empty())
+      return;
+    data.dwInfoFlags = (alert ? NIIF_WARNING : NIIF_INFO) | NIIF_RESPECT_QUIET_TIME;
+    wcscpy_s(data.szInfo, body.c_str());
+    Shell_NotifyIconW(NIM_MODIFY, &data);
+    body.clear();
+    alert = false;
+  };
+  for (const auto event : events) {
+    const auto message = sim_message_for(event);
+    std::wstring line;
+    for (const char* c = message.text; *c; ++c)
+      line += static_cast<wchar_t>(static_cast<unsigned char>(*c));
+    if (line.empty() || line.size() > capacity)
+      continue;
+    if (!body.empty() && body.size() + 1 + line.size() > capacity)
+      flush();
+    if (!body.empty())
+      body += L'\n';
+    body += line;
+    alert = alert || message.alert;
+  }
+  flush();
+}
 void show() {
   ShowWindow(window, SW_SHOW);
   ShowWindow(window, SW_RESTORE);
@@ -1057,6 +1108,11 @@ DWORD WINAPI connection_worker(void*) {
     if (pid && pid != attached) {
       win::log_attach(win::settings_directory(), attach, expected_simulator);
       attached = pid;
+      {
+        // A new simulator process restarts the bridge's notification serial.
+        const std::lock_guard lock(app_mutex);
+        notification_reader.reset();
+      }
       simulator_pid = pid;
       attempted = false;
       load_started_this_session = false;
@@ -1179,6 +1235,10 @@ DWORD WINAPI connection_worker(void*) {
     if (running.load() && exchange_control(mailbox, &sample)) {
       {
         const std::lock_guard lock(app_mutex);
+        std::array<SimEvent, 8> events{};
+        const auto count = notification_reader.take(sample.notifications, GetTickCount64(), events.data(), events.size());
+        if (pending_notifications.size() + count <= 32)
+          pending_notifications.insert(pending_notifications.end(), events.begin(), events.begin() + static_cast<std::ptrdiff_t>(count));
         if (!connection_disconnected.load(std::memory_order_acquire)) {
           status = sample;
           if (!win::heartbeat_confirms_bridge(sample.heartbeat, ignore_heartbeat_through))
@@ -1450,6 +1510,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       refresh_connection_button();
       sync_aircraft_session();
       auto_profile();
+      show_notifications();
       if (page == 3)
         target_combos(draft());
       if (IsWindowVisible(hwnd))
@@ -1466,7 +1527,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
                     win::connection_button_label(connection_requested.load(std::memory_order_acquire)));
         AppendMenuW(menu, MF_STRING | (preview_ui || updater.busy() || update_prompt ? MF_GRAYED : 0), 603,
                     updater.busy() ? L"Checking for updates..." : L"Check for updates");
-        AppendMenuW(menu, MF_STRING | (draft().in_sim_messages ? MF_CHECKED : MF_UNCHECKED), 605, L"Show messages in simulator");
+        AppendMenuW(menu, MF_STRING | (draft().notifications ? MF_CHECKED : MF_UNCHECKED), 605, L"Show notifications");
         AppendMenuW(menu, MF_STRING, 512, L"Report a bug");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING, 601, L"Exit");
@@ -1485,7 +1546,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         if (selected == 605) {
           // Global preference; persisted with the other selections in settings.ini.
           auto s = draft();
-          s.in_sim_messages = s.in_sim_messages ? 0u : 1u;
+          s.notifications = s.notifications ? 0u : 1u;
           publish(s);
           if (!win::save_settings(draft()))
             notice = L"Could not save settings. Check access to your local settings folder.";

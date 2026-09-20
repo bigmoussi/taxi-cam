@@ -29,14 +29,15 @@ std::atomic<std::uint64_t> worker_heartbeat_ms{};
 std::atomic<bool> bridge_connected{};
 std::atomic<unsigned> watchdog_trips{};
 std::atomic<std::uint64_t> watchdog_last_stall_ms{};
-std::atomic<bool> in_sim_messages_enabled{};
+std::atomic<bool> notifications_enabled{};
+// Admitted events for the companion's tray notifications; the worker copies
+// the log into every IPC status it publishes. Nothing is shown from here.
+SimEventLog notification_log;
 constexpr std::uint64_t WorkerAliveMs = 10000;  // Contract scans have taken 4 s per iteration.
-// Queue an in-simulator notice for the SimConnect worker. Never sends here.
 void announce(SimEvent event, SimMessageLimiter& limiter, std::uint64_t now) noexcept {
-  if (!in_sim_messages_enabled.load(std::memory_order_acquire) || !limiter.admit(event, now))
+  if (!notifications_enabled.load(std::memory_order_acquire) || !limiter.admit(event, now))
     return;
-  const auto message = sim_message_for(event);
-  native_camera::post_simulator_message(message.text, message.seconds, message.alert, now);
+  notification_log.publish(event, now);
 }
 void log_status(const win::Status& s, const char* detail = "") noexcept {
   try {
@@ -88,13 +89,12 @@ void log_startup(const win::Status& status, const StartupTiming& timing, const c
   log_status(status, detail);
 }
 void log_contention(const win::Status& status, const win::GraphicsStatus& graphics, const scene_runtime::Snapshot& output) {
-  const auto sim_messages = native_camera::get_simulator_message_status();
   char detail[1024];
   auto used = static_cast<std::size_t>(std::snprintf(
       detail, sizeof(detail),
       "Render-thread contention: armed=%u pulse=%llu queue_calls=%llu queue_contended=%llu manager_evidence=%llu "
       "manager_lifecycle=%llu manager_submit=%llu unordered=%llu gated=%llu deferred_retirements=%llu deferred_lifecycle=%llu "
-      "runtime_writes=%llu watchdog_trips=%u last_stall_ms=%llu sim_messages=%u/%llu/%llu/%llu/%llu hook_failures=%llu "
+      "runtime_writes=%llu watchdog_trips=%u last_stall_ms=%llu notifications=%u/%llu hook_failures=%llu "
       "failure_rate_peak=%llu admission_halted=%u",
       graphics.armed, static_cast<unsigned long long>(graphics.frame_pulse), static_cast<unsigned long long>(graphics.queue_calls),
       static_cast<unsigned long long>(graphics.queue_contended), static_cast<unsigned long long>(output.capture.contended_evidence),
@@ -105,10 +105,9 @@ void log_contention(const win::Status& status, const win::GraphicsStatus& graphi
       static_cast<unsigned long long>(output.capture.deferred_retirements), static_cast<unsigned long long>(graphics.deferred_lifecycle),
       static_cast<unsigned long long>(output.contended_writes), watchdog_trips.load(std::memory_order_relaxed),
       static_cast<unsigned long long>(watchdog_last_stall_ms.load(std::memory_order_relaxed)),
-      in_sim_messages_enabled.load(std::memory_order_relaxed), static_cast<unsigned long long>(sim_messages.posted),
-      static_cast<unsigned long long>(sim_messages.sent), static_cast<unsigned long long>(sim_messages.dropped),
-      static_cast<unsigned long long>(sim_messages.failed), static_cast<unsigned long long>(graphics.hook_failures),
-      static_cast<unsigned long long>(graphics.failure_rate_peak), graphics.admission_halted));
+      notifications_enabled.load(std::memory_order_relaxed), static_cast<unsigned long long>(notification_log.published()),
+      static_cast<unsigned long long>(graphics.hook_failures), static_cast<unsigned long long>(graphics.failure_rate_peak),
+      graphics.admission_halted));
   for (unsigned i = 0; i < graphics.contention.size() && used < sizeof(detail); ++i) {
     const auto written =
         std::snprintf(detail + used, sizeof(detail) - used, " %s=%llu", win::contention_site_name(static_cast<win::ContentionSite>(i)),
@@ -267,7 +266,7 @@ DWORD run_impl() {
     const auto owner_pid = control.owner_pid();
     const bool connected = control.connected(now);
     bridge_connected.store(connected && settings.enabled != 0, std::memory_order_release);
-    in_sim_messages_enabled.store(settings.in_sim_messages != 0, std::memory_order_release);
+    notifications_enabled.store(settings.notifications != 0, std::memory_order_release);
     SimEventInputs sim_inputs;
     sim_inputs.connected = connected && settings.enabled;
     // Watchdog trip: the gate is already closed on every hook; this iteration
@@ -377,6 +376,7 @@ DWORD run_impl() {
                       : !telemetry_ready ? "Waiting for aircraft telemetry to stop."
                       : !public_ready    ? "Waiting for the flight to finish loading and fresh camera telemetry."
                                          : "Waiting for camera GPU session reset.");
+        notification_log.snapshot(pending.notifications);
         if (mailbox.lock()) {
           mailbox.data()->status = pending;
           mailbox.unlock();
@@ -812,6 +812,7 @@ DWORD run_impl() {
         : output.output && !output.stamps      ? "Camera images ready; waiting for a verified PFD write opportunity."
                                                : output.message;
     std::snprintf(status.message, sizeof(status.message), "%s", message);
+    notification_log.snapshot(status.notifications);
     if (mailbox.lock()) {
       mailbox.data()->status = status;
       mailbox.unlock();

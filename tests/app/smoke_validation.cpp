@@ -96,10 +96,11 @@ int wmain(int argc, wchar_t** argv) {
     owner.data()->status.useful_rate = 15;
     owner.data()->status.rate_limits = 1;
     owner.data()->status.parked = 1;
+    owner.data()->status.notifications[0] = {1, 5000, static_cast<std::uint32_t>(taxi_camera::SimEvent::cameras_ready), 0};
     owner.unlock();
     require(reader.lock(100), "Read mailbox lock");
     require(reader.data()->settings.camera_rate == 60, "Settings exchange");
-    require(ProtocolVersion == 11 && reader.data()->settings.in_sim_messages == 1 &&
+    require(ProtocolVersion == 12 && reader.data()->settings.notifications == 1 &&
                 reader.data()->settings.nose_dot == std::array<float, 2>{0.125f, 0.375f} &&
                 reader.data()->settings.tail_upper == std::array<float, 2>{0.25f, 0.625f} &&
                 reader.data()->settings.tail_corner == std::array<float, 2>{0.1875f, 0.75f} &&
@@ -108,6 +109,9 @@ int wmain(int argc, wchar_t** argv) {
     require(reader.data()->settings.parked_rate == 8 && reader.data()->status.effective_rate == 8 &&
                 reader.data()->status.useful_rate == 15 && reader.data()->status.rate_limits == 1 && reader.data()->status.parked == 1,
             "Parked floor setting and rate-in-use status exchanged in protocol11");
+    require(reader.data()->status.notifications[0].serial == 1 &&
+                reader.data()->status.notifications[0].event == static_cast<std::uint32_t>(taxi_camera::SimEvent::cameras_ready),
+            "Notification log exchanged in protocol12");
     require(reader.data()->settings.guide_color == std::array<float, 3>{0.125f, 0.5f, 0.875f} &&
                 reader.data()->settings.speed_color == settings.speed_color,
             "Marking colour exchanged independently of ground-speed colour");

@@ -28,23 +28,6 @@ using LastPacket = HRESULT(WINAPI*)(HANDLE, DWORD*);
 using MapEvent = HRESULT(WINAPI*)(HANDLE, DWORD, const char*);
 using SetData = HRESULT(WINAPI*)(HANDLE, DWORD, DWORD, DWORD, DWORD, DWORD, void*);
 using TransmitEvent = HRESULT(WINAPI*)(HANDLE, DWORD, DWORD, DWORD, DWORD, DWORD);
-// https://docs.flightsimulator.com/msfs2024/retail/programming-apis/simconnect/api-reference/general/simconnect_text/
-using Text = HRESULT(WINAPI*)(HANDLE, DWORD, float, DWORD, DWORD, void*);
-constexpr DWORD TextMessageWindow = 0x0300, TextPrintWhite = 0x0101, TextPrintYellow = 0x0105;
-constexpr DWORD TextEventId = 20;
-struct QueuedMessage {
-  char text[224]{};
-  float seconds = 0;
-  bool alert = false;
-  std::uint64_t posted_ms = 0;
-};
-struct MessageQueue {
-  SRWLOCK lock = SRWLOCK_INIT;
-  std::array<QueuedMessage, 8> ring{};
-  unsigned head = 0, count = 0;
-  SimulatorMessageStatus status;
-};
-MessageQueue messages;
 // Public SDK SIMCONNECT_DATA_CAMERA is packed: XYZ24, references/object IDs,
 // XYZ24, FLOAT32 PBH12, references/object IDs, FOVdouble. Confirmed current
 // 1.8.16.0 CameraGet response ID40, total96 bytes, including SIMCONNECT_RECV12.
@@ -413,7 +396,6 @@ DWORD WINAPI worker(void*) noexcept {
   const auto map_event = reinterpret_cast<MapEvent>(GetProcAddress(dll, "SimConnect_MapClientEventToSimEvent"));
   const auto set_data = reinterpret_cast<SetData>(GetProcAddress(dll, "SimConnect_SetDataOnSimObject"));
   const auto transmit_event = reinterpret_cast<TransmitEvent>(GetProcAddress(dll, "SimConnect_TransmitClientEvent"));
-  const auto text = reinterpret_cast<Text>(GetProcAddress(dll, "SimConnect_Text"));
   if (!open || !close || !define || !request || !dispatch || !get || !system_state || !subscribe) {
     failure("simconnect_exports");
     FreeLibrary(dll);
@@ -476,8 +458,6 @@ DWORD WINAPI worker(void*) noexcept {
   std::array<DWORD, 64> taxi_packets{};
   std::array<DWORD, 2> taxi_command_packets{};
   unsigned taxi_packet_cursor = 0;
-  std::array<DWORD, 8> text_packets{};
-  unsigned text_packet_cursor = 0;
   const auto remember_taxi_packet = [&]() {
     DWORD id = 0;
     if (last_packet && SUCCEEDED(last_packet(session, &id)) && id)
@@ -670,9 +650,6 @@ DWORD WINAPI worker(void*) noexcept {
         bool taxi_exception = false;
         bool lighting_exception = false;
         bool on_ground_exception = false;
-        bool text_exception = false;
-        for (const auto sent : text_packets)
-          text_exception = text_exception || (sent && sent == exception[4]);
         for (const auto sent : taxi_packets)
           taxi_exception = taxi_exception || (sent && sent == exception[4]);
         for (const auto sent : taxi_command_packets)
@@ -686,13 +663,6 @@ DWORD WINAPI worker(void*) noexcept {
           state.flow_subscribed = false;
           state.flow_error = "flow_simconnect_exception";
           ReleaseSRWLockExclusive(&state.lock);
-        } else if (text_exception) {
-          // Display text is optional. A refused MESSAGE_WINDOW switches to PRINT
-          // text; telemetry caches and errors are untouched.
-          AcquireSRWLockExclusive(&messages.lock);
-          ++messages.status.failed;
-          messages.status.print_fallback = true;
-          ReleaseSRWLockExclusive(&messages.lock);
         } else if (on_ground_exception) {
           on_ground_defined = false;
           on_ground_failure("on_ground_simconnect_exception");
@@ -725,48 +695,6 @@ DWORD WINAPI worker(void*) noexcept {
     }
     if (reconnect)
       break;
-    if (text) {
-      // One queued in-simulator message per iteration, only while the flight
-      // session runs; text sent in menus is refused by the simulator anyway.
-      AcquireSRWLockShared(&state.lock);
-      const bool session_running = state.aircraft_session.running();
-      ReleaseSRWLockShared(&state.lock);
-      QueuedMessage message;
-      bool pending = false, print_fallback = false;
-      const auto text_now = GetTickCount64();
-      AcquireSRWLockExclusive(&messages.lock);
-      while (messages.count) {
-        const auto& head = messages.ring[messages.head];
-        if (text_now < head.posted_ms || text_now - head.posted_ms > 15000) {
-          messages.head = (messages.head + 1) % messages.ring.size();
-          --messages.count;
-          ++messages.status.dropped;
-          continue;
-        }
-        if (!session_running)
-          break;  // Loading or menu: hold the message until it ages out.
-        message = head;
-        messages.head = (messages.head + 1) % messages.ring.size();
-        --messages.count;
-        pending = true;
-        break;
-      }
-      print_fallback = messages.status.print_fallback;
-      ReleaseSRWLockExclusive(&messages.lock);
-      if (pending) {
-        const DWORD type = print_fallback ? (message.alert ? TextPrintYellow : TextPrintWhite) : TextMessageWindow;
-        const auto bytes = static_cast<DWORD>(std::strlen(message.text) + 1);
-        const bool sent = SUCCEEDED(text(session, type, message.seconds, TextEventId, bytes, message.text));
-        if (sent && last_packet) {
-          DWORD id = 0;
-          if (SUCCEEDED(last_packet(session, &id)) && id)
-            text_packets[text_packet_cursor++ % text_packets.size()] = id;
-        }
-        AcquireSRWLockExclusive(&messages.lock);
-        ++(sent ? messages.status.sent : messages.status.failed);
-        ReleaseSRWLockExclusive(&messages.lock);
-      }
-    }
     const auto speed = get_ground_speed();
     const auto buttons = get_taxi_buttons();
     const auto command_now = GetTickCount64();
@@ -1202,33 +1130,6 @@ LightingSample get_lighting() noexcept {
   AcquireSRWLockShared(&state.lock);
   const auto out = lighting_locked(GetTickCount64());
   ReleaseSRWLockShared(&state.lock);
-  return out;
-}
-bool post_simulator_message(const char* value, float seconds, bool alert, std::uint64_t now_ms) noexcept {
-  if (!value || !*value || !(seconds > 0) || seconds > 60)
-    return false;
-  QueuedMessage message;
-  std::strncpy(message.text, value, sizeof(message.text) - 1);
-  message.seconds = seconds;
-  message.alert = alert;
-  message.posted_ms = now_ms ? now_ms : 1;
-  AcquireSRWLockExclusive(&messages.lock);
-  ++messages.status.posted;
-  if (messages.count == messages.ring.size()) {
-    // Oldest queued notice yields; the newest state is the one worth showing.
-    messages.head = (messages.head + 1) % messages.ring.size();
-    --messages.count;
-    ++messages.status.dropped;
-  }
-  messages.ring[(messages.head + messages.count) % messages.ring.size()] = message;
-  ++messages.count;
-  ReleaseSRWLockExclusive(&messages.lock);
-  return true;
-}
-SimulatorMessageStatus get_simulator_message_status() noexcept {
-  AcquireSRWLockShared(&messages.lock);
-  const auto out = messages.status;
-  ReleaseSRWLockShared(&messages.lock);
   return out;
 }
 TaxiCutoffStatus get_taxi_cutoff() noexcept {

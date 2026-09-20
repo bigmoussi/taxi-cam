@@ -6,8 +6,12 @@
 #include "../../src/shared/sim_messages.hpp"
 
 namespace {
+using taxi_camera::NotificationLog;
+using taxi_camera::NotificationReader;
+using taxi_camera::NotificationSlot;
 using taxi_camera::SimEvent;
 using taxi_camera::SimEventInputs;
+using taxi_camera::SimEventLog;
 using taxi_camera::SimEventTracker;
 using taxi_camera::SimMessageLimiter;
 unsigned checks = 0;
@@ -148,6 +152,74 @@ void tracker() {
   std::array<SimEvent, 2> two{};
   require(small.observe(burst, two.data(), two.size()) == 2, "Tracker overflowed its output buffer");
 }
+
+// Bridge log -> IPC status -> companion reader: order, no replay, freshness.
+void notifications() {
+  static_assert(sizeof(NotificationSlot) == 24 && sizeof(NotificationLog) == 24 * taxi_camera::NotificationSlots,
+                "Notification wire layout changed; bump the IPC protocol");
+  SimEventLog log;
+  NotificationLog wire{};
+  NotificationReader reader;
+  std::array<SimEvent, 8> out{};
+  log.snapshot(wire);
+  require(reader.take(wire, 1000, out.data(), out.size()) == 0 && reader.last_serial() == 0, "Empty log produced events");
+  log.publish(SimEvent::bridge_connected, 1000);
+  log.publish(SimEvent::cameras_ready, 1200);
+  log.publish(SimEvent::speed_cutoff, 1300);
+  require(log.published() == 3, "Publish count");
+  log.snapshot(wire);
+  auto count = reader.take(wire, 1500, out.data(), out.size());
+  require(count == 3 && out[0] == SimEvent::bridge_connected && out[1] == SimEvent::cameras_ready && out[2] == SimEvent::speed_cutoff,
+          "Events not delivered oldest first");
+  require(reader.take(wire, 1600, out.data(), out.size()) == 0, "Unchanged log replayed its events");
+  // The slot layout does not matter to the reader; only serials do.
+  NotificationLog shuffled{};
+  std::size_t next = 0;
+  for (std::size_t i = wire.size(); i-- > 0;)
+    shuffled[next++] = wire[i];
+  require(reader.take(shuffled, 1600, out.data(), out.size()) == 0, "Reordered copy of seen events replayed");
+  // A companion (re)start sees history: only recent events are shown, but all are marked seen.
+  NotificationReader restarted;
+  log.publish(SimEvent::presentation_stalled, 5000);
+  log.snapshot(wire);
+  count = restarted.take(wire, 5000 + NotificationReader::FreshMs, out.data(), out.size());
+  require(count == 1 && out[0] == SimEvent::presentation_stalled && restarted.last_serial() == 4, "Stale events shown after restart");
+  require(reader.take(wire, 5100, out.data(), out.size()) == 1 && out[0] == SimEvent::presentation_stalled,
+          "Live reader missed the fourth event");
+  // Ring wrap: more events than slots since the last poll keeps the newest, in order.
+  constexpr auto slots = taxi_camera::NotificationSlots;
+  for (unsigned i = 0; i < slots + 4; ++i)
+    log.publish(static_cast<SimEvent>(i % static_cast<unsigned>(SimEvent::count)), 6000 + i);
+  log.snapshot(wire);
+  std::array<SimEvent, slots + 8> many{};
+  count = reader.take(wire, 7000, many.data(), many.size());
+  require(count == slots && reader.last_serial() == 4 + slots + 4, "Wrapped log not consumed to its newest serial");
+  for (std::size_t i = 1; i < count; ++i)
+    require(static_cast<unsigned>(many[i]) == (static_cast<unsigned>(many[i - 1]) + 1) % static_cast<unsigned>(SimEvent::count),
+            "Wrapped events out of order");
+  // Output capacity: unread fresh events stay for the next poll.
+  NotificationReader slow;
+  std::array<SimEvent, 3> three{};
+  count = slow.take(wire, 7000, three.data(), three.size());
+  require(count == 3 && slow.last_serial() == 4 + 3 + 4, "Capacity-limited take advanced past unread events");
+  count = slow.take(wire, 7000, many.data(), many.size());
+  require(count == slots - 3 && slow.last_serial() == reader.last_serial(), "Second take did not resume where the first stopped");
+  // Invalid events on the wire are skipped, not shown.
+  NotificationLog bad{};
+  bad[0] = {1, 100, static_cast<std::uint32_t>(SimEvent::count), 0};
+  bad[1] = {2, 100, static_cast<std::uint32_t>(SimEvent::cameras_ready), 0};
+  NotificationReader strict;
+  count = strict.take(bad, 200, out.data(), out.size());
+  require(count == 1 && out[0] == SimEvent::cameras_ready && strict.last_serial() == 2, "Invalid wire event delivered");
+  require(!static_cast<bool>(SimEventLog{}.published()), "Fresh log has a serial");
+  // A new simulator process starts at serial 1 again.
+  reader.reset();
+  SimEventLog fresh_process;
+  fresh_process.publish(SimEvent::bridge_connected, 9000);
+  fresh_process.snapshot(wire);
+  require(reader.take(wire, 9001, out.data(), out.size()) == 1 && out[0] == SimEvent::bridge_connected,
+          "Reset reader ignored a new process's first event");
+}
 }  // namespace
 
 int main() {
@@ -155,6 +227,7 @@ int main() {
     mapping();
     limiter();
     tracker();
+    notifications();
   } catch (const std::exception& error) {
     std::fprintf(stderr, "sim messages: %s\n", error.what());
     return 1;

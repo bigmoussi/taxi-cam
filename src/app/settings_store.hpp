@@ -71,6 +71,18 @@ inline bool migrate_night_boost(const std::wstring& source, const std::wstring& 
   }
   return ok;
 }
+// Global [messages] notifications; protocol 10 saved the same choice as
+// [messages] in_simulator. A file with only the legacy key keeps the user's
+// choice; save_settings writes the new key and removes the legacy one.
+inline std::uint32_t load_notification_preference(const std::wstring& selection) {
+  const auto present = [&](const wchar_t* key) {
+    wchar_t value[16]{};
+    GetPrivateProfileStringW(L"messages", key, L"", value, 16, selection.c_str());
+    return value[0] != 0;
+  };
+  const wchar_t* key = present(L"notifications") ? L"notifications" : present(L"in_simulator") ? L"in_simulator" : nullptr;
+  return !key || GetPrivateProfileIntW(L"messages", key, 1, selection.c_str()) ? 1u : 0u;
+}
 inline bool load_settings(Settings& s, const std::wstring& installation, std::uint32_t profile_id = 0) {
   if (!profile_id)
     profile_id = GetPrivateProfileIntW(L"aircraft", L"profile", 1, (settings_directory() + L"\\settings.ini").c_str());
@@ -85,8 +97,7 @@ inline bool load_settings(Settings& s, const std::wstring& installation, std::ui
   value.speed_color = profile->composition.speed_color;
   reset_guide_settings(value, *profile);
   value.auto_profile = GetPrivateProfileIntW(L"aircraft", L"automatic", 1, (settings_directory() + L"\\settings.ini").c_str());
-  value.in_sim_messages =
-      GetPrivateProfileIntW(L"messages", L"in_simulator", 1, (settings_directory() + L"\\settings.ini").c_str()) ? 1u : 0u;
+  value.notifications = load_notification_preference(settings_directory() + L"\\settings.ini");
   const auto destination = settings_path(value);
   auto path = destination;
   if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
@@ -217,8 +228,11 @@ inline bool save_settings(const Settings& s) {
   wchar_t profile_text[16];
   std::swprintf(profile_text, 16, L"%u", s.profile);
   const auto selection = settings_directory() + L"\\settings.ini";
-  return WritePrivateProfileStringW(L"aircraft", L"profile", profile_text, selection.c_str()) &&
-         WritePrivateProfileStringW(L"aircraft", L"automatic", s.auto_profile ? L"1" : L"0", selection.c_str()) &&
-         WritePrivateProfileStringW(L"messages", L"in_simulator", s.in_sim_messages ? L"1" : L"0", selection.c_str());
+  const bool saved = WritePrivateProfileStringW(L"aircraft", L"profile", profile_text, selection.c_str()) &&
+                     WritePrivateProfileStringW(L"aircraft", L"automatic", s.auto_profile ? L"1" : L"0", selection.c_str()) &&
+                     WritePrivateProfileStringW(L"messages", L"notifications", s.notifications ? L"1" : L"0", selection.c_str());
+  if (saved)
+    WritePrivateProfileStringW(L"messages", L"in_simulator", nullptr, selection.c_str());  // Legacy protocol 10 key.
+  return saved;
 }
 }  // namespace taxi_camera::standalone

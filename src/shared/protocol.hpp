@@ -8,10 +8,11 @@
 #include "../profiles/catalog.hpp"
 #include "camera_rate.hpp"
 #include "exposure_settings.hpp"
+#include "sim_messages.hpp"
 #include "version.hpp"
 
 namespace taxi_camera::standalone {
-constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 11;
+constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 12;
 constexpr const wchar_t* Version = TAXI_CAM_VERSION_WIDE;
 struct Settings {
   std::uint32_t enabled = 1, camera_rate = kDefaultCameraRate, automatic_exposure = 1;
@@ -22,9 +23,10 @@ struct Settings {
   std::uint64_t taxi_request{};            // Session-only desired aircraft button state from a shortcut.
   std::uint32_t taxi_selected_mask{}, taxi_desired_mask{};
   std::uint32_t auto_profile = 1;
-  // Global (settings.ini [messages] in_simulator): important events are shown
-  // inside the simulator through the bridge's SimConnect text channel.
-  std::uint32_t in_sim_messages = 1;
+  // Global (settings.ini [messages] notifications): the bridge publishes
+  // important events in Status::notifications and the companion shows them as
+  // Windows tray notifications. Protocol 10 named this in_sim_messages.
+  std::uint32_t notifications = 1;
   std::array<float, 3> speed_color = profiles::A380.composition.speed_color;
   std::array<float, 3> guide_color = profiles::A380.composition.guide_color;
   // Normalized left-side guide positions; the right side mirrors X. These are
@@ -67,6 +69,9 @@ struct Status {
   // maximum while moving, CameraRateLimit bits and the parked flag. The saved
   // camera_rate is never rewritten.
   std::uint32_t effective_rate{}, useful_rate{}, rate_limits{}, parked{};
+  // Protocol 12: events admitted by the bridge's notification limiter, one
+  // self-describing slot each (serial, GetTickCount64 posted_ms, SimEvent).
+  NotificationLog notifications{};
 };
 struct Shared {
   std::uint32_t magic{}, version{}, bytes{}, owner_pid{};
@@ -83,7 +88,7 @@ inline bool valid_settings(const Settings& s) noexcept {
     for (const float c : color)
       if (!std::isfinite(c) || c < 0 || c > 1)
         return false;
-  if (s.auto_profile > 1 || s.in_sim_messages > 1 || !profiles::find(s.profile) || s.follow_taxi > 1 || s.auto_detect > 1 ||
+  if (s.auto_profile > 1 || s.notifications > 1 || !profiles::find(s.profile) || s.follow_taxi > 1 || s.auto_detect > 1 ||
       s.single_camera > 1 || s.scene_test > 1 || s.manual_mask > 3 || s.calibration_mask > 3 || s.calibration_budget < 64 ||
       s.calibration_budget > 16384)
     return false;

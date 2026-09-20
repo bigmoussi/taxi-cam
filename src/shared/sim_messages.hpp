@@ -1,13 +1,15 @@
 #pragma once
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 
 namespace taxi_camera {
 
-// Events a pilot should learn about inside the simulator. The text is sent
-// through the bridge's existing SimConnect worker (never from a render thread)
-// when the companion setting "Show messages in simulator" is on.
+// Events a pilot should learn about while flying. The bridge publishes them
+// through the IPC status (never from a render thread) and the companion shows
+// them as Windows tray notifications when its "Show notifications" setting is
+// on. SimConnect_Text is deprecated in MSFS 2020/2024 and renders nothing.
 enum class SimEvent : unsigned {
   bridge_connected,
   cameras_ready,
@@ -27,7 +29,7 @@ enum class SimEvent : unsigned {
 struct SimMessage {
   const char* text = "";
   float seconds = 6.0f;
-  bool alert = false;  // Coloured PRINT fallback and longer display.
+  bool alert = false;  // Warning icon on the notification.
 };
 
 inline constexpr SimMessage sim_message_for(SimEvent event) noexcept {
@@ -69,7 +71,7 @@ inline constexpr const char* sim_event_name(SimEvent event) noexcept {
 }
 
 // Per-event repeat interval plus a global budget so a flapping state cannot
-// spam the simulator. Watchdog events keep a shorter interval: each trip matters.
+// spam the desktop. Watchdog events keep a shorter interval: each trip matters.
 class SimMessageLimiter {
  public:
   static constexpr std::uint64_t WindowMs = 20000;
@@ -188,6 +190,83 @@ class SimEventTracker {
   SimEventInputs previous_{};
   bool degraded_announced_ = false;
   bool storm_announced_ = false;
+};
+
+// IPC wire form of one admitted event. Every slot is self-describing so the
+// bridge can copy the log slot by slot into Status and the companion can order
+// them by serial; an empty slot has serial 0.
+struct NotificationSlot {
+  std::uint64_t serial{}, posted_ms{};  // posted_ms: GetTickCount64 (system-wide clock).
+  std::uint32_t event{}, reserved{};
+};
+constexpr std::size_t NotificationSlots = 16;
+using NotificationLog = std::array<NotificationSlot, NotificationSlots>;
+
+// Bridge side. Publishers are the bridge worker and the watchdog thread; the
+// worker snapshots the log into the IPC status. Atomics only, no lock: a
+// writer reserves a serial, blanks the slot, fills it and publishes the serial
+// last; the reader rejects a slot whose serial changed while it was read.
+class SimEventLog {
+ public:
+  void publish(SimEvent event, std::uint64_t now_ms) noexcept {
+    if (static_cast<unsigned>(event) >= static_cast<unsigned>(SimEvent::count))
+      return;
+    const auto serial = serial_.fetch_add(1, std::memory_order_acq_rel) + 1;
+    auto& slot = slots_[serial % NotificationSlots];
+    slot.serial.store(0, std::memory_order_release);
+    slot.event.store(static_cast<std::uint32_t>(event), std::memory_order_relaxed);
+    slot.posted_ms.store(now_ms ? now_ms : 1, std::memory_order_relaxed);
+    slot.serial.store(serial, std::memory_order_release);
+  }
+  void snapshot(NotificationLog& out) const noexcept {
+    for (std::size_t i = 0; i < NotificationSlots; ++i) {
+      const auto& slot = slots_[i];
+      const auto before = slot.serial.load(std::memory_order_acquire);
+      NotificationSlot copy{before, slot.posted_ms.load(std::memory_order_relaxed), slot.event.load(std::memory_order_relaxed), 0};
+      const auto after = slot.serial.load(std::memory_order_acquire);
+      out[i] = before && before == after ? copy : NotificationSlot{};
+    }
+  }
+  std::uint64_t published() const noexcept { return serial_.load(std::memory_order_relaxed); }
+
+ private:
+  struct Slot {
+    std::atomic<std::uint64_t> serial{}, posted_ms{};
+    std::atomic<std::uint32_t> event{};
+  };
+  std::array<Slot, NotificationSlots> slots_{};
+  std::atomic<std::uint64_t> serial_{};
+};
+
+// Companion side. Yields the events it has not seen, oldest first, and skips
+// stale ones so a companion restart or a late poll does not replay history.
+// A new simulator process restarts the serial: reset() when the bridge changes.
+class NotificationReader {
+ public:
+  static constexpr std::uint64_t FreshMs = 30000;
+  std::size_t take(const NotificationLog& log, std::uint64_t now_ms, SimEvent* events, std::size_t capacity) noexcept {
+    std::size_t count = 0;
+    for (;;) {
+      const NotificationSlot* next = nullptr;
+      for (const auto& slot : log)
+        if (slot.serial > last_serial_ && (!next || slot.serial < next->serial))
+          next = &slot;
+      if (!next)
+        return count;
+      const bool fresh =
+          now_ms >= next->posted_ms && now_ms - next->posted_ms <= FreshMs && next->event < static_cast<std::uint32_t>(SimEvent::count);
+      if (fresh && count == capacity)
+        return count;  // Left for the next poll.
+      last_serial_ = next->serial;
+      if (fresh)
+        events[count++] = static_cast<SimEvent>(next->event);
+    }
+  }
+  void reset() noexcept { last_serial_ = 0; }
+  std::uint64_t last_serial() const noexcept { return last_serial_; }
+
+ private:
+  std::uint64_t last_serial_ = 0;
 };
 
 }  // namespace taxi_camera
