@@ -140,7 +140,9 @@ struct Module {
   std::uintptr_t base{};
   DWORD size{};
 };
-Module bridge_module(DWORD pid) {
+// required=false is the explicit unloaded-baseline mode: an absent bridge is the
+// expected result and a present one is refused, so the window is provably unloaded.
+Module bridge_module(DWORD pid, bool required = true) {
   Handle snapshot(CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid));
   MODULEENTRY32W entry{};
   entry.dwSize = sizeof(entry);
@@ -154,7 +156,9 @@ Module bridge_module(DWORD pid) {
       throw std::runtime_error("Multiple bridge modules found");
     found = {entry.szExePath, reinterpret_cast<std::uintptr_t>(entry.modBaseAddr), entry.modBaseSize};
   } while (Module32NextW(snapshot.value, &entry));
-  if (!found.base)
+  if (!required && found.base)
+    throw std::runtime_error("Taxi Cam bridge is loaded; the unloaded baseline refuses this window");
+  if (required && !found.base)
     throw std::runtime_error("Taxi Cam bridge is not loaded in the explicit target PID");
   return found;
 }
@@ -379,6 +383,10 @@ struct Options {
   DWORD pid{}, profile{}, mask{};
   unsigned duration_ms = 30000, interval_ms = 250;
   std::wstring output, phase;
+  // Unloaded baseline: the bridge must be absent for the whole window, the
+  // companion is optional, and no IPC readiness/mask/counter validation runs
+  // because no bridge publishes status. Mask must be 0.
+  bool allow_unloaded = false;
 };
 unsigned integer(const std::wstring& value) {
   if (value.empty() || value.find_first_not_of(L"0123456789") != std::wstring::npos)
@@ -406,6 +414,8 @@ Options arguments(int argc, wchar_t** argv) {
       options.duration_ms = integer(value);
     else if (key == L"--interval-ms")
       options.interval_ms = integer(value);
+    else if (key == L"--allow-unloaded")
+      options.allow_unloaded = integer(value) == 1;
     else if (key == L"--output")
       options.output = value;
     else if (key == L"--phase")
@@ -418,6 +428,8 @@ Options arguments(int argc, wchar_t** argv) {
       options.interval_ms < 100 || options.interval_ms > 1000)
     throw std::runtime_error(
         "Require explicit --pid, --profile, --mask, --phase and --output; duration 1000..120000ms, interval 100..1000ms");
+  if (options.allow_unloaded && options.mask)
+    throw std::runtime_error("--allow-unloaded 1 requires --mask 0");
   return options;
 }
 std::string validate_capture(const IpcSnapshot& snapshot, const Options& options) {
@@ -480,22 +492,32 @@ int capture(const Options& options) {
   const auto path = process_path(process.value);
   if (!named(path, L"FlightSimulator2024.exe"))
     throw std::runtime_error("Explicit PID is not FlightSimulator2024.exe; no capture performed");
-  const auto module = bridge_module(options.pid);
+  const auto module = bridge_module(options.pid, !options.allow_unloaded);
   ReadOnlyIpc mailbox(options.pid);
   const auto initial = mailbox.read();
-  const auto initial_error = validate_capture(initial, options);
+  // Without a bridge nothing publishes readiness, mask or delivery counters:
+  // the unloaded baseline records IPC when present and validates none of it.
+  const auto initial_error = options.allow_unloaded ? std::string() : validate_capture(initial, options);
   if (!initial_error.empty())
     throw std::runtime_error("IPC preflight refused: " + initial_error);
   Handle companion(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, initial.value.owner_pid));
-  if (!companion)
+  if (!companion && !options.allow_unloaded)
     throw std::runtime_error("Companion owner PID unavailable");
-  const auto companion_path = process_path(companion.value);
-  if (!named(companion_path, L"taxi-cam.exe"))
-    throw std::runtime_error("IPC owner is not the Taxi Cam companion");
-  const auto companion_created = process_cpu(companion.value).created;
+  std::wstring companion_path;
+  decltype(Cpu{}.created) companion_created{};
+  std::string companion_hash = "absent";
+  if (companion) {
+    companion_path = process_path(companion.value);
+    if (!named(companion_path, L"taxi-cam.exe"))
+      throw std::runtime_error("IPC owner is not the Taxi Cam companion");
+    companion_created = process_cpu(companion.value).created;
+    companion_hash = sha256(companion_path);
+  }
   // Hashing happens outside the CPU interval; these are backing files, not in-memory images.
-  // Store/WindowsApps simulator images may deny CreateFile; bridge + companion remain required.
-  const auto image_hash = sha256(path, false), bridge_hash = sha256(module.path), companion_hash = sha256(companion_path);
+  // Store/WindowsApps simulator images may deny CreateFile; bridge + companion remain required
+  // whenever they are present.
+  const auto image_hash = sha256(path, false);
+  const std::string bridge_hash = module.base ? sha256(module.path) : "absent";
   std::ofstream samples(std::filesystem::path(options.output + L"/samples.jsonl"), std::ios::binary | std::ios::trunc);
   if (!samples)
     throw std::runtime_error("Cannot create samples.jsonl");
@@ -503,13 +525,14 @@ int capture(const Options& options) {
   std::ostringstream metadata;
   metadata << "{\"type\":\"metadata\",\"schema\":1,\"utc\":" << json(utc()) << ",\"phase\":" << json(options.phase)
            << ",\"pid\":" << options.pid << ",\"process_path\":" << json(path) << ",\"process_sha256\":" << json(image_hash)
-           << ",\"bridge_path\":" << json(module.path) << ",\"bridge_base\":" << module.base << ",\"bridge_size\":" << module.size
-           << ",\"bridge_sha256\":" << json(bridge_hash) << ",\"companion_pid\":" << initial.value.owner_pid
-           << ",\"companion_path\":" << json(companion_path) << ",\"companion_sha256\":" << json(companion_hash)
-           << ",\"companion_created_filetime\":" << companion_created << ",\"protocol\":" << ipc::ProtocolVersion
-           << ",\"shared_bytes\":" << sizeof(ipc::Shared) << ",\"expected_profile\":" << options.profile
-           << ",\"expected_mask\":" << options.mask << ",\"duration_ms\":" << options.duration_ms
-           << ",\"interval_ms\":" << options.interval_ms << ",\"settings\":" << setting_identity << '}';
+           << ",\"unloaded\":" << (options.allow_unloaded ? "true" : "false") << ",\"bridge_path\":" << json(module.path)
+           << ",\"bridge_base\":" << module.base << ",\"bridge_size\":" << module.size << ",\"bridge_sha256\":" << json(bridge_hash)
+           << ",\"companion_pid\":" << initial.value.owner_pid << ",\"companion_path\":" << json(companion_path)
+           << ",\"companion_sha256\":" << json(companion_hash) << ",\"companion_created_filetime\":" << companion_created
+           << ",\"protocol\":" << ipc::ProtocolVersion << ",\"shared_bytes\":" << sizeof(ipc::Shared)
+           << ",\"expected_profile\":" << options.profile << ",\"expected_mask\":" << options.mask
+           << ",\"duration_ms\":" << options.duration_ms << ",\"interval_ms\":" << options.interval_ms
+           << ",\"settings\":" << setting_identity << '}';
   write_line(samples, metadata.str());
   pump();  // Establish the message queue before registering the out-of-context event hook.
   Focus focus{GetForegroundWindow(), options.pid};
@@ -543,7 +566,7 @@ int capture(const Options& options) {
       if (cpu.created != first.created)
         issue("process_identity_changed");
       const auto snapshot = mailbox.read();
-      const auto error = validate_capture(snapshot, options);
+      const auto error = options.allow_unloaded ? std::string() : validate_capture(snapshot, options);
       if (!error.empty()) {
         issue(error);
         ++invalid_snapshots;
@@ -614,12 +637,14 @@ int capture(const Options& options) {
     focus.observe(foreground, Focus::pid(foreground));
     if (focus.changed)
       issue("foreground_transition_or_not_foreground");
-    if (process_cpu(companion.value).created != companion_created)
+    if (companion && process_cpu(companion.value).created != companion_created)
       issue("companion_identity_changed");
-    const auto final_module = bridge_module(options.pid);
+    // In the unloaded mode a bridge that appeared during the window throws here and invalidates the capture.
+    const auto final_module = bridge_module(options.pid, !options.allow_unloaded);
     if (final_module.path != module.path || final_module.base != module.base || final_module.size != module.size)
       issue("bridge_module_changed");
-    if (sha256(path, false) != image_hash || sha256(module.path) != bridge_hash || sha256(companion_path) != companion_hash)
+    if (sha256(path, false) != image_hash || (module.base && sha256(module.path) != bridge_hash) ||
+        (companion && sha256(companion_path) != companion_hash))
       issue("binary_backing_file_changed");
   } catch (const std::exception& error) {
     issue(error.what());
@@ -638,10 +663,10 @@ int capture(const Options& options) {
   std::ostringstream summary;
   summary << std::setprecision(17);
   summary << "{\"type\":\"summary\",\"schema\":1,\"valid\":" << (issues.empty() ? "true" : "false") << ",\"phase\":" << json(options.phase)
-          << ",\"pid\":" << options.pid << ",\"process_created_filetime\":" << first.created << ",\"samples\":" << sample_count
-          << ",\"elapsed_seconds\":" << elapsed << ",\"invalid_ipc_samples\":" << invalid_snapshots
-          << ",\"thread_read_failures\":" << read_failures << ",\"focus_events\":" << focus.events
-          << ",\"issues\":" << strings_json(issues);
+          << ",\"unloaded\":" << (options.allow_unloaded ? "true" : "false") << ",\"pid\":" << options.pid
+          << ",\"process_created_filetime\":" << first.created << ",\"samples\":" << sample_count << ",\"elapsed_seconds\":" << elapsed
+          << ",\"invalid_ipc_samples\":" << invalid_snapshots << ",\"thread_read_failures\":" << read_failures
+          << ",\"focus_events\":" << focus.events << ",\"issues\":" << strings_json(issues);
   if (elapsed > 0 && last.user >= first.user && last.kernel >= first.kernel)
     summary << ",\"process_user_ms_per_second\":" << (last.user - first.user) / 10000.0 / elapsed
             << ",\"process_kernel_ms_per_second\":" << (last.kernel - first.kernel) / 10000.0 / elapsed;

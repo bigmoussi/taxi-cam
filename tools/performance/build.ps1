@@ -17,6 +17,9 @@ $common = @('-std=c++20', '-O2', '-Wall', '-Wextra', '-Werror', '-static', '-mun
 $executable = Join-Path $output 'taxi-performance-sampler.exe'
 & (Join-Path $toolchain 'clang++.exe') @common (Join-Path $PSScriptRoot 'sampler.cpp') '-lbcrypt' '-o' $executable
 if ($LASTEXITCODE -ne 0) { throw 'Performance sampler compilation failed.' }
+$poller = Join-Path $output 'ipc-poll.exe'
+& (Join-Path $toolchain 'clang++.exe') @common (Join-Path $PSScriptRoot 'ipc-poll.cpp') '-o' $poller
+if ($LASTEXITCODE -ne 0) { throw 'IPC poller compilation failed.' }
 if ($Test) {
     & (Join-Path $repository 'tests/performance/test.ps1')
 }

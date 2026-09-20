@@ -9,8 +9,11 @@ param(
     [ValidateRange(100,1000)][int]$IntervalMilliseconds = 250,
     [ValidateRange(0,30)][int]$DelaySeconds = 5,
     [string]$OutputDirectory,
-    [string]$PresentMonCsv
+    [string]$PresentMonCsv,
+    # Unloaded baseline: the bridge must be absent from the simulator for the whole window (mask 0 only).
+    [switch]$AllowUnloaded
 )
+if ($AllowUnloaded -and $ExpectedMask -ne 0) { throw '-AllowUnloaded requires -ExpectedMask 0.' }
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $repository = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
@@ -37,7 +40,8 @@ Copy-Item -LiteralPath $buildReceipt -Destination (Join-Path $OutputDirectory 's
 Write-Output "Capture starts in $DelaySeconds seconds. Keep the simulator foreground, with the same aircraft, cockpit view and scene. Output: $OutputDirectory"
 if ($DelaySeconds) { Start-Sleep -Seconds $DelaySeconds }
 & $sampler '--pid' $SimulatorProcessId '--profile' $ExpectedProfile '--mask' $ExpectedMask '--phase' $Phase `
-    '--duration-ms' ($Seconds * 1000) '--interval-ms' $IntervalMilliseconds '--output' $OutputDirectory
+    '--duration-ms' ($Seconds * 1000) '--interval-ms' $IntervalMilliseconds '--output' $OutputDirectory `
+    '--allow-unloaded' $(if ($AllowUnloaded) { 1 } else { 0 })
 $result = $LASTEXITCODE
 $external = $null
 if ($PresentMonCsv) {
@@ -51,7 +55,8 @@ if ($PresentMonCsv) {
         scope='External data only; PID, time overlap, swapchain selection, dropped events and frame interpretation must be checked separately.'}
 }
 [ordered]@{createdUtc=[DateTime]::UtcNow.ToString('o'); samplerExitCode=$result; simulatorPid=$SimulatorProcessId;
-    phase=$Phase; requestedSeconds=$Seconds; expectedProfile=$ExpectedProfile; expectedMask=$ExpectedMask; externalPresentMon=$external;
+    phase=$Phase; requestedSeconds=$Seconds; expectedProfile=$ExpectedProfile; expectedMask=$ExpectedMask; unloaded=[bool]$AllowUnloaded;
+    externalPresentMon=$external;
     liveSceneComparability='Requires operator confirmation; no screenshot or IPC field establishes identical scene/GPU load.'} |
     ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $OutputDirectory 'capture.json') -Encoding UTF8
 if ($result -ne 0) { throw "Capture refused or invalid (exit $result). Preserve evidence; inspect summary.json when present." }
