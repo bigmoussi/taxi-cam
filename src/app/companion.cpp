@@ -14,6 +14,7 @@
 #include "launcher.hpp"
 #include "launcher_log.hpp"
 #include "connection_recoverability.hpp"
+#include "simulator_graphics.hpp"
 #include "../shared/protocol.hpp"
 #include "settings_store.hpp"
 #include "startup_state.hpp"
@@ -60,6 +61,11 @@ std::atomic<bool> connection_requested{}, connection_disconnected{};
 // same rights can attach. Cleared whenever the simulator session changes.
 std::atomic<bool> elevation_required{};
 DWORD wait_for_exit_pid{};
+// Simulator graphics guards. Frame generation freezes this machine's simulator
+// once the cameras open, so the cameras stay off while it is on unless the
+// user allows it on Diagnostics; a graphics hook beside MSFS (ReShade) is
+// named because capture silently stays at zero with it loaded.
+std::atomic<bool> allow_frame_generation{}, frame_generation_blocked{}, graphics_hook_detected{};
 win::ConnectCommandQueue connect_commands;
 win::CameraHotkeys hotkey_draft = win::DefaultCameraHotkeys, hotkey_saved = win::DefaultCameraHotkeys;
 win::CameraHotkeyRegistration hotkey_registration;
@@ -757,6 +763,7 @@ void build_controls() {
   } else if (page == 4) {
     toggle(L"Scene test", 229, s.scene_test, 260, 449, 200);
     toggle(L"First camera only", 228, s.single_camera, 505, 449, 200);
+    toggle(L"Allow Frame Generation (freeze risk)", 247, allow_frame_generation.load(std::memory_order_acquire), 260, 500, 300);
     edit(s.calibration_budget, 203, 840, 548, 120);
     button(L"Open log folder", 510, 260, 591, 210);
     button(L"Stop camera tests", 511, 500, 591, 210);
@@ -848,11 +855,18 @@ void draw_page(HDC dc) {
                                                                  : L"Native bridge connected — waiting for cockpit displays",
          266, 153, 500, 30, heading, sample.graphics_ready && has_displays ? Accent : Text);
     const bool late_empty_pfds = sample.graphics_ready && !has_displays;
-    const auto line = late_empty_pfds    ? std::wstring(
-                                               L"Waiting for cockpit displays to be drawn. "
-                                               L"Restart Flight only if the list stays empty.")
-                      : sample.heartbeat ? widen(sample.message)
-                                         : live;
+    auto line = late_empty_pfds    ? std::wstring(
+                                         L"Waiting for cockpit displays to be drawn. "
+                                         L"Restart Flight only if the list stays empty.")
+                : sample.heartbeat ? widen(sample.message)
+                                   : live;
+    if (frame_generation_blocked.load(std::memory_order_acquire) && !connection_disconnected.load(std::memory_order_acquire))
+      line = win::FrameGenerationBlockedMessage;
+    else if (graphics_hook_detected.load(std::memory_order_acquire) && sample.heartbeat && !sample.captures)
+      line =
+          L"A graphics hook (dxgi.dll/d3d12.dll, e.g. ReShade) is installed beside MSFS: camera capture stays at 0 while it is "
+          L"loaded. Rename it and restart MSFS. " +
+          line;
     text(dc, line.c_str(), 266, 188, 715, 36, normal, late_empty_pfds ? Accent : Muted, DT_LEFT | DT_WORDBREAK);
     panel(dc, 244, 295, 766, 93);
     text(dc, L"Aircraft profile", 260, 298, 350, 22, small, Muted);
@@ -1006,6 +1020,8 @@ DWORD WINAPI connection_worker(void*) {
   std::uint64_t ignore_heartbeat_through = 0;
   win::LaunchRetry startup_retry;
   HANDLE process{};
+  win::SimulatorGraphicsMonitor graphics_monitor;
+  bool fg_notice_shown = false;
   while (running.load()) {
     if (preview_ui) {
       Sleep(100);
@@ -1041,6 +1057,11 @@ DWORD WINAPI connection_worker(void*) {
     }
     const auto attach = win::find_simulator_attach(expected_simulator);
     const DWORD pid = attach.pid;
+    const auto& graphics_sample = graphics_monitor.sample(attach.path.empty() ? expected_simulator : attach.path, GetTickCount64());
+    const bool fg_blocked =
+        graphics_sample.frame_generation == win::FrameGeneration::on && !allow_frame_generation.load(std::memory_order_acquire);
+    frame_generation_blocked.store(fg_blocked, std::memory_order_release);
+    graphics_hook_detected.store(graphics_sample.graphics_hook, std::memory_order_release);
     if (attached && (pid != attached || (process && WaitForSingleObject(process, 0) == WAIT_OBJECT_0))) {
       mailbox.close();
       if (process)
@@ -1087,8 +1108,41 @@ DWORD WINAPI connection_worker(void*) {
         PostMessageW(window, StatusMessage, 0, 0);
       }
     }
-    const bool want_connect =
-        win::should_attempt_connect(auto_on, attempted, command, manual_armed, connection_disconnected.load(std::memory_order_acquire));
+    if (attached && fg_blocked && !connection_disconnected.load(std::memory_order_acquire)) {
+      if (connection_requested.load(std::memory_order_acquire)) {
+        // Frame generation was enabled while the cameras were on: stop them
+        // the same way Disconnect does, but keep Auto-connect armed so the
+        // cameras resume by themselves once the option is off again.
+        {
+          const std::lock_guard lock(app_mutex);
+          win::apply_connection_command(current, win::ConnectCommand::disconnect);
+          connection_requested.store(false, std::memory_order_release);
+          status = {};
+        }
+        exchange_control(mailbox);
+        mailbox.close();
+        attempted = bridge_ok = manual_armed = false;
+        ignore_heartbeat_through = 0;
+        startup_retry.reset();
+      }
+      if (!fg_notice_shown) {
+        const std::lock_guard lock(app_mutex);
+        connection = win::FrameGenerationBlockedMessage;
+        fg_notice_shown = true;
+      }
+      PostMessageW(window, StatusMessage, 0, 0);
+    } else if (!fg_blocked && fg_notice_shown) {
+      fg_notice_shown = false;
+      attempted = false;  // let Auto-connect resume now that frame generation is off
+      {
+        const std::lock_guard lock(app_mutex);
+        if (!connection_disconnected.load(std::memory_order_acquire))
+          connection = L"Frame Generation is off again. Reconnecting the cameras.";
+      }
+      PostMessageW(window, StatusMessage, 0, 0);
+    }
+    const bool want_connect = !fg_blocked && win::should_attempt_connect(auto_on, attempted, command, manual_armed,
+                                                                         connection_disconnected.load(std::memory_order_acquire));
     if (attached && want_connect && startup_retry.ready(GetTickCount64())) {
       {
         const std::lock_guard lock(app_mutex);
@@ -1322,6 +1376,8 @@ bool is_on(int id, const win::Settings& s) {
       return connection_requested.load(std::memory_order_acquire);
     case 240:
       return auto_connect.load(std::memory_order_acquire);
+    case 247:
+      return allow_frame_generation.load(std::memory_order_acquire);
     case 221:
       return s.follow_taxi;
     case 222:
@@ -1657,6 +1713,17 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         build_controls();
         return 0;
       }
+      if (id == 247) {
+        const bool next = !allow_frame_generation.load(std::memory_order_acquire);
+        allow_frame_generation.store(next, std::memory_order_release);
+        if (!win::save_allow_frame_generation(win::settings_directory(), next))
+          notice = L"Could not save the Frame Generation preference.";
+        else
+          notice = next ? L"Frame Generation allowed. The simulator may freeze when the cameras open."
+                        : L"Frame Generation blocks the cameras again until it is off in MSFS.";
+        build_controls();
+        return 0;
+      }
       if (id == 241) {
         toggle_connection();
         return 0;
@@ -1864,6 +1931,7 @@ int WINAPI wWinMain(HINSTANCE app, HINSTANCE, LPWSTR, int) {
   // older version must never prevent Connect or Auto-connect from enabling it.
   current.enabled = 0;
   auto_connect.store(win::load_auto_connect(win::settings_directory()), std::memory_order_release);
+  allow_frame_generation.store(win::load_allow_frame_generation(win::settings_directory()), std::memory_order_release);
   if (!win::load_camera_hotkeys(hotkey_saved, win::settings_directory()))
     notice = L"Saved shortcuts were invalid and disabled. Configure them in Overview > Flight-deck control.";
   hotkey_draft = hotkey_saved;
