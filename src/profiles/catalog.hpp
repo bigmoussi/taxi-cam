@@ -62,6 +62,10 @@ struct AircraftProfile {
   DisplayInsets camera_padding{16, 12, 16, 0};
   PfdDetectionPolicy pfd_detection = PfdDetectionPolicy::dominant_activity;
   float exposure = -11.5f;
+  // Measured PFD redraws per second per side (bridge stamps/s ÷ 2). Composing
+  // faster than this cannot reach the screen. 0 = not measured: only the
+  // camera-manager ceiling caps the useful camera_rate.
+  unsigned pfd_refresh_hz = 0;
 };
 inline constexpr AircraftProfile A380{1,
                                       "fbw-a380x",
@@ -79,44 +83,56 @@ inline constexpr AircraftProfile A380{1,
 // defaults reflect the user's saved per-aircraft calibrations from 2026-09-15.
 // The compositor retains its bounded 768px working image.
 // Preserve a 32px central gap around the PFD/MFDDivider artwork on both sides.
-inline constexpr AircraftProfile A359{2,
-                                      "ini-a350-900",
-                                      L"iniBuilds A350-900 / ULR",
-                                      {"L:INI_TAXI_LEFT", "L:INI_TAXI_RIGHT"},
-                                      {"", ""},
-                                      {"$EFIS_LEFT", "$EFIS_RIGHT"},
-                                      {{{0, -2, 16, -15, 0, 0.55}, {0, 10, -33.0, -15, 0, 0.62}}},
-                                      1644,
-                                      1024,
-                                      0,
-                                      TaxiControl::lvar_off,
-                                      {"A359", "A359 ULR"},
-                                      {{{0, 0, 806, 763}, {838, 0, 1644, 763}}},
-                                      {{{774, 251}, {774, 496}}},
-                                      true,
-                                      60,
-                                      A350Etacs,
-                                      {28, 29, 87, 91, 27, 90},
-                                      {"inibuilds-aircraft-a350", "presets/inibuilds", "attachments/inibuilds"}};
-inline constexpr AircraftProfile A35K{3,
-                                      "ini-a350-1000",
-                                      L"iniBuilds A350-1000",
-                                      {"L:INI_TAXI_LEFT", "L:INI_TAXI_RIGHT"},
-                                      {"", ""},
-                                      {"$EFIS_LEFT", "$EFIS_RIGHT"},
-                                      {{{0, -2, 19.81, -15, 0, 0.55}, {0, 10, -36.17, -15, 0, 0.62}}},
-                                      1644,
-                                      1024,
-                                      0,
-                                      TaxiControl::lvar_off,
-                                      {"A35K"},
-                                      {{{0, 0, 806, 763}, {838, 0, 1644, 763}}},
-                                      {{{774, 251}, {774, 496}}},
-                                      true,
-                                      60,
-                                      A350EtacsA35K,
-                                      {28, 29, 87, 91, 27, 90},
-                                      {"inibuilds-aircraft-a350", "presets/inibuilds", "attachments/inibuilds"}};
+// A350 PFD refresh: both-PFD stamps 160–179/s (80–90 per side) on the 0.9.35
+// rate sweep, parked A350-900 under Man FG target 30. Above the manager
+// ceiling, so only that ceiling caps the useful rate on this aircraft.
+inline constexpr unsigned A350PfdRefreshHz = 80;
+inline constexpr AircraftProfile A359 = [] {
+  AircraftProfile p{2,
+                    "ini-a350-900",
+                    L"iniBuilds A350-900 / ULR",
+                    {"L:INI_TAXI_LEFT", "L:INI_TAXI_RIGHT"},
+                    {"", ""},
+                    {"$EFIS_LEFT", "$EFIS_RIGHT"},
+                    {{{0, -2, 16, -15, 0, 0.55}, {0, 10, -33.0, -15, 0, 0.62}}},
+                    1644,
+                    1024,
+                    0,
+                    TaxiControl::lvar_off,
+                    {"A359", "A359 ULR"},
+                    {{{0, 0, 806, 763}, {838, 0, 1644, 763}}},
+                    {{{774, 251}, {774, 496}}},
+                    true,
+                    60,
+                    A350Etacs,
+                    {28, 29, 87, 91, 27, 90},
+                    {"inibuilds-aircraft-a350", "presets/inibuilds", "attachments/inibuilds"}};
+  p.pfd_refresh_hz = A350PfdRefreshHz;
+  return p;
+}();
+inline constexpr AircraftProfile A35K = [] {
+  AircraftProfile p{3,
+                    "ini-a350-1000",
+                    L"iniBuilds A350-1000",
+                    {"L:INI_TAXI_LEFT", "L:INI_TAXI_RIGHT"},
+                    {"", ""},
+                    {"$EFIS_LEFT", "$EFIS_RIGHT"},
+                    {{{0, -2, 19.81, -15, 0, 0.55}, {0, 10, -36.17, -15, 0, 0.62}}},
+                    1644,
+                    1024,
+                    0,
+                    TaxiControl::lvar_off,
+                    {"A35K"},
+                    {{{0, 0, 806, 763}, {838, 0, 1644, 763}}},
+                    {{{774, 251}, {774, 496}}},
+                    true,
+                    60,
+                    A350EtacsA35K,
+                    {28, 29, 87, 91, 27, 90},
+                    {"inibuilds-aircraft-a350", "presets/inibuilds", "attachments/inibuilds"}};
+  p.pfd_refresh_hz = A350PfdRefreshHz;
+  return p;
+}();
 // iniBuilds A380 display layout started from FBW. Mounts and guide defaults
 // reflect the user's accepted live calibration from 2026-09-15.
 // The streamed aircraft reports Airbus with this exact AircraftLoaded path
@@ -141,6 +157,9 @@ inline constexpr AircraftProfile IniA380 = [] {
   p.mips = 1;
   p.formats = {28, 29, 87, 91, 27, 90};
   p.pfd_detection = PfdDetectionPolicy::ini_a380_allocation_group;
+  // 31.3 both-PFD stamps/s at camera_rate 15 on installed 0.9.11 (no FG):
+  // ~15.7 redraws per side. FBW A380 (profile 1) is not measured yet.
+  p.pfd_refresh_hz = 16;
   return p;
 }();
 inline constexpr std::array<const AircraftProfile*, 4> Catalog{&A380, &A359, &A35K, &IniA380};

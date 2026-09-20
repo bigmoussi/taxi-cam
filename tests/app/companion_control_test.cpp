@@ -60,6 +60,13 @@ int main() {
     settings.tail_inner = {0.375f, 0.875f};
     settings.guide_color = {0.125f, 0.5f, 0.875f};
     settings.speed_color = {0.25f, 0.75f, 0.375f};
+    settings.parked_rate = 8;
+    require(valid_settings(settings), "Adjusted parked floor is valid");
+    settings.parked_rate = 3;
+    require(!valid_settings(settings), "Parked floor below the schedule minimum is rejected");
+    settings.parked_rate = 0;
+    require(valid_settings(settings), "Parked floor 0 disables the floor and stays valid");
+    settings.parked_rate = 8;
     settings.route_request = 12;
     settings.taxi_request = 7;
     settings.taxi_selected_mask = 3;
@@ -87,10 +94,11 @@ int main() {
     require(change.started && change.generation == 4, "New companion owner restarts setup despite reused serial");
     change = setup.observe(true, false, control.owner_pid() + 1, 2);
     require(change.stopped, "Disabled connection closes output without waiting for heartbeat timeout");
-    require(ProtocolVersion == 10 && control.settings().nose_dot == settings.nose_dot &&
+    require(ProtocolVersion == 11 && control.settings().nose_dot == settings.nose_dot &&
                 control.settings().tail_upper == settings.tail_upper && control.settings().tail_corner == settings.tail_corner &&
                 control.settings().tail_inner == settings.tail_inner,
-            "Protocol9 guide coordinates roundtrip");
+            "Protocol11 guide coordinates roundtrip");
+    require(control.settings().parked_rate == settings.parked_rate, "Protocol11 parked floor roundtrip");
     require(control.settings().guide_color == settings.guide_color && control.settings().speed_color == settings.speed_color,
             "Independent marking and ground-speed colours roundtrip");
     require(control.settings().taxi_request == 7 && control.settings().taxi_selected_mask == 3 && control.settings().taxi_desired_mask == 2,
@@ -175,11 +183,13 @@ int main() {
     publish(owner, 17000, settings);
     control.refresh(reader);
     require(control.connected(17000), "Valid message restores connection");
-    require(owner.lock(1000), "Protocol mutation lock");
-    owner.data()->version = 8;
-    owner.unlock();
-    control.refresh(reader);
-    require(!control.connected(17000), "Old protocol8 is rejected by the protocol9 settings layout");
+    for (const std::uint32_t old_version : {9u, 10u}) {
+      require(owner.lock(1000), "Protocol mutation lock");
+      owner.data()->version = old_version;
+      owner.unlock();
+      control.refresh(reader);
+      require(!control.connected(17000), "Old protocol 9/10 is rejected by the protocol11 settings layout");
+    }
     require(owner.lock(1000), "Restore protocol lock");
     owner.data()->version = ProtocolVersion;
     owner.unlock();

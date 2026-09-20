@@ -8,6 +8,7 @@
 #include "../graphics/display_exposure.hpp"
 #include "../graphics/taxi_button_routes.hpp"
 #include "../hooks/render_boundary_observer.hpp"
+#include "../shared/camera_rate_policy.hpp"
 #include "../shared/companion_control.hpp"
 #include "../shared/protocol.hpp"
 #include "../shared/rotating_log.hpp"
@@ -234,6 +235,8 @@ DWORD run_impl() {
   };
   std::vector<PfdTargetObservation> inventory;
   unsigned rate{}, feeds{}, applied_profile{};
+  ParkedRatePolicy parked_policy;
+  EffectiveCameraRate effective_rate;
   std::uint64_t applied_profile_request{}, applied_session_epoch{};
   std::uint64_t pending_profile_request{}, pending_session_epoch{}, transition_token{};
   unsigned pending_profile{};
@@ -542,8 +545,14 @@ DWORD run_impl() {
     win::set_target_mask(active);
     win::set_calibration(calibration, settings.calibration_budget);
     const win::OwnedWork owned;
-    if (connected && (rate != settings.camera_rate || feeds != (settings.single_camera ? 1u : 2u))) {
-      rate = settings.camera_rate;
+    // Only the schedule rate changes here. The pair, its gates and the saved
+    // camera_rate are untouched; configure() on a live pair retains deadlines.
+    const bool parked = parked_policy.update(now, speed.valid, speed.knots);
+    const auto* rate_profile = profiles::find(applied_profile ? applied_profile : settings.profile);
+    effective_rate =
+        effective_camera_rate(settings.camera_rate, rate_profile ? rate_profile->pfd_refresh_hz : 0, parked, settings.parked_rate);
+    if (connected && (rate != effective_rate.rate || feeds != (settings.single_camera ? 1u : 2u))) {
+      rate = effective_rate.rate;
       feeds = settings.single_camera ? 1u : 2u;
       native_camera::request_scene_rate(rate, feeds);
       scene_runtime::manager().set_source_rate(rate);
@@ -689,6 +698,10 @@ DWORD run_impl() {
     status.heartbeat = now;
     status.active_profile = applied_profile;
     status.detected_profile = identity.fresh ? identity.detected_profile : 0;
+    status.effective_rate = rate ? rate : effective_rate.rate;
+    status.useful_rate = effective_rate.useful_maximum;
+    status.rate_limits = effective_rate.reasons;
+    status.parked = parked;
     status.identity_sample_ms = identity.fresh ? identity.sample_ms : 0;
     status.aircraft_session_epoch = session_epoch;
     // Read acknowledgement first: a retired command must never be paired with
@@ -828,7 +841,8 @@ DWORD run_impl() {
                          status.taxi_mask != last_logged.taxi_mask || status.left_id != last_logged.left_id ||
                          status.right_id != last_logged.right_id || status.speed_inhibited != last_logged.speed_inhibited ||
                          scene.stop_sequence != last_stop_sequence || output.output != last_output ||
-                         scene.view_wait_count != last_view_wait_count;
+                         scene.view_wait_count != last_view_wait_count || status.effective_rate != last_logged.effective_rate ||
+                         status.parked != last_logged.parked;
     loop_max_ms = std::max(loop_max_ms, GetTickCount64() - now);
     if (changed || now >= next_log) {
       if (!logged || status.active_profile != last_logged.active_profile || status.detected_profile != last_logged.detected_profile ||
@@ -848,6 +862,7 @@ DWORD run_impl() {
                     "stop_seq=%llu stop=%s "
                     "retry=%u pending=%u pose_wait=%u view_wait=%u waits=%llu ready=%u/%u outputs=%u/%u output_waits=%u inspection=%s/%s "
                     "entries=%llu/%llu suspended=%u "
+                    "rate=%u saved_rate=%u useful_rate=%u rate_limit=%s parked=%u speed_knots=%.2f "
                     "gates=%u/%u tail=%s "
                     "draws=%llu unknown_lists=%llu invalid_recordings=%llu scoped_invalidations=%llu invalid_draws=%llu "
                     "lease_failures=%llu global_aliases=%llu overflows=%llu reasons=0x%x capture_stalled=%u "
@@ -860,8 +875,10 @@ DWORD run_impl() {
                     scene.pose_waiting, scene.view_waiting, static_cast<unsigned long long>(scene.view_wait_count), scene.ready[0],
                     scene.ready[1], scene.output_ready[0], scene.output_ready[1], scene.output_waits, scene.inspection_status[0],
                     scene.inspection_status[1], static_cast<unsigned long long>(scene.pair.owned_ids[0]),
-                    static_cast<unsigned long long>(scene.pair.owned_ids[1]), demand.suspend, scene.gates[0], scene.gates[1],
-                    output.capture.tail_status, static_cast<unsigned long long>(output.capture.source_draws),
+                    static_cast<unsigned long long>(scene.pair.owned_ids[1]), demand.suspend, status.effective_rate, settings.camera_rate,
+                    status.useful_rate, camera_rate_limit_name(status.rate_limits), status.parked, speed.valid ? speed.knots : -1.0,
+                    scene.gates[0], scene.gates[1], output.capture.tail_status,
+                    static_cast<unsigned long long>(output.capture.source_draws),
                     static_cast<unsigned long long>(output.capture.unknown_submitted_lists),
                     static_cast<unsigned long long>(output.capture.invalid_source_recordings),
                     static_cast<unsigned long long>(output.capture.scoped_source_invalidations),
