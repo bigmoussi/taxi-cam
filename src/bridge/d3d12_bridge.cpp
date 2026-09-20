@@ -44,6 +44,14 @@ struct Resource : Metadata {
   D3D12_RESOURCE_DESC desc{};
   std::atomic<std::uint64_t> draws{};
   std::atomic<std::uint64_t> submission_activity{};
+  // Last insertable state left by a closed list, or all-bits when unknown.
+  // content_serial advances when that list wrote. covered_serial catches up
+  // only when a copy is planned, so a quiet Execute can cover the instrument
+  // once instead of on every submission.
+  static constexpr UINT kSettledStateUnknown = ~UINT{0};
+  std::atomic<UINT> settled_state{kSettledStateUnknown};
+  std::atomic<std::uint64_t> content_serial{1};
+  std::atomic<std::uint64_t> covered_serial{0};
   std::array<UINT, 4> typed_rtv_refs{};
   void retire() noexcept override {
     alive.store(false, std::memory_order_release);
@@ -1707,6 +1715,7 @@ void plan_display_submission(void*,
   const auto no_position = count * 2;
   std::array<UINT, 2> positions{no_position, no_position};
   std::array<PfdSubmissionProof::Candidate, 2> selected{};
+  std::array<std::uint64_t, 2> cover_serial{};
   unsigned candidates = 0;
   for (UINT i = 0; i < count; ++i) {
     for (std::size_t slot = 0; slot < PfdSubmissionProof::maximum_resources; ++slot) {
@@ -1744,12 +1753,24 @@ void plan_display_submission(void*,
     if (!target || !target->alive || !display_item(r, *target))
       continue;
     const PfdSubmissionProof::Key key{reinterpret_cast<std::uint64_t>(target->native), target->id};
-    if (const auto overlay = PfdSubmissionProof::batch_overlay(batch.data(), count, key)) {
+    auto overlay = PfdSubmissionProof::batch_overlay(batch.data(), count, key);
+    // The instrument is already on the glass from a list that ran before this
+    // Execute. Output admission can arm the camera before the next selected
+    // write. Copy after this batch only when nothing here touches the display,
+    // and only until that content has been covered. A same-batch write still
+    // uses the suffix/prefix site above; crossing it would flash the instrument.
+    if (!overlay && target->content_serial.load(std::memory_order_acquire) != target->covered_serial.load(std::memory_order_acquire)) {
+      const auto state_bits = target->settled_state.load(std::memory_order_acquire);
+      if (state_bits != Resource::kSettledStateUnknown)
+        overlay = PfdSubmissionProof::carried_overlay(batch.data(), count, key, static_cast<D3D12_RESOURCE_STATES>(state_bits));
+    }
+    if (overlay) {
       positions[side] = static_cast<UINT>(overlay.list * 2 + (overlay.before ? 0u : 1u));
       selected[side] = overlay.candidate;
+      cover_serial[side] = target->content_serial.load(std::memory_order_acquire);
     }
   }
-  if (!candidates) {
+  if (!candidates && positions[0] == no_position && positions[1] == no_position) {
     outcome(DisplaySubmissionOutcome::no_display_exit);
     return;
   }
@@ -1788,6 +1809,8 @@ void plan_display_submission(void*,
                  static_cast<UINT>(patch.destination.bottom - patch.destination.top)};
     item.copy.target->AddRef();
     item.copy.source->AddRef();
+    if (cover_serial[side])
+      target->covered_serial.store(cover_serial[side], std::memory_order_release);
   }
   if (plan.count)
     r.queue_patch_plans.fetch_add(1, std::memory_order_relaxed);
@@ -2079,6 +2102,29 @@ bool native_close_endpoint(const void* address) noexcept {
   return owner == GetModuleHandleW(L"D3D12Core.dll") || owner == GetModuleHandleW(L"d3d12.dll") ||
          owner == GetModuleHandleW(L"D3D12SDKLayers.dll");
 }
+// Remember the state a display list actually left, including while the camera
+// is still off. Arming later can copy on a quiet Execute without waiting for
+// the next instrument write, and without guessing a state this list abandoned.
+void remember_display_settlement(List& item) noexcept {
+  const auto generation = item.recording.load(std::memory_order_acquire);
+  PfdSubmissionProof::Settlement rows[PfdSubmissionProof::maximum_resources]{};
+  const auto count = item.submission_proof.settlements(generation, rows, static_cast<UINT>(std::size(rows)));
+  if (!count)
+    return;
+  auto& r = registry();
+  const std::lock_guard lock(r.mutex);
+  for (UINT i = 0; i < count; ++i) {
+    auto* native = reinterpret_cast<ID3D12Resource*>(rows[i].key.resource);
+    const auto found = r.resources.find(native);
+    if (found == r.resources.end() || !found->second || !found->second->alive || found->second->id != rows[i].key.generation ||
+        !display_item(r, *found->second))
+      continue;
+    found->second->settled_state.store(rows[i].restorable ? static_cast<UINT>(rows[i].after) : Resource::kSettledStateUnknown,
+                                       std::memory_order_release);
+    if (rows[i].wrote)
+      found->second->content_serial.fetch_add(1, std::memory_order_release);
+  }
+}
 HRESULT STDMETHODCALLTYPE close(ID3D12GraphicsCommandList* native) noexcept {
   using F = HRESULT(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*);
   if (!owned_depth && registry().ready) {
@@ -2106,6 +2152,8 @@ HRESULT STDMETHODCALLTYPE close(ID3D12GraphicsCommandList* native) noexcept {
     if (auto item = find_list(native)) {
       item->submission_proof.close(item->recording, SUCCEEDED(result));
       item->closed_recording.store(SUCCEEDED(result) ? item->recording.load() : 0, std::memory_order_release);
+      if (SUCCEEDED(result))
+        remember_display_settlement(*item);
     }
   }
   return result;
