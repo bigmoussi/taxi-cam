@@ -652,6 +652,19 @@ float4 vs_main(uint id : SV_VertexID) : SV_Position {
   float2 uv = float2((id << 1) & 2, id & 2);
   return float4(uv.x * 2 - 1, 1 - uv.y * 2, 0, 1);
 }
+// Signed distance to a rounded rect. y grows downward; radii are
+// top-right, bottom-right, bottom-left, top-left. Negative is inside.
+float sd_round_rect(float2 p, float2 bmin, float2 bmax, float4 radii) {
+  float2 center = 0.5 * (bmin + bmax);
+  float2 half_size = 0.5 * (bmax - bmin);
+  float2 q = p - center;
+  float r = q.x > 0 ? (q.y > 0 ? radii.y : radii.x) : (q.y > 0 ? radii.z : radii.w);
+  float2 d = abs(q) - half_size + r;
+  return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - r;
+}
+float4 split_bottom_t() {
+  return float4(27.0 / 255.0, 28.0 / 255.0, 35.0 / 255.0, 1);
+}
 float4 ps_main(float4 position : SV_Position) : SV_Target {
   // Mode 2 hides the overlay entirely (no glyphs, no black panel). Modes 0/1
   // keep the existing GS panel so font fixtures stay unchanged.
@@ -661,47 +674,55 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
   }
   if (position.y >= DividerTop && position.y < DividerBottom) {
     // Split-bottom (777) T uses the reference grey; other aircraft keep black.
-    if (SplitBottom != 0) return float4(75.0 / 255.0, 75.0 / 255.0, 99.0 / 255.0, 1);
+    if (SplitBottom != 0) return split_bottom_t();
     return float4(0, 0, 0, 1);
   }
+  // Split-bottom nose picture height stays 280 px. NoseHeight is the bottom edge,
+  // so any band above it is black without shortening the picture.
+  float nose_top = 0;
+  if (SplitBottom != 0) nose_top = max(NoseHeight - 280, 0);
+  if (SplitBottom != 0 && position.y < nose_top) return float4(0, 0, 0, 1);
   if (SplitBottom != 0 && position.y >= TailTop) {
     float pane = (768 - BottomGap) * 0.5;
-    if (position.x >= pane && position.x < pane + BottomGap)
-      return float4(75.0 / 255.0, 75.0 / 255.0, 99.0 / 255.0, 1);
-    // Picture borders measured from the reference ND: thin black frame around
-    // each bottom feed. Inner top corners stay 18 px on the picture edge.
-    const float pane_border = 3;
-    const float radius = 18;
+    if (position.x >= pane && position.x < pane + BottomGap) return split_bottom_t();
+    // Black picture frame: outer edge is the rounded rect (24 px). The border
+    // ring is concentric so the radius sits on the black, not a hard box
+    // around a rounded picture. Left pane top-right / right pane top-left are
+    // the T-junction corners; the other three corners match the same frame.
+    const float pane_border = 10;
+    const float radius = 24;
+    const float inner_radius = max(radius - pane_border, 0);
     float local_x = position.x < pane ? position.x : position.x - pane - BottomGap;
     float local_y = position.y - TailTop;
     float pane_h = 763 - TailTop;
-    float2 content_min = float2(pane_border, pane_border);
-    float2 content_max = float2(pane - pane_border, pane_h - pane_border);
     float2 local = float2(local_x, local_y);
-    if (any(local < content_min) || any(local >= content_max)) return float4(0, 0, 0, 1);
-    // Inner top corners of the picture (left pane top-right, right pane top-left).
-    if (local_y < content_min.y + radius) {
-      if (position.x < pane) {
-        float2 centre = float2(content_max.x - radius, content_min.y + radius);
-        if (local.x > centre.x && distance(local, centre) > radius) return float4(0, 0, 0, 1);
-      } else {
-        float2 centre = float2(content_min.x + radius, content_min.y + radius);
-        if (local.x < centre.x && distance(local, centre) > radius) return float4(0, 0, 0, 1);
-      }
+    float2 outer_min = float2(0, 0);
+    float2 outer_max = float2(pane, pane_h);
+    float2 inner_min = float2(pane_border, pane_border);
+    float2 inner_max = float2(pane - pane_border, pane_h - pane_border);
+    float4 radii = float4(radius, radius, radius, radius);
+    float4 inner_radii = float4(inner_radius, inner_radius, inner_radius, inner_radius);
+    float d_outer = sd_round_rect(local, outer_min, outer_max, radii);
+    if (d_outer > 0) {
+      // Outside the rounded frame: T grey toward the gap, black on the outer sides.
+      bool toward_gap = position.x < pane ? local_x > pane * 0.5 : local_x < pane * 0.5;
+      return toward_gap ? split_bottom_t() : float4(0, 0, 0, 1);
     }
+    if (sd_round_rect(local, inner_min, inner_max, inner_radii) > 0) return float4(0, 0, 0, 1);
   }
   if (ReferenceGuides != 0 && reference_guide(position.xy, position.y < NoseHeight)) return float4(GuideRed, GuideGreen, GuideBlue, 1);
   if (position.y < NoseHeight) {
-    // Thin black edge along the bottom of the nose picture, before the T.
-    if (SplitBottom != 0 && position.y >= NoseHeight - 2) return float4(0, 0, 0, 1);
-    float nose_h = SplitBottom != 0 ? max(NoseHeight - 2, 1) : NoseHeight;
-    float2 uv = float2(position.x / 768, position.y / nose_h);
+    // Visible black edge under the nose picture before the T (2 px was lost on-ND).
+    const float nose_border = 10;
+    if (SplitBottom != 0 && position.y >= NoseHeight - nose_border) return float4(0, 0, 0, 1);
+    float nose_h = SplitBottom != 0 ? max(NoseHeight - nose_top - nose_border, 1) : NoseHeight;
+    float2 uv = float2(position.x / 768, (position.y - nose_top) / nose_h);
     return float4(display_rgb(Nose.SampleLevel(LinearClamp, uv, 0).rgb, 0), 1);
   }
   if (position.y < TailTop) return float4(0, 0, 0, 1);
   if (SplitBottom != 0) {
     float pane = (768 - BottomGap) * 0.5;
-    const float pane_border = 3;
+    const float pane_border = 10;
     float local_x = position.x < pane ? position.x : position.x - pane - BottomGap;
     float local_y = position.y - TailTop;
     float pane_h = 763 - TailTop;

@@ -204,22 +204,30 @@ inline constexpr std::array<unsigned, 6> Pmdg777Formats{};
 // owns three viewpoints: nose on top, and independent left/right wing cameras
 // on the split bottom. Pixels outside the two inboard gauges stay untouched.
 // Working-image layout matched to the reference ND photo on a nearly square
-// 958x971 gauge: shorter full-width top, taller split bottom, with a T divider
-// whose bar is ~4/5 of the vertical gap. Bottom capture panes match each half
-// pane's portrait aspect so the compositor does not stretch. Top/bottom ND
+// 958x971 gauge: full-width nose picture (unchanged 280 px height) sits below a
+// top black band, with a T divider whose bar is ~4/5 of the vertical gap. Bottom
+// panes are equal squares so the compositor does not stretch. Top/bottom ND
 // padding frames the camera block; left/right stay zero so the split is unchanged.
-inline constexpr unsigned Pmdg777NoseHeight = 280;
+inline constexpr unsigned Pmdg777NosePictureHeight = 280;
 inline constexpr unsigned Pmdg777BottomGap = 48;
+inline constexpr unsigned Pmdg777BottomPane = (768 - Pmdg777BottomGap) / 2;
 inline constexpr unsigned Pmdg777DividerThickness = (Pmdg777BottomGap * 4 + 2) / 5;
-inline constexpr unsigned Pmdg777DividerBottom = Pmdg777NoseHeight + Pmdg777DividerThickness;
-inline constexpr unsigned Pmdg777BottomHeight = 763 - Pmdg777DividerBottom;
-inline constexpr unsigned Pmdg777BottomPaneWidth = (768 - Pmdg777BottomGap) / 2;
+inline constexpr unsigned Pmdg777TailTop = 763 - Pmdg777BottomPane;
+inline constexpr unsigned Pmdg777TopBand =
+    Pmdg777TailTop - Pmdg777DividerThickness - Pmdg777NosePictureHeight;
+inline constexpr unsigned Pmdg777NoseBottom = Pmdg777TopBand + Pmdg777NosePictureHeight;
+inline constexpr unsigned Pmdg777DividerBottom = Pmdg777NoseBottom + Pmdg777DividerThickness;
+static_assert(Pmdg777BottomPane == 360);
+static_assert(Pmdg777TopBand == 85);
+static_assert(Pmdg777NoseBottom == 365);
+static_assert(Pmdg777DividerBottom == Pmdg777TailTop);
 inline constexpr Composition Pmdg777Composition = [] {
   Composition c;
-  c.nose_height = static_cast<float>(Pmdg777NoseHeight);
-  c.divider_top = static_cast<float>(Pmdg777NoseHeight);
+  // nose_height is the bottom edge of the nose picture (picture height stays 280).
+  c.nose_height = static_cast<float>(Pmdg777NoseBottom);
+  c.divider_top = static_cast<float>(Pmdg777NoseBottom);
   c.divider_bottom = static_cast<float>(Pmdg777DividerBottom);
-  c.tail_top = static_cast<float>(Pmdg777DividerBottom);
+  c.tail_top = static_cast<float>(Pmdg777TailTop);
   c.split_bottom = 1;
   c.bottom_gap = static_cast<float>(Pmdg777BottomGap);
   return c;
@@ -229,11 +237,11 @@ inline constexpr Composition Pmdg777Composition = [] {
 // single tail capture). Published defaults from Robert's live 777 calibration.
 inline constexpr std::array<std::array<double, 6>, 3> Pmdg777Mounts{
     {{0, -2, 16, -18, 0, 1}, {-4, 1.5, -25, 0, -15, 0.8}, {4, 1.5, -25, 0, 15, 0.8}}};
-// Nose matches the shorter top band; each bottom feed matches one half-pane.
+// Nose matches the 280 px picture; each bottom feed is a square half-pane.
 inline constexpr CameraPanes Pmdg777Panes{
-    {{736, static_cast<std::int32_t>((Pmdg777NoseHeight * 736 + 384) / 768)},
-     {static_cast<std::int32_t>(Pmdg777BottomPaneWidth), static_cast<std::int32_t>(Pmdg777BottomHeight)},
-     {static_cast<std::int32_t>(Pmdg777BottomPaneWidth), static_cast<std::int32_t>(Pmdg777BottomHeight)}}};
+    {{736, static_cast<std::int32_t>((Pmdg777NosePictureHeight * 736 + 384) / 768)},
+     {static_cast<std::int32_t>(Pmdg777BottomPane), static_cast<std::int32_t>(Pmdg777BottomPane)},
+     {static_cast<std::int32_t>(Pmdg777BottomPane), static_cast<std::int32_t>(Pmdg777BottomPane)}}};
 inline constexpr AircraftProfile Pmdg777 = [] {
   AircraftProfile p{5,
                     "pmdg-777",
