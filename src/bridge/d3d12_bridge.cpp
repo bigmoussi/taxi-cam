@@ -408,13 +408,25 @@ DXGI_FORMAT output_format(const View& view) noexcept {
     return DXGI_FORMAT_UNKNOWN;
   if (!view.recovered)
     return std::find(TypedFormats.begin(), TypedFormats.end(), view.format) != TypedFormats.end() ? view.format : DXGI_FORMAT_UNKNOWN;
-  // This is the bridge's explicit output encoding. It is never entered in the
-  // application's typed-RTV evidence, and never used with its opaque descriptor.
+  // Recovered binds identify the resource, not the application's opaque RTV
+  // format. Prefer the single observed typed RTV encoding on typeless displays
+  // so display-referred compositor codes get the same HW sRGB encode as
+  // aircraft UI. With no typed evidence, keep UNORM (cannot invent sRGB).
   const auto format = view.resource->desc.Format;
+  const auto from_typed_refs = [&](unsigned first, unsigned last, DXGI_FORMAT fallback) noexcept {
+    unsigned count = 0;
+    DXGI_FORMAT found = fallback;
+    for (unsigned i = first; i <= last; ++i)
+      if (view.resource->typed_rtv_refs[i]) {
+        found = TypedFormats[i];
+        ++count;
+      }
+    return count == 1 ? found : count == 0 ? fallback : DXGI_FORMAT_UNKNOWN;
+  };
   if (format == DXGI_FORMAT_R8G8B8A8_TYPELESS)
-    return DXGI_FORMAT_R8G8B8A8_UNORM;
+    return from_typed_refs(0, 1, DXGI_FORMAT_R8G8B8A8_UNORM);
   if (format == DXGI_FORMAT_B8G8R8A8_TYPELESS)
-    return DXGI_FORMAT_B8G8R8A8_UNORM;
+    return from_typed_refs(2, 3, DXGI_FORMAT_B8G8R8A8_UNORM);
   return std::find(TypedFormats.begin(), TypedFormats.end(), format) != TypedFormats.end() ? format : DXGI_FORMAT_UNKNOWN;
 }
 void account_view(const View& view, bool add) noexcept {

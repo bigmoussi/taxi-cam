@@ -1973,9 +1973,10 @@ void native_case(bool warp,
         for (UINT c = 0; c < 4; ++c) {
           const UINT channel = bgra && c != 1 && c != 3 ? 2 - c : c;
           double expected = c == 3 ? 255 : inside ? ref[channel] : 0;
-          // Stamp converts display-referred compositor bytes to linear before an
-          // sRGB RTV write so hardware encode restores the same codes. Expect
-          // identity for UNORM and UNORM_SRGB; do not apply a second encode here.
+          if (srgb && c != 3) {
+            const auto v = expected / 255.;
+            expected = 255 * (v <= .0031308 ? 12.92 * v : 1.055 * std::pow(v, 1. / 2.4) - .055);
+          }
           require(std::abs(actual[c] - std::round(expected)) <= (srgb ? 1 : 0),
                   "Private typed patch preserves RGBA/BGRA/sRGB pixels and leaves outside pixels untouched");
         }
