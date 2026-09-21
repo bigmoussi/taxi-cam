@@ -663,7 +663,7 @@ float sd_round_rect(float2 p, float2 bmin, float2 bmax, float4 radii) {
   return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - r;
 }
 float4 split_bottom_t() {
-  return float4(27.0 / 255.0, 28.0 / 255.0, 35.0 / 255.0, 1);
+  return float4(28.0 / 255.0, 27.0 / 255.0, 34.0 / 255.0, 1);
 }
 float4 ps_main(float4 position : SV_Position) : SV_Target {
   // Mode 2 hides the overlay entirely (no glyphs, no black panel). Modes 0/1
