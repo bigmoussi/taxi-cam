@@ -6,13 +6,13 @@ Each profile owns its camera calibration, display colour and exposure settings. 
 
 ## Profiles
 
-| Profile | Settings key | Display texture | Nose / tail render sizes |
+| Profile | Settings key | Display texture | Camera render sizes |
 | --- | --- | --- | --- |
-| FlyByWire A380X | `fbw-a380x` | 768 x 1024, RGBA8, five mips | 736 x 251 / 736 x 496 |
-| iniBuilds A350-900 / ULR | `ini-a350-900` | 1644 x 1024 EFIS surface | 774 x 251 / 774 x 496 |
-| iniBuilds A350-1000 | `ini-a350-1000` | 1644 x 1024 EFIS surface | 774 x 251 / 774 x 496 |
-| iniBuilds A380 | `ini-a380` | 768 x 1024, one mip; supported RGBA/BGRA views | 736 x 251 / 736 x 496 |
-| PMDG 777 | `pmdg-777` | Shared `DUS`, 2048 x 2048; gauges `DU_LeftInboard` and `DU_RightInboard` | 736 x 409 / 736 x 307 |
+| FlyByWire A380X | `fbw-a380x` | 768 x 1024, RGBA8, five mips | Nose 736 x 251 / tail 736 x 496 |
+| iniBuilds A350-900 / ULR | `ini-a350-900` | 1644 x 1024 EFIS surface | Nose 774 x 251 / tail 774 x 496 |
+| iniBuilds A350-1000 | `ini-a350-1000` | 1644 x 1024 EFIS surface | Nose 774 x 251 / tail 774 x 496 |
+| iniBuilds A380 | `ini-a380` | 768 x 1024, one mip; supported RGBA/BGRA views | Nose 736 x 251 / tail 736 x 496 |
+| PMDG 777 | `pmdg-777` | Shared `DUS`, 2048 x 2048; gauges `DU_LeftInboard` and `DU_RightInboard` | Nose 736 x 268 / left and right wing 360 x 360 |
 
 A350 package identifiers and geometry were inspected in iniBuilds version 1.2.6. The user has verified A350 rendering in the simulator. This does not establish every aircraft variant, framing, graphics mode or automatic target ordering; see [PR 42 validation](pr42-validation.md).
 
@@ -37,9 +37,9 @@ The profile defines accepted texture dimensions, mip policy and formats. Resourc
 
 ## Shared rendering contract
 
-The renderer captures two independently sized scene textures. It composes them into one bounded **768 x 763 working image**, then maps that image into the profile's inner content rectangle. This stable GPU buffer is shared infrastructure, not a request to render a full-size simulator view. Native sources match the inner pane sizes: 736 pixels wide on A380 and 774 on A350, with nose and tail heights of 251 and 496 pixels. The visible divider covers working rows 251 through 262, a 12-pixel band; reducing this band leaves the source dimensions and pane positions unchanged. The border is drawn by the existing PFD shader, without an additional GPU pass.
+The renderer captures independently sized scene textures (two feeds for most profiles; three when `split_bottom` is set). It composes them into one bounded **768 x 763 working image**, then maps that image into the profile's inner content rectangle. This stable GPU buffer is shared infrastructure, not a request to render a full-size simulator view. Native sources match the pane sizes: 736 pixels wide on A380 and 774 on A350, with nose and tail heights of 251 and 496 pixels. The PMDG 777 uses 736 x 268 for the nose feed and 360 x 360 for each wing feed. The visible divider on non-split profiles covers working rows 251 through 262, a 12-pixel band; reducing this band leaves the source dimensions and pane positions unchanged. The border is drawn by the existing PFD shader, without an additional GPU pass.
 
-Profiles supply the pane division, visible separator, reference dot/bracket coordinates and default colour. Both A380 and A350 use 14-by-14-pixel nose squares and default to magenta markings. Both retain their existing tail brackets. **Marking colour** on **Reference guides** changes the nose squares and tail brackets together, with a separate saved RGB colour for each aircraft profile. On both A380 and A350, the ground-speed panel is inset from the camera edges, with internal padding and a width that fits the current value. The same layout applies to both PFDs. Panel layout belongs to the aircraft profile. The ground-speed text has its own saved RGB colour, editable on **Display**; changing it does not change exposure or the reference marks. Marks are visual references; adjusting mounts or field of view does not calibrate metric clearance.
+Profiles supply the pane division, visible separator, reference dot/bracket coordinates and default colour. Both A380 and A350 use 14-by-14-pixel nose squares and default to magenta markings. Both retain their existing tail brackets. **Marking colour** on **Reference guides** changes the nose squares and tail brackets together, with a separate saved RGB colour for each aircraft profile. On A380 and A350, the ground-speed panel is inset from the camera edges, with internal padding and a width that fits the current value. The PMDG 777 keeps ground speed and reference guides off. The same composed page applies to both sides of a profile. Panel layout belongs to the aircraft profile. The ground-speed text has its own saved RGB colour, editable on **Display** when the profile draws GS; changing it does not change exposure or the reference marks. Marks are visual references; adjusting mounts or field of view does not calibrate metric clearance.
 
 ## Geometry and settings
 
@@ -77,13 +77,21 @@ One profile matches the 777-200ER, 777-300ER and 777F from the airplane folder i
 
 The picture is the navigation display, not a flight PFD. A live scan of the open 777-200ER RR found no separate taxi-camera texture. Both inboard gauges, `DU_LeftInboard` and `DU_RightInboard`, draw one shared 2048 x 2048 texture named `DUS`. The navigation display is the whole inboard gauge. `panel.cfg` gives the same `htmlgauge` x, y, width, height on the 777-200ER, 777-300ER, and 777F: `DU_LeftInboard` is 1058, 33, 958, 971 and `DU_RightInboard` is 30, 1058, 958, 971. Taxi Cam stamps the composed page only inside those two rectangles. The rest of `DUS`, including the outboard PFDs, stays clear.
 
-Taxi Cam does not copy a camera page the simulator already drew. It keeps two viewpoints — nose looking forward and an elevated forward mount looking aft — and composes them into the shared 768 x 763 working image, then stamps that image into each inboard gauge rectangle on `DUS`. The top band is the nose view across the full width (~56% of the working image: `nose_height` 427). The aft view fills the shorter bottom band (~42%: from `tail_top` 443) and is split into left and right panes with a 48-pixel centered gap (~6% of 768). That split matches the reference photo's tall forward band above a shorter wing/engine row. Camera panes are 736 x 409 and 736 x 307 so each feed keeps that pane's aspect instead of the wide A350 letterbox sizes. Gauge padding is zero so the page fills the 958 x 971 rectangle. Other profiles leave this split off, so their full-width tail is unchanged.
+Taxi Cam does not copy a camera page the simulator already drew. It keeps **three** viewpoints — nose looking forward over the nose gear, and separate left- and right-wing mounts looking aft at each wing — and composes them into the shared 768 x 763 working image (`split_bottom`), then stamps that image into each inboard gauge rectangle on `DUS`. Layout in that working image:
+
+- nose picture **280** px tall from y = 0 (full width), with a **10** px black bottom edge before the T;
+- T divider from y **280** to **403** in colour **`#1B1C23`**, including the **48** px vertical gap between the bottom panes;
+- equal **360 x 360** square bottom panes (camera feeds 360 x 360) with **10** px black borders and **24** px rounded corners on the black frame.
+
+An **85** px top inset (`camera_padding` top; bottom inset 0; L/R 0) moves the stamped block down on the 958 x 971 ND so the black band above the nose picture is larger without shortening the nose picture. Other profiles leave `split_bottom` off, so their full-width tail is unchanged.
+
+Ground speed is **off** for this profile only: the live path skips the GS overlay entirely (no readout and no black GS box). The GS font fixture still enables the panel on every catalog profile, including 777, and keeps the default panel origin so padding checks stay strict. Reference guides stay off; the companion disables that settings page for 777. Daytime exposure stays the shared default of **-11.5 EV**. Settings are stored in `pmdg-777.ini`. PFD refresh is not measured (`pfd_refresh_hz` 0).
+
+Published mount defaults from live calibration: nose **0 / -2 / 16 m, pitch/yaw -18 / 0 degrees, lens 1 rad**; left wing **-4 / 1.5 / -25 m, 0 / -15 degrees, 0.8 rad**; right wing **4 / 1.5 / -25 m, 0 / 15 degrees, 0.8 rad**. They are not a metric clearance calibration. Live framing and lighting still need an in-simulator check.
 
 The display list only offers GPU resources that match the selected profile's size. Until this profile is selected, the bridge keeps the previous profile's filter. The default is the FBW A380 at 768 x 1024, five mips, format 28. A 2048 x 2048 `DUS` texture is not a candidate for that filter, so the list stays empty and detection reports `no_candidates`. The log does not print gauge names. After this profile is selected, a 2048 x 2048 resource with any non-zero format and 1–12 mips is a candidate. Mip count and DXGI format were not in the scan. The texture list and the display-routing dropdown use resource-id order, not draw count. When more than one candidate matches, automatic selection takes the last entry, which is the highest resource id, and assigns that one texture to both inboard rectangles. It does not take the first entry, and it does not use a texture name. Display routing can still assign a texture by hand. GPU targeting cannot read gauge or material names; `DU_LeftInboard` and `DU_RightInboard` are the rectangles above on the shared `DUS` texture.
 
 The cockpit has no CAM button for this profile. The profile does not read or write a TAXI Lvar, a CAM event, or any other aircraft variable. Camera on/off is the same Left, Right and Both shortcuts as the other aircraft (Ctrl + Shift + L / R / B) and the same left/right preview controls. There is no extra Camera shortcut. On this profile those requests are manual: they do not write an aircraft variable.
-
-Nose and aft mounts are unverified starting points matched to the reference photo (nose **0 / -1.5 / 16 m, pitch/yaw -22 / 0 degrees, lens 1.1 rad**; aft **0 / 7 / 8 m, -20 / 180 degrees, lens 1.15 rad**). The aft yaw of 180 looks back at the wings so the split panes show left and right engines. They are not a measured 777 clearance calibration. This profile does not require calibration or alignment markers: reference guides stay off, and no 777 marker geometry is added. Daytime exposure stays the shared default of **-11.5 EV**. Settings are stored in `pmdg-777.ini`. PFD refresh is not measured (`pfd_refresh_hz` 0). Live framing and lighting still need an in-simulator check.
 
 ### Integration requirements
 

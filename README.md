@@ -23,11 +23,11 @@ If you find Taxi Cam useful, please consider donating.
 
 ## Supported aircraft
 
-- **FlyByWire A380X**
-- **iniBuilds A350-900**, including **ULR**
-- **iniBuilds A350-1000**
-- **iniBuilds A380** — use keyboard shortcuts or manual previews because its TAXI buttons are marked INOP.
-- **PMDG 777** (777-200ER, 777-300ER and 777F) — the navigation displays on the shared `DUS` texture, inside `DU_LeftInboard` (1058, 33, 958, 971) and `DU_RightInboard` (30, 1058, 958, 971). Use the same Ctrl + Shift + L / R / B shortcuts as the other aircraft. There is no cockpit CAM button, and alignment markers are not required.
+- **FlyByWire A380X** — nose and tail cameras on the PFD.
+- **iniBuilds A350-900**, including **ULR** — nose and tail cameras on the PFD.
+- **iniBuilds A350-1000** — nose and tail cameras on the PFD.
+- **iniBuilds A380** — nose and tail cameras; use keyboard shortcuts or manual previews because its TAXI buttons are marked INOP.
+- **PMDG 777** (777-200ER, 777-300ER and 777F) — three cameras (nose gear, left wing, right wing) on the inboard navigation displays. Shared texture `DUS`, gauges `DU_LeftInboard` (1058, 33, 958, 971) and `DU_RightInboard` (30, 1058, 958, 971). Split-bottom ND layout; ground-speed overlay off; reference guides disabled. Use Ctrl + Shift + L / R / B. No cockpit CAM button.
 
 ## Installation
 
@@ -61,7 +61,7 @@ Right-click the Taxi Cam tray icon and open **Settings**. Adjustments are saved 
 
 ### Camera views
 
-With the aircraft parked and the cameras on, open **Camera views**. Adjust the nose and tail cameras' position, angle and **Lens** (zoom). A smaller lens value gives a closer view; a larger value shows more of the surroundings.
+With the aircraft parked and the cameras on, open **Camera views**. Adjust each feed's position, angle and **Lens** (zoom). Most aircraft have nose and tail cameras; the PMDG 777 has nose, left-wing and right-wing feeds. A smaller lens value gives a closer view; a larger value shows more of the surroundings.
 
 Choose **Save changes** to apply and keep your adjustments. **Reset camera mounts** restores the profile's default views; save afterwards to keep the reset.
 
@@ -73,7 +73,7 @@ Choose **Apply live** to preview the positions, then **Save changes** to keep th
 
 ### Brightness and smoothness
 
-On **Display**, adjust brightness, automatic night exposure and ground-speed text colour. **Camera frame rate** accepts **5–60** (minimum **5**), with a default of **10**. This version's installer writes **10** into existing settings so a saved 15 becomes 10; later changes you make are kept. Higher values update the cameras more often and increase simulator work. The achieved rate also depends on simulator performance. Choose **Save changes** when finished.
+On **Display**, adjust brightness, automatic night exposure and ground-speed text colour (when the profile draws GS; the PMDG 777 keeps ground speed off). **Camera frame rate** accepts **5–60** (minimum **5**), with a default of **10**. This version's installer writes **10** into existing settings so a saved 15 becomes 10; later changes you make are kept. Higher values update the cameras more often and increase simulator work. The achieved rate also depends on simulator performance. Choose **Save changes** when finished.
 
 On **Reference guides**, **Marking colour** changes the nose squares and tail brackets independently of GS. A350 and A380 both default to magenta square nose markers. Choose **Save changes** to retain the colour for the selected aircraft profile.
 
