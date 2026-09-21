@@ -280,21 +280,23 @@ class PfdTargetDetector {
     return confirm({current_[count - 1].id, current_[count - 3].id});
   }
 
-  // One destination texture. Exactly one size match confirms side 0 and leaves
-  // side 1 empty. Two or more matches stay ambiguous so a pair of flight
-  // displays is never selected in place of the navigation display.
+  // One destination texture. observe() already ordered matches by resource id,
+  // which is the routing dropdown order. The last entry is the navigation
+  // display for this profile; the first entry is not. Side 1 stays empty.
+  // A changed last id starts a new baseline. Draw count does not rank them.
   const PfdTargetDetection& observe_single_display(std::size_t count, std::uint64_t now_ms) noexcept {
-    if (count != 1) {
-      clear(count == 0 ? "no_candidates" : "ambiguous_display");
+    if (count == 0) {
+      clear("no_candidates");
       seed(count, now_ms);
       return detection_;
     }
+    const auto chosen = current_[count - 1].id;
     if (!baseline_valid_ || now_ms < baseline_ms_ || now_ms - baseline_ms_ > maximum_window_ms) {
       clear(!baseline_valid_ ? "warming_up" : now_ms < baseline_ms_ ? "clock_reset" : "stale_window");
       seed(count, now_ms);
       return detection_;
     }
-    if (previous_count_ != 1 || previous_[0].id != current_[0].id) {
+    if (previous_count_ == 0 || previous_[previous_count_ - 1].id != chosen) {
       clear("candidate_disappeared");
       seed(count, now_ms);
       return detection_;
@@ -302,7 +304,7 @@ class PfdTargetDetector {
     if (now_ms - baseline_ms_ < window_ms)
       return detection_;
     seed(count, now_ms);
-    return confirm({current_[0].id, 0});
+    return confirm({chosen, 0});
   }
 
   bool contains(std::size_t count, std::uint64_t id) const noexcept {
