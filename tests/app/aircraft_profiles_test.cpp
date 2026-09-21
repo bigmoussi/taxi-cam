@@ -374,13 +374,18 @@ int main() {
       for (unsigned side = 0; side < 2; ++side) {
         const auto outer = profiles::display_rect(*profile, side);
         const auto content = profiles::display_content_rect(*profile, side);
-        assert(content.left == outer.left + 16 && content.top == outer.top + 12 && content.right + 16 == outer.right &&
+        assert(content.left == outer.left && content.top == outer.top && content.right == outer.right &&
                content.bottom == outer.bottom);
         assert(outer.right - outer.left == 958 && outer.bottom - outer.top == 971);
       }
-      assert(profile->camera_panes[0][0] == 736 && profile->camera_panes[0][1] == 251);
-      assert(profile->camera_panes[1][0] == 736 && profile->camera_panes[1][1] == 496);
-      assert(profile->composition.split_bottom == 1.f && profile->composition.bottom_gap == 32.f);
+      assert(profile->camera_panes[0][0] == 736 && profile->camera_panes[0][1] == 409);
+      assert(profile->camera_panes[1][0] == 736 && profile->camera_panes[1][1] == 307);
+      assert(profile->composition.split_bottom == 1.f && profile->composition.bottom_gap == 48.f);
+      assert(profile->composition.nose_height == 427.f && profile->composition.tail_top == 443.f);
+      assert(profile->composition.divider_top == 427.f && profile->composition.divider_bottom == 443.f);
+      assert(profile->camera_padding.left == 0 && profile->camera_padding.top == 0 && profile->camera_padding.right == 0 &&
+             profile->camera_padding.bottom == 0);
+      assert(profile->mounts[0][4] == 0 && profile->mounts[1][4] == 180);
       assert(profile->formats[0] == 0);
       assert(profiles::matches_display(*profile, profile->width, profile->height, 1, 28));
       assert(profiles::matches_display(*profile, profile->width, profile->height, 12, 87));

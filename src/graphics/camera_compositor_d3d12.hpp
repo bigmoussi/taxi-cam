@@ -37,7 +37,8 @@ namespace taxi_camera {
 // R11G11B10_FLOAT feeds receive exposure, per-channel Reinhard compression and
 // sRGB encoding for this SDR display. Other formats retain their sampled RGB.
 // This explicit display conversion is not simulator exposure/color calibration.
-// Each feed stretches over its full region.
+// Ordinary profiles stretch each feed over its region. Split-bottom layouts
+// contain the feed aspect inside each pane instead of stretching it.
 class CameraCompositorD3D12 {
  public:
   static constexpr UINT Width = 768;
@@ -192,6 +193,12 @@ class CameraCompositorD3D12 {
     ID3D12DescriptorHeap* heaps[]{srv_heap_.get()};
     private_list->SetDescriptorHeaps(1, heaps);
     private_list->SetGraphicsRootDescriptorTable(0, srv_heap_->GetGPUDescriptorHandleForHeapStart());
+    const float nose_aspect = input_descriptions_[0].Height
+                                  ? static_cast<float>(input_descriptions_[0].Width) / static_cast<float>(input_descriptions_[0].Height)
+                                  : 1.f;
+    const float tail_aspect = input_descriptions_[1].Height
+                                  ? static_cast<float>(input_descriptions_[1].Width) / static_cast<float>(input_descriptions_[1].Height)
+                                  : 1.f;
     const struct {
       UINT hdr_mask;
       float exposure;
@@ -199,14 +206,18 @@ class CameraCompositorD3D12 {
       UINT ground_speed;
       UINT ground_speed_valid;
       profiles::Composition composition;
+      float nose_aspect;
+      float tail_aspect;
     } display{(formats_[0] == DXGI_FORMAT_R11G11B10_FLOAT ? 1u : 0u) | (formats_[1] == DXGI_FORMAT_R11G11B10_FLOAT ? 2u : 0u),
               std::exp2(exposure_ev_),
               reference_guides_ ? 1u : 0u,
               ground_speed_,
               ground_speed_valid_ ? 1u : 0u,
-              composition_};
-    static_assert(sizeof(display) == 32 * sizeof(UINT));
-    private_list->SetGraphicsRoot32BitConstants(1, 32, &display, 0);
+              composition_,
+              nose_aspect,
+              tail_aspect};
+    static_assert(sizeof(display) == 34 * sizeof(UINT));
+    private_list->SetGraphicsRoot32BitConstants(1, 34, &display, 0);
     private_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     const D3D12_VIEWPORT viewport{0, 0, static_cast<float>(Width), static_cast<float>(Height), 0, 1};
     const D3D12_RECT scissor{0, 0, static_cast<LONG>(Width), static_cast<LONG>(Height)};
@@ -407,7 +418,7 @@ class CameraCompositorD3D12 {
     parameters[0].DescriptorTable.pDescriptorRanges = &range;
     parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    parameters[1].Constants.Num32BitValues = 32;
+    parameters[1].Constants.Num32BitValues = 34;
     parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     D3D12_STATIC_SAMPLER_DESC sampler{};
     sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
@@ -476,7 +487,8 @@ cbuffer Display : register(b0) { uint HdrMask; float Exposure; uint ReferenceGui
  float GuideRed; float GuideGreen; float GuideBlue;
  float SpeedRed; float SpeedGreen; float SpeedBlue;
  float SpeedLeft; float SpeedTop; float SpeedPaddingX; float SpeedPaddingY; float SpeedMinimumWidth; float SpeedMinimumHeight;
- float SquareNoseMarkers; float SplitBottom; float BottomGap; };
+ float SquareNoseMarkers; float SplitBottom; float BottomGap;
+ float NoseAspect; float TailAspect; };
 float segment_distance(float2 sample_position, float2 first, float2 last) {
   float2 delta = last - first;
   return length(sample_position - (first + saturate(dot(sample_position - first, delta) / dot(delta, delta)) * delta));
@@ -602,6 +614,31 @@ float3 display_rgb(float3 rgb, uint feed) {
   if ((HdrMask & (1u << feed)) == 0) return rgb;
   return float3(hdr_channel(rgb.r), hdr_channel(rgb.g), hdr_channel(rgb.b));
 }
+// Map a pane-local pixel into a source UV rectangle without stretching. Extra
+// pane area stays black. SplitBottom layouts use this so nearly-square ND panes
+// keep the camera aspect; ordinary full-width profiles keep the stretch path.
+float4 sample_contained(Texture2D<float4> tex, float2 local, float2 pane, float2 uv_min, float2 uv_max, float full_aspect, uint feed) {
+  if (pane.x <= 0 || pane.y <= 0 || full_aspect <= 0 || uv_max.x <= uv_min.x || uv_max.y <= uv_min.y)
+    return float4(0, 0, 0, 1);
+  float crop_aspect = full_aspect * (uv_max.x - uv_min.x) / (uv_max.y - uv_min.y);
+  float pane_aspect = pane.x / pane.y;
+  float2 t;
+  if (crop_aspect > pane_aspect) {
+    float visible_h = pane_aspect / crop_aspect;
+    float y0 = 0.5 * (1.0 - visible_h);
+    float yn = (local.y / pane.y - y0) / visible_h;
+    if (yn < 0 || yn > 1 || local.x < 0 || local.x >= pane.x) return float4(0, 0, 0, 1);
+    t = float2(local.x / pane.x, yn);
+  } else {
+    float visible_w = crop_aspect / pane_aspect;
+    float x0 = 0.5 * (1.0 - visible_w);
+    float xn = (local.x / pane.x - x0) / visible_w;
+    if (xn < 0 || xn > 1 || local.y < 0 || local.y >= pane.y) return float4(0, 0, 0, 1);
+    t = float2(xn, local.y / pane.y);
+  }
+  float2 uv = lerp(uv_min, uv_max, t);
+  return float4(display_rgb(tex.SampleLevel(LinearClamp, uv, 0).rgb, feed), 1);
+}
 float4 vs_main(uint id : SV_VertexID) : SV_Position {
   float2 uv = float2((id << 1) & 2, id & 2);
   return float4(uv.x * 2 - 1, 1 - uv.y * 2, 0, 1);
@@ -616,16 +653,20 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
   }
   if (ReferenceGuides != 0 && reference_guide(position.xy, position.y < NoseHeight)) return float4(GuideRed, GuideGreen, GuideBlue, 1);
   if (position.y < NoseHeight) {
+    if (SplitBottom != 0)
+      return sample_contained(Nose, position.xy, float2(768, NoseHeight), float2(0, 0), float2(1, 1), NoseAspect, 0);
     float2 uv = float2(position.x / 768, position.y / NoseHeight);
     return float4(display_rgb(Nose.SampleLevel(LinearClamp, uv, 0).rgb, 0), 1);
   }
   if (position.y < TailTop) return float4(0, 0, 0, 1);
-  float u = position.x / 768;
   if (SplitBottom != 0) {
     float pane = (768 - BottomGap) * 0.5;
     float local_x = position.x < pane ? position.x : position.x - pane - BottomGap;
-    u = (local_x / pane) * 0.5 + (position.x < pane ? 0.0 : 0.5);
+    float2 uv_min = position.x < pane ? float2(0, 0) : float2(0.5, 0);
+    float2 uv_max = position.x < pane ? float2(0.5, 1) : float2(1, 1);
+    return sample_contained(Tail, float2(local_x, position.y - TailTop), float2(pane, 763 - TailTop), uv_min, uv_max, TailAspect, 1);
   }
+  float u = position.x / 768;
   float2 uv = float2(u, (position.y - TailTop) / (763 - TailTop));
   return float4(display_rgb(Tail.SampleLevel(LinearClamp, uv, 0).rgb, 1), 1);
 }

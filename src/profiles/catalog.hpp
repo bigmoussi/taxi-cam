@@ -192,16 +192,32 @@ inline constexpr unsigned Pmdg777DisplayMips = 0;
 inline constexpr std::array<unsigned, 6> Pmdg777Formats{};
 // One profile for the 777-200ER, 777-300ER and 777F when they share this
 // cockpit. AircraftLoaded selects the airplane folder. ATC TYPE is the Boeing
-// brand string and is not required. Mounts are unverified starting points.
+// brand string and is not required.
 // Both navigation displays are rectangles on one destination texture. Taxi Cam
-// still owns the nose and tail viewpoints and splits the tail image in the
-// working image. Pixels outside the two inboard gauges stay untouched.
+// still owns the nose and aft viewpoints and splits the aft image across the
+// bottom panes. Pixels outside the two inboard gauges stay untouched.
+// Working-image layout matched to the reference ND photo on a nearly square
+// 958x971 gauge: tall full-width top (~56%), short split bottom (~42%), with a
+// thicker T divider and gap. Camera panes keep those pane aspects so feeds are
+// not stretched. Padding is zero so the page fills the gauge.
+inline constexpr unsigned Pmdg777NoseHeight = 427;
+inline constexpr unsigned Pmdg777DividerBottom = 443;
+inline constexpr unsigned Pmdg777BottomGap = 48;
 inline constexpr Composition Pmdg777Composition = [] {
   Composition c;
+  c.nose_height = static_cast<float>(Pmdg777NoseHeight);
+  c.divider_top = static_cast<float>(Pmdg777NoseHeight);
+  c.divider_bottom = static_cast<float>(Pmdg777DividerBottom);
+  c.tail_top = static_cast<float>(Pmdg777DividerBottom);
   c.split_bottom = 1;
-  c.bottom_gap = 32;
+  c.bottom_gap = static_cast<float>(Pmdg777BottomGap);
   return c;
 }();
+// Nose: forward/down over the nose gear and tarmac. Bottom: above the forward
+// fuselage looking aft (yaw 180) so the left/right halves are the wing/engines.
+inline constexpr std::array<std::array<double, 6>, 2> Pmdg777Mounts{{{0, -1.5, 16, -22, 0, 1.1}, {0, 7, 8, -20, 180, 1.15}}};
+// Pane aspects match the working-image regions (768x427 and 768x320).
+inline constexpr CameraPanes Pmdg777Panes{{{736, 409}, {736, 307}}};
 inline constexpr AircraftProfile Pmdg777 = [] {
   AircraftProfile p{5,
                     "pmdg-777",
@@ -209,7 +225,7 @@ inline constexpr AircraftProfile Pmdg777 = [] {
                     {"", ""},
                     {"", ""},
                     {Pmdg777LeftGauge, Pmdg777RightGauge},
-                    {{{0, -1.5, 18, -15, 0, 1.0}, {0, 12, -30, -25, 0, 0.9}}},
+                    Pmdg777Mounts,
                     Pmdg777DisplayWidth,
                     Pmdg777DisplayHeight,
                     Pmdg777DisplayMips,
@@ -217,7 +233,7 @@ inline constexpr AircraftProfile Pmdg777 = [] {
                     {"", "", ""},
                     {{{Pmdg777LeftNdX, Pmdg777LeftNdY, Pmdg777LeftNdX + Pmdg777NdWidth, Pmdg777LeftNdY + Pmdg777NdHeight},
                       {Pmdg777RightNdX, Pmdg777RightNdY, Pmdg777RightNdX + Pmdg777NdWidth, Pmdg777RightNdY + Pmdg777NdHeight}}},
-                    {{{736, 251}, {736, 496}}},
+                    Pmdg777Panes,
                     true,
                     60,
                     Pmdg777Composition,
@@ -226,6 +242,7 @@ inline constexpr AircraftProfile Pmdg777 = [] {
   p.pfd_detection = PfdDetectionPolicy::single_display;
   p.display_texture = Pmdg777Texture;
   p.reference_guides = false;
+  p.camera_padding = {};
   return p;
 }();
 inline constexpr std::array<const AircraftProfile*, 5> Catalog{&A380, &A359, &A35K, &IniA380, &Pmdg777};
