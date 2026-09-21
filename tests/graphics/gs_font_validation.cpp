@@ -126,15 +126,8 @@ int wmain(int argc, wchar_t** argv) {
               require(p[0] == 0 && p[1] == 0 && p[2] == 0, "GS padding and two blank character cells stay black");
               if (x >= 56 && x < 88 && y >= 20 && y < 40)
                 ++gap_pixels;
-            } else {
-              // Split-bottom profiles contain each feed's aspect inside its pane.
-              // With the 16x16 font fixtures that leaves black letterbox/pillarbox
-              // outside the GS panel; glyphs are still white/green so leaks fail.
-              const bool split = taxi_camera::profiles::Catalog[profile]->composition.split_bottom != 0;
-              const bool background = p[0] == 32 && p[1] == 64 && p[2] == 96;
-              const bool letterbox = split && p[0] == 0 && p[1] == 0 && p[2] == 0;
-              require(background || letterbox, "GS font stays inside its padded panel");
-            }
+            } else
+              require(p[0] == 32 && p[1] == 64 && p[2] == 96, "GS font stays inside its padded panel");
           }
         require(lit[0] > 35 && lit[1] > 35 && lit[2] > 8 && (count == 1 || lit[3] > 8), "Each GS character remains visible");
         require(lit[0] < 170 && lit[1] < 170, "Thin GS strokes replace enlarged solid bitmap blocks");

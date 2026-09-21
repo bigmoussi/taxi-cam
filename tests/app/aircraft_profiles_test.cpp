@@ -461,6 +461,11 @@ int main() {
   // projections do not establish visible tyre alignment for these overlays.
 
   for (const auto* profile : profiles::Catalog) {
+    if (profile->pfd_detection == profiles::PfdDetectionPolicy::single_display) {
+      assert(profile->composition.divider_top == 427 && profile->composition.divider_bottom == 443);
+      assert(profile->composition.nose_height == 427 && profile->composition.tail_top == 443);
+      continue;
+    }
     assert(profile->composition.divider_top == 251 && profile->composition.divider_bottom == 263);
     assert(profile->composition.nose_height == 255 && profile->composition.tail_top == 259);
   }
