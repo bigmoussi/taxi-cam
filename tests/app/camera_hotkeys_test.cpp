@@ -255,6 +255,7 @@ void aircraft_hotkey_intent_checks() {
           "INOP aircraft uses manual display intent without aircraft commands");
   Settings pmdg;
   pmdg.profile = profiles::Pmdg777.id;
+  pmdg.follow_taxi = 0;
   require(request_camera_hotkey(pmdg, 2, {}, 0) == CameraHotkeyResult::manual && pmdg.manual_mask == 3 && !pmdg.taxi_request,
           "PMDG uses the same Both shortcut and writes no aircraft variable");
   require(request_camera_hotkey(pmdg, 0, {}, 0) == CameraHotkeyResult::manual && pmdg.manual_mask == 2 && !pmdg.taxi_request,
