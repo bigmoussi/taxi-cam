@@ -657,6 +657,8 @@ bool backfill_resources_ready(const Registry& r) noexcept {
     return display_set_ready(r, 8, DXGI_FORMAT_R8G8B8A8_TYPELESS, 1);
   if (r.profile->id == profiles::A380.id)
     return display_set_ready(r, 2, static_cast<DXGI_FORMAT>(r.profile->formats[0]), r.profile->mips);
+  if (r.profile->pfd_detection == profiles::PfdDetectionPolicy::single_display)
+    return live_display_resources(r) >= 1;
   return false;
 }
 unsigned live_display_rtvs(const Registry& r) noexcept {
@@ -3329,18 +3331,23 @@ void discover_pfds(std::uint64_t now) noexcept {
         ++i;
     }
     const bool ranked_group = r.profile->pfd_detection == profiles::PfdDetectionPolicy::ini_a380_allocation_group;
-    if (now && (ranked_group || !r.routes.targets[0] || !r.routes.targets[1])) {
+    const bool single_display = r.profile->pfd_detection == profiles::PfdDetectionPolicy::single_display;
+    const bool missing = single_display ? !r.routes.targets[0] : (!r.routes.targets[0] || !r.routes.targets[1]);
+    if (now && (ranked_group || missing)) {
       // Take the full inventory after retirement cleanup, under the same
       // registry lock used for detector configuration and target assignment.
       // The detector sorts by incarnation itself. Avoid the unrelated UI
       // draw-count sort while holding the registry lock.
       auto inventory = pfd_inventory_locked(r);
       const auto& detection = r.detector.observe(inventory.data(), inventory.size(), now, r.pfd_inventory_complete.load());
-      if (detection.valid)
-        r.routes.adopt_detected(detection.targets);
-      else if (ranked_group && detection.invalidates_targets)
+      if (detection.valid) {
+        if (single_display)
+          r.routes.adopt_single(detection.targets[0]);
+        else
+          r.routes.adopt_detected(detection.targets);
+      } else if (ranked_group && detection.invalidates_targets)
         r.routes.forget_detected();
-      if (!ranked_group && !r.routes.targets[0] && !r.routes.targets[1]) {
+      if (!ranked_group && !single_display && !r.routes.targets[0] && !r.routes.targets[1]) {
         if (const auto pair = dominant_activity_pair(*r.profile, inventory); pair[0])
           r.routes.adopt_detected(pair);
       } else if (ranked_group && (!r.routes.targets[0] || !r.routes.targets[1])) {

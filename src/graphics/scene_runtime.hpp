@@ -91,6 +91,7 @@ void reset_feed(std::uint64_t key);
 std::uint64_t reset_session(std::uint64_t key);
 bool resume_session(std::uint64_t key, std::uint64_t generation);
 void set_composition(std::uint64_t key, const profiles::Composition& layout);
+void set_reference_guides(std::uint64_t key, bool enabled);
 void service();
 Snapshot snapshot(std::uint64_t key);
 // Terminal DIRECT-list entry only: immediately before native Close, after all

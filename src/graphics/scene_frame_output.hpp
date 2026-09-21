@@ -46,6 +46,7 @@ class SceneFrameOutput {
   bool set_display_exposure(float ev) noexcept;
   bool set_ground_speed(float knots, bool valid) noexcept;
   bool set_composition(const profiles::Composition& layout) noexcept;
+  bool set_reference_guides(bool enabled) noexcept;
   bool set_patch_profile(std::uint32_t profile) noexcept;
   // Metadata-only demand, admitted against the current profile's exact shape.
   // Requests never allocate or record GPU work. Every admitted slot remains

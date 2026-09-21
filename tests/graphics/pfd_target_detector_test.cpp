@@ -675,5 +675,26 @@ int main() {
   detector.reset();
   assert(!detector.snapshot().valid && detector.snapshot().targets[0] == 0 && detector.snapshot().stable_windows == 0);
 
+  static PfdTargetDetector inboard;
+  inboard.configure(taxi_camera::profiles::Pmdg777);
+  const auto& pmdg = taxi_camera::profiles::Pmdg777;
+  assert(pmdg.formats[0] == 0 && pmdg.mips == 0 && !pmdg.reference_guides);
+  const unsigned levels = pmdg.mips ? pmdg.mips : 1u;
+  // 28 is an observation format, not a scanned PMDG DXGI format.
+  PfdTargetObservation one{42, 10, pmdg.width, pmdg.height, levels, 28};
+  assert(!inboard.observe(&one, 1, 0, false).valid && std::strcmp(inboard.snapshot().status, "incomplete_inventory") == 0);
+  inboard.reset();
+  assert(!inboard.observe(&one, 1, 0).valid);
+  assert(!inboard.observe(&one, 1, 1000).valid && inboard.snapshot().stable_windows == 1);
+  assert(!inboard.observe(&one, 1, 2000).valid && inboard.snapshot().stable_windows == 2);
+  const auto& confirmed = inboard.observe(&one, 1, 3000);
+  assert(confirmed.valid && confirmed.targets[0] == 42 && confirmed.targets[1] == 0);
+  std::array<PfdTargetObservation, 2> pair{one, one};
+  pair[1].id = 43;
+  pair[1].draws = 1000;
+  inboard.reset();
+  assert(!inboard.observe(pair.data(), pair.size(), 4000).valid);
+  assert(std::strcmp(inboard.snapshot().status, "ambiguous_display") == 0 && inboard.snapshot().targets[0] == 0);
+
   std::puts("PFD target detector: PASS");
 }

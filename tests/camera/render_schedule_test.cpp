@@ -271,7 +271,7 @@ void effective_rate_caps() {
   require(camera_rate_limit_text(kRateLimitNone)[0] == L'\0' && camera_rate_limit_text(kRateLimitParked)[0] != L'\0',
           "Companion rate suffix");
   require(profiles::A380.pfd_refresh_hz == 0 && profiles::IniA380.pfd_refresh_hz == 16 && profiles::A359.pfd_refresh_hz == 80 &&
-              profiles::A35K.pfd_refresh_hz == 80,
+              profiles::A35K.pfd_refresh_hz == 80 && profiles::Pmdg777.pfd_refresh_hz == 0,
           "Catalog PFD refresh values changed");
   for (const auto* profile : profiles::Catalog)
     require(useful_camera_rate(profile->pfd_refresh_hz) == kManagerCeilingCameraRate,

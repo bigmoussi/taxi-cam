@@ -43,7 +43,7 @@ The companion saves settings to:
 %LOCALAPPDATA%\Taxi Cam\profiles\<aircraft-key>.ini
 ~~~
 
-The selected aircraft ID (`profile`) and automatic selection (`automatic`, default 1) are saved in `settings.ini` under `[aircraft]`. The keys are `fbw-a380x`, `ini-a350-900`, `ini-a350-1000` and `ini-a380`; each has its own calibration file. Keyboard combinations are saved separately in `hotkeys.ini` and apply to all aircraft.
+The selected aircraft ID (`profile`) and automatic selection (`automatic`, default 1) are saved in `settings.ini` under `[aircraft]`. The keys are `fbw-a380x`, `ini-a350-900`, `ini-a350-1000`, `ini-a380` and `pmdg-777`; each has its own calibration file. Keyboard combinations are saved separately in `hotkeys.ini` and apply to all aircraft. The optional `camera` key is absent from older shortcut files and then stays disabled.
 
 Selecting a profile manually turns off **Auto aircraft**. The loaded aircraft must still match before camera or calibration writes are enabled. When a fresh supported identity differs, status names both the detected aircraft and selected profile, and directs manual users to enable **Auto aircraft** or select the matching profile on Overview.
 
@@ -56,7 +56,7 @@ Night-boost preference revision 1 sets `night_boost` to 8 once for each existing
 | Saved field | Default | Range or purpose |
 | --- | --- | --- |
 | `enabled` | 1 | Legacy saved field; runtime enable follows Connect/Disconnect. Connect and Auto-connect enable operation regardless of a saved 0. |
-| `follow_taxi` | 1; iniBuilds A380: 0 | Read aircraft TAXI controls; 0 uses manual control |
+| `follow_taxi` | 1; iniBuilds A380 and PMDG 777: 0 | Read aircraft TAXI controls; 0 uses manual control |
 | `auto_detect` | 1 | Detect the PFD pair using the profile's policy |
 | `camera_rate` | 10 | Integer 5–60 (minimum 5), activation limit per camera. The first keep-install of this version writes 10 into existing `settings.ini` and known aircraft profile INIs; later upgrades keep a user-changed rate. Missing keys use 10. The bridge caps the rate it requests at the aircraft's useful maximum (PFD refresh or the camera-manager ceiling of 15) and reports the rate in use; the saved value is never rewritten. |
 | `parked_rate` | 5 | Schedule rate while ground speed stays below 0.2 kt for 3 s; a sample at or above 0.35 kt restores `camera_rate` at once, and 0.2–0.35 kt holds the current state (parked stays parked, moving stays moving). 0 disables the floor; other values are kept within 5–60. Views stay open while parked. |

@@ -21,9 +21,14 @@ struct Composition {
   std::array<float, 2> speed_panel_min_size{0, 0};
   // Float 0/1 is passed directly in the compositor's GPU constants.
   float square_nose_markers = 1;
+  // 0 keeps the full-width tail. 1 draws that same tail image as left and right
+  // panes with bottom_gap working-image pixels of black between them.
+  float split_bottom = 0;
+  float bottom_gap = 0;
 };
+static_assert(sizeof(Composition) == 27 * sizeof(float));
 enum class TaxiControl { push_event, lvar_off, manual_only };
-enum class PfdDetectionPolicy { dominant_activity, ini_a380_allocation_group };
+enum class PfdDetectionPolicy { dominant_activity, ini_a380_allocation_group, single_display };
 inline constexpr Composition A350Etacs = [] {
   Composition c;
   // A350-900 image-space guide defaults; live adjustments remain per profile.
@@ -66,6 +71,12 @@ struct AircraftProfile {
   // faster than this cannot reach the screen. 0 = not measured: only the
   // camera-manager ceiling caps the useful camera_rate.
   unsigned pfd_refresh_hz = 0;
+  // Bits of manual_mask / hotkey action 3. 3 is both displays; 1 is side 0 only.
+  unsigned output_mask = 3;
+  // Scanned texture name, when the display is not named by pfd_labels alone.
+  const char* display_texture = "";
+  // Existing compositor guide switch. False draws no alignment markers.
+  bool reference_guides = true;
 };
 inline constexpr AircraftProfile A380{1,
                                       "fbw-a380x",
@@ -162,7 +173,55 @@ inline constexpr AircraftProfile IniA380 = [] {
   p.pfd_refresh_hz = 16;
   return p;
 }();
-inline constexpr std::array<const AircraftProfile*, 4> Catalog{&A380, &A359, &A35K, &IniA380};
+// Scanned on the open 777-200ER RR (pmdg-aircraft-77er). Both inboard gauges
+// draw one shared texture. There is no separate taxi-camera texture, and the
+// scan could not tell which inboard was showing the camera page.
+inline constexpr const char* Pmdg777Texture = "DUS";
+inline constexpr const char* Pmdg777LeftGauge = "DU_LeftInboard";
+inline constexpr const char* Pmdg777RightGauge = "DU_RightInboard";
+inline constexpr unsigned Pmdg777DisplayWidth = 2048;
+inline constexpr unsigned Pmdg777DisplayHeight = 2048;
+// Mip count and DXGI format were not in the scan.
+inline constexpr unsigned Pmdg777DisplayMips = 0;
+inline constexpr std::array<unsigned, 6> Pmdg777Formats{};
+// One profile for the 777-200ER, 777-300ER and 777F when they share this
+// cockpit. AircraftLoaded path components select it; ATC TYPE is not required.
+// Mounts are unverified starting points, not a measured clearance calibration.
+// The inboard page is one destination texture. Taxi Cam still owns the nose
+// and tail viewpoints and splits the tail image in the working image.
+inline constexpr Composition Pmdg777Composition = [] {
+  Composition c;
+  c.split_bottom = 1;
+  c.bottom_gap = 32;
+  return c;
+}();
+inline constexpr AircraftProfile Pmdg777 = [] {
+  AircraftProfile p{5,
+                    "pmdg-777",
+                    L"PMDG 777",
+                    {"", ""},
+                    {"", ""},
+                    {Pmdg777LeftGauge, Pmdg777RightGauge},
+                    {{{0, -1.5, 18, -15, 0, 1.0}, {0, 12, -30, -25, 0, 0.9}}},
+                    Pmdg777DisplayWidth,
+                    Pmdg777DisplayHeight,
+                    Pmdg777DisplayMips,
+                    TaxiControl::manual_only,
+                    {"", "", ""},
+                    {{{0, 0, Pmdg777DisplayWidth, Pmdg777DisplayHeight}, {0, 0, 0, 0}}},
+                    {{{736, 251}, {736, 496}}},
+                    true,
+                    60,
+                    Pmdg777Composition,
+                    Pmdg777Formats,
+                    {"pmdg-aircraft-77er", "pmdg-aircraft-77w", "pmdg-aircraft-77f"}};
+  p.pfd_detection = PfdDetectionPolicy::single_display;
+  p.output_mask = 1;
+  p.display_texture = Pmdg777Texture;
+  p.reference_guides = false;
+  return p;
+}();
+inline constexpr std::array<const AircraftProfile*, 5> Catalog{&A380, &A359, &A35K, &IniA380, &Pmdg777};
 inline constexpr DisplayRect display_rect(const AircraftProfile& p, unsigned side) noexcept {
   return p.display_regions[side < 2 ? side : 0];
 }
@@ -186,10 +245,16 @@ inline bool camera_candidate(unsigned width, unsigned height) noexcept {
 inline constexpr bool matches_display(const AircraftProfile& p, unsigned width, unsigned height, unsigned mips, unsigned format) noexcept {
   if (width != p.width || height != p.height || !mips || mips > 12 || (p.mips && p.mips != mips) || !format)
     return false;
-  for (auto supported : p.formats)
+  bool listed = false;
+  for (auto supported : p.formats) {
+    if (!supported)
+      continue;
+    listed = true;
     if (supported == format)
       return true;
-  return false;
+  }
+  // No scanned format list: admit the known size and leave a shared size ambiguous.
+  return !listed;
 }
 inline bool matches_aircraft(const AircraftProfile& p, std::string_view type) noexcept {
   const auto equal = [](std::string_view a, std::string_view b) {
@@ -239,6 +304,11 @@ inline std::uint32_t detect_aircraft(std::string_view type, std::string_view pat
   for (const auto marker : IniA380.package_markers)
     if (!marker.empty() && path_contains(path, marker))
       return matches_aircraft(IniA380, type) ? IniA380.id : 0;
+  // PMDG titles do not carry a vendor, and ATC TYPE is not a reliable product
+  // id. The package folder is the shared identity for 77ER, 77W and 77F.
+  for (const auto marker : Pmdg777.package_markers)
+    if (!marker.empty() && path_contains(path, marker))
+      return Pmdg777.id;
   std::uint32_t match = 0;
   for (const auto* p : Catalog) {
     if (!matches_aircraft(*p, type))

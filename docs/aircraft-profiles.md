@@ -12,6 +12,7 @@ Each profile owns its camera calibration, display colour and exposure settings. 
 | iniBuilds A350-900 / ULR | `ini-a350-900` | 1644 x 1024 EFIS surface | 774 x 251 / 774 x 496 |
 | iniBuilds A350-1000 | `ini-a350-1000` | 1644 x 1024 EFIS surface | 774 x 251 / 774 x 496 |
 | iniBuilds A380 | `ini-a380` | 768 x 1024, one mip; supported RGBA/BGRA views | 736 x 251 / 736 x 496 |
+| PMDG 777 | `pmdg-777` | Shared `DUS`, 2048 x 2048; gauges `DU_LeftInboard` and `DU_RightInboard` | 736 x 251 / 736 x 496 |
 
 A350 package identifiers and geometry were inspected in iniBuilds version 1.2.6. The user has verified A350 rendering in the simulator. This does not establish every aircraft variant, framing, graphics mode or automatic target ordering; see [PR 42 validation](pr42-validation.md).
 
@@ -22,6 +23,7 @@ A350 package identifiers and geometry were inspected in iniBuilds version 1.2.6.
 | FBW A380 | `L:A32NX_FCU_EFIS_L_TAXI_LIGHT_ON`, `L:A32NX_FCU_EFIS_R_TAXI_LIGHT_ON` | Corresponding `A32NX.FCU_EFIS_L_TAXI_PUSH` / `R_TAXI_PUSH` event |
 | A350 | `L:INI_TAXI_LEFT`, `L:INI_TAXI_RIGHT` | Write zero to the selected latch through public SimConnect |
 | iniBuilds A380 | Manual previews or configurable camera hotkeys; cockpit buttons marked INOP | Suppress camera output above the speed limit; no aircraft-variable writes |
+| PMDG 777 | Manual preview or the Camera shortcut; no cockpit TAXI or CAM binding | Suppress camera output above the speed limit; no aircraft-variable writes |
 
 The installed iniBuilds A350 behavior XML uses each TAXI latch for its button state and lamp. Its input-event setter toggles that latch. An idempotent zero write makes cutoff independent of toggle timing. The other side is not written. The FBW A380 and A350 adapters wait for a fresh OFF acknowledgement. The manual-only iniBuilds A380 suppresses output without waiting for a cockpit-button acknowledgement. The catalog supplies the speed limit, currently 60 knots for all profiles.
 
@@ -68,6 +70,20 @@ The iniBuilds A380 defaults are: nose **right/up/forward 0 / 2.2 / 16 m, pitch/y
 Texture admission requires 768 x 1024, exactly one mip and supported RGBA/BGRA views. The ini A380 detector uses eight RGBA8 typeless resources (format 27), assigning the highest resource ID left and third-highest right. It checks unchanged membership and activity on every member across three one-second windows; discovery also has a complete-idle-group fallback. IDs may have gaps and are not fixed constants. Missing, extra, changed or incompletely tracked resources prevent the complete-group assignment. Structural changes withdraw automatically assigned sides while preserving explicit selections; loss of both identities can require reselecting the aircraft profile or assigning the PFDs manually. Pauses alone do not remove existing identities. FBW A380 and A350 use activity ranking instead.
 
 The user confirmed camera rendering with the revised bridge, then reported that both A380 integrations selected another instrument when the camera was requested during display boot. Automatic display identity is therefore a known unresolved issue. PFD routing permits manual correction. The dropdown sorts by draw count, so its visual position is not resource-ID order. No texture-content classifier or thumbnail export is implemented. Own-device GPU fixtures check display regions and preserved lower rows; they do not establish cockpit identity, hotkeys, AA, turns, cutoff or reload behavior. See [PR 42 validation](pr42-validation.md) for the exact tested build and scope.
+
+### PMDG 777 configuration
+
+One profile matches the 777-200ER, 777-300ER and 777F when the loaded aircraft path contains `pmdg-aircraft-77er`, `pmdg-aircraft-77w` or `pmdg-aircraft-77f`. Those package folders are the cited product paths. Matching does not use ATC TYPE or the aircraft TITLE. A `-copy` package folder does not match. The 200ER titles associated with `pmdg-aircraft-77er` are `777-200ER GE`, `777-200ER PW` and `777-200ER RR`. The 300ER package folder cited for `pmdg-aircraft-77w` is `PMDG 777-300ER`. The freighter package folder cited for `pmdg-aircraft-77f` is `PMDG 777F`.
+
+The capture target is the right-hand inboard camera page, not the two flight PFDs. A live scan of the open 777-200ER RR (`pmdg-aircraft-77er`) found no separate taxi-camera texture. Both inboard gauges, `DU_LeftInboard` and `DU_RightInboard`, draw one shared 2048 x 2048 texture named `DUS`. The scan could not tell which inboard was showing the camera page. Taxi Cam writes the composed page to that one texture and leaves the second display rectangle empty. The 300ER (`pmdg-aircraft-77w`) and 777F (`pmdg-aircraft-77f`) path matches assume those same names and were not scanned.
+
+Taxi Cam does not copy a camera page the simulator already drew. It keeps the existing nose and tail viewpoints — two cameras, not three — and composes them into the shared 768 x 763 working image, then stamps that image into the `DUS` content rectangle. The top band stays one full-width forward view. The tail image is split into left and right panes with a 32-pixel centered gap in that working image, measured from the reference photo (about 4.4 percent of the inboard content width). The left pane samples the left half of the tail view and the right pane samples the right half. Other profiles leave this split off, so their full-width tail is unchanged.
+
+Mip count and DXGI format were not in the scan. Automatic selection confirms a texture only when exactly one resource is 2048 x 2048, with any non-zero format and 1–12 mips. Two or more resources of that size stay unassigned, so a shared size is not taken as a pair of flight PFDs. PFD routing can still assign the texture by hand. GPU targeting cannot read gauge or material names; `DU_LeftInboard` and `DU_RightInboard` are reference labels for the shared `DUS` texture.
+
+The cockpit has no CAM button for this profile. The profile does not read or write a TAXI Lvar, a CAM event, or any other aircraft variable. Camera on/off is the **Camera** shortcut under **Settings → Overview → Keyboard shortcuts**. That shortcut ships with no default chord, so it does not collide with Ctrl + Shift + L / R / B. Assign one and save it. On this profile it toggles the inboard display only. An older `hotkeys.ini` that has no `camera` key loads with Camera disabled.
+
+Nose and tail mounts are unverified starting points (nose **0 / -1.5 / 18 m, pitch/yaw -15 / 0 degrees, lens 1 rad**; tail **0 / 12 / -30 m, -25 / 0 degrees, lens 0.9 rad**). They are not a measured 777 clearance calibration. This profile does not require calibration or alignment markers: reference guides stay off, and no 777 marker geometry is added. Daytime exposure stays the shared default of **-11.5 EV**. Settings are stored in `pmdg-777.ini`. PFD refresh is not measured (`pfd_refresh_hz` 0). Live framing, lighting and which physical inboard shows `DUS` still need an in-simulator check.
 
 ### Integration requirements
 

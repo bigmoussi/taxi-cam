@@ -366,6 +366,11 @@ void set_composition(std::uint64_t key, const profiles::Composition& layout) {
   if (auto* item = find(key))
     item->output.set_composition(layout);
 }
+void set_reference_guides(std::uint64_t key, bool enabled) {
+  const std::lock_guard lock(runtime().mutex);
+  if (auto* item = find(key))
+    item->output.set_reference_guides(enabled);
+}
 void reset_feed(std::uint64_t key) {
   const std::lock_guard lock(runtime().mutex);
   if (auto* item = find(key); item && !item->status.failed) {

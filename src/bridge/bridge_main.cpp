@@ -669,7 +669,8 @@ DWORD run_impl() {
     // loss close the render gates immediately.
     // Keep the owned pair and ordered source-state evidence for the next ON.
     native_camera::suspend_scene_rendering(demand.suspend);
-    auto composition = profiles::find(applied_profile ? applied_profile : settings.profile)->composition;
+    const auto* drawing = profiles::find(applied_profile ? applied_profile : settings.profile);
+    auto composition = drawing->composition;
     composition.speed_color = settings.speed_color;
     composition.guide_color = settings.guide_color;
     composition.nose_dot = settings.nose_dot;
@@ -713,6 +714,7 @@ DWORD run_impl() {
         start_timing.request_begin_ms = GetTickCount64();
         log_startup(status, start_timing, "request_begin");
         scene_runtime::set_composition(key, composition);
+        scene_runtime::set_reference_guides(key, drawing->reference_guides);
         scene_runtime::reset_feed(key);
         scene_runtime::manager().begin_source_tracking();
         native_camera::request_scene_test(true);
@@ -751,6 +753,7 @@ DWORD run_impl() {
     // Normal button changes never call request_scene_stop/reset_feed or release
     // source leases. The profile-change transaction above still owns teardown.
     scene_runtime::set_composition(key, composition);
+    scene_runtime::set_reference_guides(key, drawing->reference_guides);
     const auto light = native_camera::get_lighting();
     const auto display = exposure.update(now, settings.exposure, settings.automatic_exposure != 0, settings.night_boost, light.valid,
                                          light.ambient, light.sample_ms);
@@ -876,7 +879,15 @@ DWORD run_impl() {
                                      ? "Waiting for cockpit displays to be drawn. They are learned on first use; Restart Flight if the "
                                        "list stays empty."
                                      : "Select the left and right displays, or wait for automatic assignment.";
-    if (selected_profile && selected_profile->pfd_detection == profiles::PfdDetectionPolicy::ini_a380_allocation_group) {
+    const bool single_display =
+        selected_profile && selected_profile->pfd_detection == profiles::PfdDetectionPolicy::single_display;
+    if (single_display) {
+      const auto is = [&](const char* reason) { return std::strcmp(graphics.target_detection, reason) == 0; };
+      target_message = !settings.auto_detect        ? "Automatic display selection is off. Select the inboard display manually."
+                       : is("ambiguous_display")    ? "More than one texture matches the inboard display. Select it on PFD routing."
+                       : is("incomplete_inventory") ? "Display tracking was incomplete. Select the inboard display manually."
+                                                    : "Waiting for the inboard display texture.";
+    } else if (selected_profile && selected_profile->pfd_detection == profiles::PfdDetectionPolicy::ini_a380_allocation_group) {
       const auto is = [&](const char* reason) { return std::strcmp(graphics.target_detection, reason) == 0; };
       target_message = !settings.auto_detect        ? "Automatic PFD selection is off. Select the left and right displays manually."
                        : is("incomplete_inventory") ? "Display tracking was incomplete. Select the left and right PFDs manually."
@@ -902,7 +913,7 @@ DWORD run_impl() {
         : !manual_only && !buttons.valid                                                                ? buttons.error
         : !manual_only && taxi_request_status.failed && taxi_request_status.serial == settings.taxi_request
             ? "Aircraft TAXI-button change was not confirmed. Try the shortcut again."
-        : (!targets[0] || !targets[1])         ? target_message
+        : (single_display ? !targets[0] : (!targets[0] || !targets[1])) ? target_message
         : !active && settings.calibration_mask ? "Calibration requested on the selected display."
         : stopped_camera                       ? stopped_camera
         : background_warmup                    ? "Preparing camera views in the background; TAXI displays remain off."

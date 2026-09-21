@@ -356,7 +356,7 @@ void build_controls();
 void refresh_shortcut_status() {
   if (!shortcut_window)
     return;
-  for (unsigned i = 0; i < 3; ++i) {
+  for (unsigned i = 0; i < win::CameraHotkeyNames.size(); ++i) {
     const auto state = hotkey_draft[i] != hotkey_saved[i] ? std::wstring(L"Unsaved — select Save changes to apply")
                        : hotkey_editor_focused            ? std::wstring(L"Editing — shortcuts paused until you leave the field")
                                                           : hotkey_registration.status(i);
@@ -379,7 +379,7 @@ LRESULT CALLBACK shortcut_editor(HWND control, UINT message, WPARAM w, LPARAM l,
   } else if (message == WM_KILLFOCUS) {
     const auto next = reinterpret_cast<HWND>(w);
     const int next_id = next && GetParent(next) == shortcut_window ? GetDlgCtrlID(next) : 0;
-    hotkey_editor_focused = next_id >= 620 && next_id <= 622;
+    hotkey_editor_focused = next_id >= 620 && next_id < 620 + static_cast<int>(win::CameraHotkeyNames.size());
     register_camera_hotkeys();
     refresh_shortcut_status();
   } else if (message == WM_NCDESTROY) {
@@ -398,7 +398,7 @@ INT_PTR CALLBACK shortcut_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM) {
     SetWindowTextW(hwnd, L"Taxi Cam — Flight-deck keyboard shortcuts");
     BOOL dark = TRUE;
     DwmSetWindowAttribute(hwnd, 20, &dark, sizeof(dark));
-    RECT bounds{0, 0, scale(680), scale(460)}, owner{};
+    RECT bounds{0, 0, scale(680), scale(560)}, owner{};
     AdjustWindowRectExForDpi(&bounds, WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME, FALSE, WS_EX_DLGMODALFRAME, dpi);
     GetWindowRect(window, &owner);
     const int width = bounds.right - bounds.left, height = bounds.bottom - bounds.top;
@@ -414,7 +414,7 @@ INT_PTR CALLBACK shortcut_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM) {
     };
     make(L"STATIC", L"Flight-deck keyboard shortcuts", -1, 20, 17, 640, 28, 0, heading);
     make(L"STATIC", L"Use Ctrl or Alt with a letter, number or function key. Clear disables a shortcut.", -1, 20, 51, 640, 27, 0, small);
-    for (unsigned i = 0; i < 3; ++i) {
+    for (unsigned i = 0; i < win::CameraHotkeyNames.size(); ++i) {
       const int y = 90 + static_cast<int>(i) * 90;
       make(L"STATIC", win::CameraHotkeyNames[i], -1, 20, y + 5, 190, 26);
       auto field = make(HOTKEY_CLASSW, L"", 620 + i, 220, y, 330, 32, WS_TABSTOP | WS_BORDER);
@@ -424,11 +424,12 @@ INT_PTR CALLBACK shortcut_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM) {
       make(L"STATIC", L"", 650 + i, 20, y + 40, 640, 25, 0, small);
     }
     make(L"STATIC",
-         L"Both turns both displays on; press again to turn both off.\nShortcuts apply to all aircraft and work while Taxi Cam is hidden.",
-         660, 20, 350, 640, 45, 0, small);
-    make(L"BUTTON", L"Reset shortcuts", 640, 20, 407, 165, 34, WS_TABSTOP | BS_PUSHBUTTON);
-    make(L"BUTTON", L"Save changes", IDOK, 400, 407, 145, 34, WS_TABSTOP | BS_DEFPUSHBUTTON);
-    make(L"BUTTON", L"Close", IDCANCEL, 562, 407, 98, 34, WS_TABSTOP | BS_PUSHBUTTON);
+         L"Both turns both displays on; press again to turn both off. Camera starts unassigned and toggles this "
+         L"aircraft's camera page.\nShortcuts apply to all aircraft and work while Taxi Cam is hidden.",
+         660, 20, 440, 640, 48, 0, small);
+    make(L"BUTTON", L"Reset shortcuts", 640, 20, 500, 165, 34, WS_TABSTOP | BS_PUSHBUTTON);
+    make(L"BUTTON", L"Save changes", IDOK, 400, 500, 145, 34, WS_TABSTOP | BS_DEFPUSHBUTTON);
+    make(L"BUTTON", L"Close", IDCANCEL, 562, 500, 98, 34, WS_TABSTOP | BS_PUSHBUTTON);
     refresh_shortcut_status();
     return TRUE;
   }
@@ -440,17 +441,17 @@ INT_PTR CALLBACK shortcut_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM) {
   }
   if (message == WM_COMMAND) {
     const int id = LOWORD(w);
-    if (id >= 620 && id <= 622 && HIWORD(w) == EN_CHANGE) {
+    if (id >= 620 && id < 620 + static_cast<int>(win::CameraHotkeyNames.size()) && HIWORD(w) == EN_CHANGE) {
       hotkey_draft[id - 620] = win::hotkey_from_control(static_cast<WORD>(SendDlgItemMessageW(hwnd, id, HKM_GETHOTKEY, 0, 0)));
       refresh_shortcut_status();
       return TRUE;
     }
-    if ((id >= 630 && id <= 632) || id == 640) {
+    if ((id >= 630 && id < 630 + static_cast<int>(win::CameraHotkeyNames.size())) || id == 640) {
       if (id == 640)
         hotkey_draft = win::DefaultCameraHotkeys;
       else
         hotkey_draft[id - 630] = {};
-      for (unsigned i = 0; i < 3; ++i)
+      for (unsigned i = 0; i < win::CameraHotkeyNames.size(); ++i)
         SendDlgItemMessageW(hwnd, 620 + i, HKM_SETHOTKEY, win::hotkey_control_value(hotkey_draft[i]), 0);
       refresh_shortcut_status();
       return TRUE;
@@ -1011,6 +1012,7 @@ void draw_page(HDC dc) {
     panel(dc, 244, 278, 766, 259);
     text(dc, L"Nose-wheel view", 260, 150, 250, 30, heading);
     const auto* guide_profile = profiles::find(draft().profile);
+    const bool draw_guides = !guide_profile || guide_profile->reference_guides;
     const bool nose_squares = (guide_profile ? guide_profile : &profiles::A380)->composition.square_nose_markers != 0;
     text(dc, nose_squares ? L"Nose squares" : L"Nose dot", 260, 205, 225, 28, normal);
     text(dc, L"Tail view", 260, 289, 250, 30, heading);
@@ -1021,43 +1023,49 @@ void draw_page(HDC dc) {
       text(dc, L"X from left (%)", 505, y, 139, 23, small, Muted);
       text(dc, L"Y from top (%)", 655, y, 139, 23, small, Muted);
     }
-    text(dc, L"X: 0–50%. Y: 0–100% of each camera view. The right guide mirrors the left.", 260, 551, 732, 26, small, Muted);
-    text(dc, L"Preview is temporary until saved. Reset restores guide positions and colour.", 260, 578, 732, 23, small, Muted);
-    auto preview = draft();
-    if (!read_fields(preview))
-      preview = draft();
-    const auto color = preview.guide_color;
-    const auto brush = CreateSolidBrush(RGB(UINT(color[0] * 255), UINT(color[1] * 255), UINT(color[2] * 255)));
-    const auto pen = CreatePen(PS_SOLID, scale(2), RGB(UINT(color[0] * 255), UINT(color[1] * 255), UINT(color[2] * 255)));
-    const auto old_brush = SelectObject(dc, brush), old_pen = SelectObject(dc, pen);
-    const auto point = [&](const std::array<float, 2>& value, bool right, int y, int height) {
-      return POINT{scale(817 + static_cast<int>(std::lround((right ? 1 - value[0] : value[0]) * 172))),
-                   scale(y + static_cast<int>(std::lround(value[1] * height)))};
-    };
-    const auto dot = [&](POINT p, int radius) {
-      Ellipse(dc, p.x - scale(radius), p.y - scale(radius), p.x + scale(radius), p.y + scale(radius));
-    };
-    text(dc, L"Mirrored preview", 811, 155, 183, 23, small, Muted);
-    for (const bool right : {false, true}) {
-      if (nose_squares) {
-        const auto nose = point(preview.nose_dot, right, 191, 45);
-        const RECT marker{nose.x - scale(7), nose.y - scale(7), nose.x + scale(7), nose.y + scale(7)};
-        FillRect(dc, &marker, brush);
-      } else {
-        dot(point(preview.nose_dot, right, 191, 45), 6);
+    text(dc, draw_guides ? L"X: 0–50%. Y: 0–100% of each camera view. The right guide mirrors the left."
+                         : L"This aircraft does not use alignment markers.",
+         260, 551, 732, 26, small, Muted);
+    text(dc, draw_guides ? L"Preview is temporary until saved. Reset restores guide positions and colour."
+                         : L"No marker calibration is required for this profile.",
+         260, 578, 732, 23, small, Muted);
+    if (draw_guides) {
+      auto preview = draft();
+      if (!read_fields(preview))
+        preview = draft();
+      const auto color = preview.guide_color;
+      const auto brush = CreateSolidBrush(RGB(UINT(color[0] * 255), UINT(color[1] * 255), UINT(color[2] * 255)));
+      const auto pen = CreatePen(PS_SOLID, scale(2), RGB(UINT(color[0] * 255), UINT(color[1] * 255), UINT(color[2] * 255)));
+      const auto old_brush = SelectObject(dc, brush), old_pen = SelectObject(dc, pen);
+      const auto point = [&](const std::array<float, 2>& value, bool right, int y, int height) {
+        return POINT{scale(817 + static_cast<int>(std::lround((right ? 1 - value[0] : value[0]) * 172))),
+                     scale(y + static_cast<int>(std::lround(value[1] * height)))};
+      };
+      const auto dot = [&](POINT p, int radius) {
+        Ellipse(dc, p.x - scale(radius), p.y - scale(radius), p.x + scale(radius), p.y + scale(radius));
+      };
+      text(dc, L"Mirrored preview", 811, 155, 183, 23, small, Muted);
+      for (const bool right : {false, true}) {
+        if (nose_squares) {
+          const auto nose = point(preview.nose_dot, right, 191, 45);
+          const RECT marker{nose.x - scale(7), nose.y - scale(7), nose.x + scale(7), nose.y + scale(7)};
+          FillRect(dc, &marker, brush);
+        } else {
+          dot(point(preview.nose_dot, right, 191, 45), 6);
+        }
+        const auto a = point(preview.tail_upper, right, 334, 158), b = point(preview.tail_corner, right, 334, 158),
+                   c = point(preview.tail_inner, right, 334, 158);
+        const POINT points[]{a, b, c};
+        Polyline(dc, points, 3);
+        dot(a, 3);
+        dot(b, 3);
+        dot(c, 3);
       }
-      const auto a = point(preview.tail_upper, right, 334, 158), b = point(preview.tail_corner, right, 334, 158),
-                 c = point(preview.tail_inner, right, 334, 158);
-      const POINT points[]{a, b, c};
-      Polyline(dc, points, 3);
-      dot(a, 3);
-      dot(b, 3);
-      dot(c, 3);
+      SelectObject(dc, old_brush);
+      SelectObject(dc, old_pen);
+      DeleteObject(brush);
+      DeleteObject(pen);
     }
-    SelectObject(dc, old_brush);
-    SelectObject(dc, old_pen);
-    DeleteObject(brush);
-    DeleteObject(pen);
   }
   text(dc, notice.c_str(), 248, 687, 382, 43, small, dirty ? Accent : Muted, DT_LEFT | DT_WORDBREAK);
 }
@@ -1432,7 +1440,8 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       const int action = hotkey_registration.action(w, l);
       const auto focus = GetFocus();
       const auto focused_id = focus && GetParent(focus) == hwnd ? GetDlgCtrlID(focus) : 0;
-      if (action >= 0 && !preview_ui && !(focused_id >= 620 && focused_id <= 622))
+      if (action >= 0 && !preview_ui &&
+          !(focused_id >= 620 && focused_id < 620 + static_cast<int>(win::CameraHotkeyNames.size())))
         toggle_camera_from_hotkey(static_cast<unsigned>(action));
       return 0;
     }

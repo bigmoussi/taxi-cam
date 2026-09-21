@@ -80,6 +80,12 @@ int main() {
   taxi_camera::TaxiButtonRoutes replacements;
   assert(!replacements.adopt_detected({0, 1}));
   assert(!replacements.adopt_detected({1, 1}));
+  taxi_camera::TaxiButtonRoutes single;
+  assert(!single.adopt_detected({77, 0}));
+  assert(!single.adopt_single(0));
+  assert(single.adopt_single(77) && single.targets == std::array<std::uint64_t, 2>{77, 0});
+  assert(single.adopt_single(77) && !single.adopt_single(78));
+  assert(single.active_mask(true, true, true) == 1);
   assert(replacements.adopt_detected({11569, 11170}));
   replacements.forget(11170);
   assert(replacements.adopt_detected({43712, 11569}));  // New right ID is larger than surviving left.

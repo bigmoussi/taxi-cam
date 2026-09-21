@@ -72,6 +72,12 @@ bool SceneFrameOutput::set_composition(const profiles::Composition& layout) noex
   compositor_->set_composition(layout);
   return true;
 }
+bool SceneFrameOutput::set_reference_guides(bool enabled) noexcept {
+  if (!compositor_ || failed_)
+    return false;
+  compositor_->set_reference_guides(enabled);
+  return true;
+}
 bool SceneFrameOutput::set_ground_speed(float knots, bool valid) noexcept {
   if (!compositor_ || prepared_ || failed_)
     return false;

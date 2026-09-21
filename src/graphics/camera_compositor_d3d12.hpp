@@ -205,8 +205,8 @@ class CameraCompositorD3D12 {
               ground_speed_,
               ground_speed_valid_ ? 1u : 0u,
               composition_};
-    static_assert(sizeof(display) == 30 * sizeof(UINT));
-    private_list->SetGraphicsRoot32BitConstants(1, 30, &display, 0);
+    static_assert(sizeof(display) == 32 * sizeof(UINT));
+    private_list->SetGraphicsRoot32BitConstants(1, 32, &display, 0);
     private_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     const D3D12_VIEWPORT viewport{0, 0, static_cast<float>(Width), static_cast<float>(Height), 0, 1};
     const D3D12_RECT scissor{0, 0, static_cast<LONG>(Width), static_cast<LONG>(Height)};
@@ -407,7 +407,7 @@ class CameraCompositorD3D12 {
     parameters[0].DescriptorTable.pDescriptorRanges = &range;
     parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    parameters[1].Constants.Num32BitValues = 30;
+    parameters[1].Constants.Num32BitValues = 32;
     parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     D3D12_STATIC_SAMPLER_DESC sampler{};
     sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
@@ -476,7 +476,7 @@ cbuffer Display : register(b0) { uint HdrMask; float Exposure; uint ReferenceGui
  float GuideRed; float GuideGreen; float GuideBlue;
  float SpeedRed; float SpeedGreen; float SpeedBlue;
  float SpeedLeft; float SpeedTop; float SpeedPaddingX; float SpeedPaddingY; float SpeedMinimumWidth; float SpeedMinimumHeight;
- float SquareNoseMarkers; };
+ float SquareNoseMarkers; float SplitBottom; float BottomGap; };
 float segment_distance(float2 sample_position, float2 first, float2 last) {
   float2 delta = last - first;
   return length(sample_position - (first + saturate(dot(sample_position - first, delta) / dot(delta, delta)) * delta));
@@ -568,17 +568,28 @@ float4 ground_speed_pixel(float2 position) {
 // Screen-space references matched to the supplied ETACS photograph. These
 // marks do not claim metric clearance after mount, attitude or FOV changes.
 bool reference_guide(float2 position, bool nose) {
-  float2 local = float2(min(position.x, 768 - position.x), nose ? position.y : position.y - TailTop);
   if (nose) {
+    float2 local = float2(min(position.x, 768 - position.x), position.y);
     float2 delta = local - float2(NoseDotX * 768, NoseDotY * NoseHeight);
     // Profiles use 14px squares; retain 12px circle support for custom layouts.
     return SquareNoseMarkers != 0 ? all(abs(delta) < 7) : length(delta) <= 6;
   }
+  // Split panes mirror inside the pane. SplitBottom 0 keeps the 768-wide tail.
+  float span = 768;
+  float x = position.x;
+  if (SplitBottom != 0) {
+    float pane = (768 - BottomGap) * 0.5;
+    if (position.x >= pane && position.x < pane + BottomGap)
+      return false;
+    x = position.x < pane ? position.x : position.x - pane - BottomGap;
+    span = pane;
+  }
+  float2 local = float2(min(x, span - x), position.y - TailTop);
   // The reference bracket's bounding-box centre is near (0.335, 0.69);
   // its outside lower corner is farther out and below that centre.
-  float2 corner = float2(TailCornerX * 768, TailCornerY * (763 - TailTop));
-  float2 upper = float2(TailUpperX * 768, TailUpperY * (763 - TailTop));
-  float2 inner = float2(TailInnerX * 768, TailInnerY * (763 - TailTop));
+  float2 corner = float2(TailCornerX * span, TailCornerY * (763 - TailTop));
+  float2 upper = float2(TailUpperX * span, TailUpperY * (763 - TailTop));
+  float2 inner = float2(TailInnerX * span, TailInnerY * (763 - TailTop));
   return min(segment_distance(local, upper, corner), segment_distance(local, corner, inner)) <= 2;
 }
 float hdr_channel(float value) {
@@ -599,13 +610,23 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
   float2 speed_position = position.xy - float2(SpeedLeft, SpeedTop);
   if (all(speed_position >= 0) && all(speed_position < ground_speed_extent())) return ground_speed_pixel(speed_position);
   if (position.y >= DividerTop && position.y < DividerBottom) return float4(0, 0, 0, 1);
+  if (SplitBottom != 0 && position.y >= TailTop) {
+    float pane = (768 - BottomGap) * 0.5;
+    if (position.x >= pane && position.x < pane + BottomGap) return float4(0, 0, 0, 1);
+  }
   if (ReferenceGuides != 0 && reference_guide(position.xy, position.y < NoseHeight)) return float4(GuideRed, GuideGreen, GuideBlue, 1);
   if (position.y < NoseHeight) {
     float2 uv = float2(position.x / 768, position.y / NoseHeight);
     return float4(display_rgb(Nose.SampleLevel(LinearClamp, uv, 0).rgb, 0), 1);
   }
   if (position.y < TailTop) return float4(0, 0, 0, 1);
-  float2 uv = float2(position.x / 768, (position.y - TailTop) / (763 - TailTop));
+  float u = position.x / 768;
+  if (SplitBottom != 0) {
+    float pane = (768 - BottomGap) * 0.5;
+    float local_x = position.x < pane ? position.x : position.x - pane - BottomGap;
+    u = (local_x / pane) * 0.5 + (position.x < pane ? 0.0 : 0.5);
+  }
+  float2 uv = float2(u, (position.y - TailTop) / (763 - TailTop));
   return float4(display_rgb(Tail.SampleLevel(LinearClamp, uv, 0).rgb, 1), 1);
 }
 )";
