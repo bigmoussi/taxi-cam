@@ -384,8 +384,8 @@ int main() {
       assert(profile->camera_panes[1][0] == 360 && profile->camera_panes[1][1] == 360);
       assert(profile->camera_panes[2][0] == 360 && profile->camera_panes[2][1] == 360);
       assert(profile->composition.split_bottom == 1.f && profile->composition.bottom_gap == 48.f);
-      assert(profile->composition.nose_height == 280.f && profile->composition.tail_top == 403.f);
-      assert(profile->composition.divider_top == 280.f && profile->composition.divider_bottom == 403.f);
+      assert(profile->composition.nose_height == 280.f && profile->composition.tail_top == 318.f);
+      assert(profile->composition.divider_top == 280.f && profile->composition.divider_bottom == 318.f);
       assert(profile->camera_padding.left == 0 && profile->camera_padding.top == 85 && profile->camera_padding.right == 0 &&
              profile->camera_padding.bottom == 0);
       assert(profile->mounts[0][0] == 0 && profile->mounts[0][1] == -2 && profile->mounts[0][2] == 16);
@@ -471,8 +471,8 @@ int main() {
 
   for (const auto* profile : profiles::Catalog) {
     if (profile->pfd_detection == profiles::PfdDetectionPolicy::single_display) {
-      assert(profile->composition.divider_top == 280 && profile->composition.divider_bottom == 403);
-      assert(profile->composition.nose_height == 280 && profile->composition.tail_top == 403);
+      assert(profile->composition.divider_top == 280 && profile->composition.divider_bottom == 318);
+      assert(profile->composition.nose_height == 280 && profile->composition.tail_top == 318);
       continue;
     }
     assert(profile->composition.divider_top == 251 && profile->composition.divider_bottom == 263);

@@ -206,19 +206,21 @@ inline constexpr std::array<unsigned, 6> Pmdg777Formats{};
 // Working-image layout matched to the reference ND photo on a nearly square
 // 958x971 gauge. Nose picture height stays 280 px from y=0 so the default GS
 // font sample rect still sees camera pixels (not layout chrome). Bottom panes
-// are equal 360 px squares. The T fills nose-bottom to square-top. Extra black
-// above the stamped block on the ND comes from camera_padding top, which moves
-// the whole page down without shortening the nose picture. L/R padding stay 0.
+// are equal 360 px squares seated directly under a 38 px T (~4/5 of the gap).
+// Leftover rows below the squares are black. Extra black above the stamped
+// block on the ND comes from camera_padding top. L/R padding stay 0.
 inline constexpr unsigned Pmdg777NosePictureHeight = 280;
 inline constexpr unsigned Pmdg777BottomGap = 48;
 inline constexpr unsigned Pmdg777BottomPane = (768 - Pmdg777BottomGap) / 2;
-inline constexpr unsigned Pmdg777TailTop = 763 - Pmdg777BottomPane;
+inline constexpr unsigned Pmdg777DividerThickness = (Pmdg777BottomGap * 4 + 2) / 5;
 inline constexpr unsigned Pmdg777DividerTop = Pmdg777NosePictureHeight;
-inline constexpr unsigned Pmdg777DividerBottom = Pmdg777TailTop;
+inline constexpr unsigned Pmdg777DividerBottom = Pmdg777DividerTop + Pmdg777DividerThickness;
+inline constexpr unsigned Pmdg777TailTop = Pmdg777DividerBottom;
 inline constexpr unsigned Pmdg777TopPadding = 85;
 static_assert(Pmdg777BottomPane == 360);
-static_assert(Pmdg777TailTop == 403);
-static_assert(Pmdg777DividerBottom - Pmdg777DividerTop == 123);
+static_assert(Pmdg777DividerThickness == 38);
+static_assert(Pmdg777TailTop == 318);
+static_assert(Pmdg777TailTop + Pmdg777BottomPane + Pmdg777TopPadding == 763);
 inline constexpr Composition Pmdg777Composition = [] {
   Composition c;
   c.nose_height = static_cast<float>(Pmdg777NosePictureHeight);
@@ -264,8 +266,9 @@ inline constexpr AircraftProfile Pmdg777 = [] {
   p.display_texture = Pmdg777Texture;
   p.reference_guides = false;
   p.ground_speed = false;
-  // Larger top ND inset moves the stamped page down; bottom inset stays 0 so the
-  // square panes sit on the gauge floor. L/R stay 0.
+  // Larger top ND inset moves the stamped page down without shortening the nose
+  // picture. Bottom inset stays 0; leftover working-image rows under the squares
+  // are black. L/R stay 0.
   p.camera_padding = {0, Pmdg777TopPadding, 0, 0};
   return p;
 }();

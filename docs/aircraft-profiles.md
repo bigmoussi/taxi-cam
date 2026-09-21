@@ -80,8 +80,8 @@ The picture is the navigation display, not a flight PFD. A live scan of the open
 Taxi Cam does not copy a camera page the simulator already drew. It keeps **three** viewpoints — nose looking forward over the nose gear, and separate left- and right-wing mounts looking aft at each wing — and composes them into the shared 768 x 763 working image (`split_bottom`), then stamps that image into each inboard gauge rectangle on `DUS`. Layout in that working image:
 
 - nose picture **280** px tall from y = 0 (full width), with a **10** px black bottom edge before the T;
-- T divider from y **280** to **403** in colour **`#1B1C23`**, including the **48** px vertical gap between the bottom panes;
-- equal **360 x 360** square bottom panes (camera feeds 360 x 360) with **10** px black borders and **24** px rounded corners on the black frame.
+- T divider from y **280** to **318** (**38** px, ~4/5 of the **48** px gap) in colour **`#1B1C23`**, including the vertical gap between the bottom panes;
+- equal **360 x 360** square bottom panes from y **318** to **678** (camera feeds 360 x 360) with **10** px black borders and **24** px rounded corners on the black frame; rows below the squares stay black.
 
 An **85** px top inset (`camera_padding` top; bottom inset 0; L/R 0) moves the stamped block down on the 958 x 971 ND so the black band above the nose picture is larger without shortening the nose picture. Other profiles leave `split_bottom` off, so their full-width tail is unchanged.
 

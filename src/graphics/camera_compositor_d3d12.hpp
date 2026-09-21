@@ -679,6 +679,9 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
   }
   if (SplitBottom != 0 && position.y >= TailTop) {
     float pane = (768 - BottomGap) * 0.5;
+    // Square pane height matches half-width; leftover rows under the squares stay black.
+    float pane_h = pane;
+    if (position.y >= TailTop + pane_h) return float4(0, 0, 0, 1);
     if (position.x >= pane && position.x < pane + BottomGap) return split_bottom_t();
     // Black picture frame: outer edge is the rounded rect (24 px). The border
     // ring is concentric so the radius sits on the black, not a hard box
@@ -689,7 +692,6 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
     const float inner_radius = max(radius - pane_border, 0);
     float local_x = position.x < pane ? position.x : position.x - pane - BottomGap;
     float local_y = position.y - TailTop;
-    float pane_h = 763 - TailTop;
     float2 local = float2(local_x, local_y);
     float2 outer_min = float2(0, 0);
     float2 outer_max = float2(pane, pane_h);
@@ -718,9 +720,10 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
   if (SplitBottom != 0) {
     float pane = (768 - BottomGap) * 0.5;
     const float pane_border = 10;
+    float pane_h = pane;
+    if (position.y >= TailTop + pane_h) return float4(0, 0, 0, 1);
     float local_x = position.x < pane ? position.x : position.x - pane - BottomGap;
     float local_y = position.y - TailTop;
-    float pane_h = 763 - TailTop;
     float2 content_min = float2(pane_border, pane_border);
     float2 content_max = float2(pane - pane_border, pane_h - pane_border);
     float2 uv = float2((local_x - content_min.x) / (content_max.x - content_min.x),
