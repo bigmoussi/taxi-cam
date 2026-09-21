@@ -277,14 +277,20 @@ int main() {
   assert(!profiles::detect_aircraft("A359", ini_a380_path));
   assert(profiles::IniA380.taxi_control == profiles::TaxiControl::manual_only);
   assert(profiles::Pmdg777.taxi_control == profiles::TaxiControl::manual_only);
+  assert(profiles::detect_aircraft("ATCCOM.ATC_NAME BOEING.0.text",
+                                   "SimObjects\\Airplanes\\PMDG 777-200ER\\presets\\pmdg\\PMDG 777-200ER RR\\config\\aircraft.CFG") ==
+         profiles::Pmdg777.id);
   assert(profiles::detect_aircraft("777-200ER GE", "Community/pmdg-aircraft-77er/SimObjects/Airplanes/PMDG 777-200ER/aircraft.cfg") ==
          profiles::Pmdg777.id);
   assert(profiles::detect_aircraft("", "Community\\pmdg-aircraft-77w\\SimObjects\\Airplanes\\PMDG 777-300ER\\aircraft.cfg") ==
          profiles::Pmdg777.id);
   assert(profiles::detect_aircraft("B77F", "Community/pmdg-aircraft-77f/SimObjects/Airplanes/PMDG 777F/aircraft.cfg") ==
          profiles::Pmdg777.id);
+  assert(!profiles::detect_aircraft("ATCCOM.ATC_NAME BOEING.0.text", "Community/pmdg-aircraft-77er/aircraft.cfg"));
+  assert(!profiles::detect_aircraft("ATCCOM.ATC_NAME BOEING.0.text",
+                                    "SimObjects\\Airplanes\\Other\\presets\\pmdg\\PMDG 777-200ER RR\\config\\aircraft.CFG"));
   assert(!profiles::detect_aircraft("777", "Community/pmdg-aircraft-77er-copy/aircraft.cfg"));
-  assert(!profiles::detect_aircraft("777", "Community/pmdg-aircraft-77w-extra/aircraft.cfg"));
+  assert(!profiles::detect_aircraft("777", "SimObjects/Airplanes/PMDG 777-200ER-copy/aircraft.cfg"));
   assert(!profiles::detect_aircraft("777", "Community/not-pmdg-aircraft-77f/aircraft.cfg"));
   assert(profiles::detect_aircraft(
              "ATCCOM.ATC_NAME AIRBUS.0.text",
@@ -366,7 +372,6 @@ int main() {
       assert(profile->camera_panes[0][0] == 736 && profile->camera_panes[0][1] == 251);
       assert(profile->camera_panes[1][0] == 736 && profile->camera_panes[1][1] == 496);
       assert(profile->composition.split_bottom == 1.f && profile->composition.bottom_gap == 32.f);
-      assert(profile->output_mask == 1);
       assert(profile->formats[0] == 0);
       assert(profiles::matches_display(*profile, profile->width, profile->height, 1, 28));
       assert(profiles::matches_display(*profile, profile->width, profile->height, 12, 87));

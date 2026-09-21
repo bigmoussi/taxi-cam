@@ -883,10 +883,10 @@ DWORD run_impl() {
         selected_profile && selected_profile->pfd_detection == profiles::PfdDetectionPolicy::single_display;
     if (single_display) {
       const auto is = [&](const char* reason) { return std::strcmp(graphics.target_detection, reason) == 0; };
-      target_message = !settings.auto_detect        ? "Automatic display selection is off. Select the inboard display manually."
-                       : is("ambiguous_display")    ? "More than one texture matches the inboard display. Select it on PFD routing."
-                       : is("incomplete_inventory") ? "Display tracking was incomplete. Select the inboard display manually."
-                                                    : "Waiting for the inboard display texture.";
+      target_message = !settings.auto_detect        ? "Automatic display selection is off. Select the navigation display manually."
+                       : is("ambiguous_display")    ? "More than one texture matches the navigation display. Select it manually."
+                       : is("incomplete_inventory") ? "Display tracking was incomplete. Select the navigation display manually."
+                                                    : "Waiting for the navigation display texture.";
     } else if (selected_profile && selected_profile->pfd_detection == profiles::PfdDetectionPolicy::ini_a380_allocation_group) {
       const auto is = [&](const char* reason) { return std::strcmp(graphics.target_detection, reason) == 0; };
       target_message = !settings.auto_detect        ? "Automatic PFD selection is off. Select the left and right displays manually."

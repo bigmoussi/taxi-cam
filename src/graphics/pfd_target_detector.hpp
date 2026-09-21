@@ -281,8 +281,8 @@ class PfdTargetDetector {
   }
 
   // One destination texture. Exactly one size match confirms side 0 and leaves
-  // side 1 empty. Two or more matches stay ambiguous so a flight-PFD pair is
-  // never selected in place of the inboard page.
+  // side 1 empty. Two or more matches stay ambiguous so a pair of flight
+  // displays is never selected in place of the navigation display.
   const PfdTargetDetection& observe_single_display(std::size_t count, std::uint64_t now_ms) noexcept {
     if (count != 1) {
       clear(count == 0 ? "no_candidates" : "ambiguous_display");

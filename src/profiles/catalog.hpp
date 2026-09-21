@@ -71,8 +71,6 @@ struct AircraftProfile {
   // faster than this cannot reach the screen. 0 = not measured: only the
   // camera-manager ceiling caps the useful camera_rate.
   unsigned pfd_refresh_hz = 0;
-  // Bits of manual_mask / hotkey action 3. 3 is both displays; 1 is side 0 only.
-  unsigned output_mask = 3;
   // Scanned texture name, when the display is not named by pfd_labels alone.
   const char* display_texture = "";
   // Existing compositor guide switch. False draws no alignment markers.
@@ -173,7 +171,7 @@ inline constexpr AircraftProfile IniA380 = [] {
   p.pfd_refresh_hz = 16;
   return p;
 }();
-// Scanned on the open 777-200ER RR (pmdg-aircraft-77er). Both inboard gauges
+// Scanned on the open 777-200ER RR. Both inboard gauges
 // draw one shared texture. There is no separate taxi-camera texture, and the
 // scan could not tell which inboard was showing the camera page.
 inline constexpr const char* Pmdg777Texture = "DUS";
@@ -185,9 +183,9 @@ inline constexpr unsigned Pmdg777DisplayHeight = 2048;
 inline constexpr unsigned Pmdg777DisplayMips = 0;
 inline constexpr std::array<unsigned, 6> Pmdg777Formats{};
 // One profile for the 777-200ER, 777-300ER and 777F when they share this
-// cockpit. AircraftLoaded path components select it; ATC TYPE is not required.
-// Mounts are unverified starting points, not a measured clearance calibration.
-// The inboard page is one destination texture. Taxi Cam still owns the nose
+// cockpit. AircraftLoaded selects the airplane folder. ATC TYPE is the Boeing
+// brand string and is not required. Mounts are unverified starting points.
+// The navigation display is one destination texture. Taxi Cam still owns the nose
 // and tail viewpoints and splits the tail image in the working image.
 inline constexpr Composition Pmdg777Composition = [] {
   Composition c;
@@ -214,9 +212,8 @@ inline constexpr AircraftProfile Pmdg777 = [] {
                     60,
                     Pmdg777Composition,
                     Pmdg777Formats,
-                    {"pmdg-aircraft-77er", "pmdg-aircraft-77w", "pmdg-aircraft-77f"}};
+                    {"PMDG 777-200ER", "PMDG 777-300ER", "PMDG 777F"}};
   p.pfd_detection = PfdDetectionPolicy::single_display;
-  p.output_mask = 1;
   p.display_texture = Pmdg777Texture;
   p.reference_guides = false;
   return p;
@@ -304,8 +301,11 @@ inline std::uint32_t detect_aircraft(std::string_view type, std::string_view pat
   for (const auto marker : IniA380.package_markers)
     if (!marker.empty() && path_contains(path, marker))
       return matches_aircraft(IniA380, type) ? IniA380.id : 0;
-  // PMDG titles do not carry a vendor, and ATC TYPE is not a reliable product
-  // id. The package folder is the shared identity for 77ER, 77W and 77F.
+  // PMDG ATC TYPE is the Boeing brand string, not a product id. The public
+  // AircraftLoaded path names the airplane folder. The open 777-200ER RR
+  // reported SimObjects\Airplanes\PMDG 777-200ER\... and did not contain
+  // pmdg-aircraft-77er. The 300ER and 777F use the same folder-component
+  // pattern; those two paths were not in this log.
   for (const auto marker : Pmdg777.package_markers)
     if (!marker.empty() && path_contains(path, marker))
       return Pmdg777.id;

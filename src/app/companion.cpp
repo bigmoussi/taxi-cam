@@ -398,7 +398,7 @@ INT_PTR CALLBACK shortcut_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM) {
     SetWindowTextW(hwnd, L"Taxi Cam — Flight-deck keyboard shortcuts");
     BOOL dark = TRUE;
     DwmSetWindowAttribute(hwnd, 20, &dark, sizeof(dark));
-    RECT bounds{0, 0, scale(680), scale(560)}, owner{};
+    RECT bounds{0, 0, scale(680), scale(460)}, owner{};
     AdjustWindowRectExForDpi(&bounds, WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME, FALSE, WS_EX_DLGMODALFRAME, dpi);
     GetWindowRect(window, &owner);
     const int width = bounds.right - bounds.left, height = bounds.bottom - bounds.top;
@@ -424,12 +424,11 @@ INT_PTR CALLBACK shortcut_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM) {
       make(L"STATIC", L"", 650 + i, 20, y + 40, 640, 25, 0, small);
     }
     make(L"STATIC",
-         L"Both turns both displays on; press again to turn both off. Camera starts unassigned and toggles this "
-         L"aircraft's camera page.\nShortcuts apply to all aircraft and work while Taxi Cam is hidden.",
-         660, 20, 440, 640, 48, 0, small);
-    make(L"BUTTON", L"Reset shortcuts", 640, 20, 500, 165, 34, WS_TABSTOP | BS_PUSHBUTTON);
-    make(L"BUTTON", L"Save changes", IDOK, 400, 500, 145, 34, WS_TABSTOP | BS_DEFPUSHBUTTON);
-    make(L"BUTTON", L"Close", IDCANCEL, 562, 500, 98, 34, WS_TABSTOP | BS_PUSHBUTTON);
+         L"Both turns both displays on; press again to turn both off.\nShortcuts apply to all aircraft and work while Taxi Cam is hidden.",
+         660, 20, 350, 640, 45, 0, small);
+    make(L"BUTTON", L"Reset shortcuts", 640, 20, 407, 165, 34, WS_TABSTOP | BS_PUSHBUTTON);
+    make(L"BUTTON", L"Save changes", IDOK, 400, 407, 145, 34, WS_TABSTOP | BS_DEFPUSHBUTTON);
+    make(L"BUTTON", L"Close", IDCANCEL, 562, 407, 98, 34, WS_TABSTOP | BS_PUSHBUTTON);
     refresh_shortcut_status();
     return TRUE;
   }

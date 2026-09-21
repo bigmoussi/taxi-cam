@@ -11,11 +11,11 @@ struct CameraHotkey {
   UINT key{}, modifiers{};
   bool operator==(const CameraHotkey&) const = default;
 };
-using CameraHotkeys = std::array<CameraHotkey, 4>;
+using CameraHotkeys = std::array<CameraHotkey, 3>;
 inline constexpr CameraHotkeys DefaultCameraHotkeys{
-    {{'L', MOD_CONTROL | MOD_SHIFT}, {'R', MOD_CONTROL | MOD_SHIFT}, {'B', MOD_CONTROL | MOD_SHIFT}, {}}};
-inline constexpr std::array<const wchar_t*, 4> CameraHotkeyNames{L"Left camera", L"Right camera", L"Both cameras", L"Camera"};
-inline constexpr std::array<const wchar_t*, 4> CameraHotkeyKeys{L"left", L"right", L"both", L"camera"};
+    {{'L', MOD_CONTROL | MOD_SHIFT}, {'R', MOD_CONTROL | MOD_SHIFT}, {'B', MOD_CONTROL | MOD_SHIFT}}};
+inline constexpr std::array<const wchar_t*, 3> CameraHotkeyNames{L"Left camera", L"Right camera", L"Both cameras"};
+inline constexpr std::array<const wchar_t*, 3> CameraHotkeyKeys{L"left", L"right", L"both"};
 inline constexpr int CameraHotkeyFirstId = 700;
 inline WORD hotkey_control_value(CameraHotkey chord) noexcept {
   BYTE flags{};
@@ -74,15 +74,7 @@ inline bool load_camera_hotkeys(CameraHotkeys& chords, const std::wstring& direc
   CameraHotkeys loaded{};
   for (size_t i = 0; i < loaded.size(); ++i) {
     wchar_t value[64]{};
-    // The Camera action shipped later and has no default chord. A hotkeys.ini
-    // written before that key exists stays valid, with Camera disabled.
-    const bool optional = i + 1 == loaded.size();
-    const auto length =
-        GetPrivateProfileStringW(L"shortcuts", CameraHotkeyKeys[i], optional ? L"\x1" : L"", value, 64, path.c_str());
-    if (optional && length == 1 && value[0] == 1 && value[1] == 0) {
-      loaded[i] = {};
-      continue;
-    }
+    const auto length = GetPrivateProfileStringW(L"shortcuts", CameraHotkeyKeys[i], L"", value, 64, path.c_str());
     wchar_t* end{};
     const auto packed = std::wcstoul(value, &end, 10);
     if (length >= 63 || end == value || *end || packed > 0xffff || (HIBYTE(packed) & ~(HOTKEYF_CONTROL | HOTKEYF_ALT | HOTKEYF_SHIFT))) {
@@ -103,9 +95,8 @@ inline bool save_camera_hotkeys(const CameraHotkeys& chords, const std::wstring&
     return false;
   const auto path = directory + L"\\hotkeys.ini", temporary = path + L".tmp";
   wchar_t value[256];
-  const int count =
-      std::swprintf(value, 256, L"[shortcuts]\r\nleft=%u\r\nright=%u\r\nboth=%u\r\ncamera=%u\r\n", hotkey_control_value(chords[0]),
-                    hotkey_control_value(chords[1]), hotkey_control_value(chords[2]), hotkey_control_value(chords[3]));
+  const int count = std::swprintf(value, 256, L"[shortcuts]\r\nleft=%u\r\nright=%u\r\nboth=%u\r\n", hotkey_control_value(chords[0]),
+                                  hotkey_control_value(chords[1]), hotkey_control_value(chords[2]));
   if (count <= 0)
     return false;
   HANDLE file = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -178,20 +169,15 @@ class CameraHotkeyRegistration {
       return L"Unavailable — another app uses this shortcut";
     return L"Unavailable — Windows error " + std::to_wstring(errors_[i]);
   }
-  bool conflicts() const noexcept {
-    for (auto error : errors_)
-      if (error)
-        return true;
-    return false;
-  }
+  bool conflicts() const noexcept { return errors_[0] || errors_[1] || errors_[2]; }
 
  private:
   Register register_;
   Unregister unregister_;
   HWND window_{};
   CameraHotkeys chords_{};
-  std::array<bool, 4> registered_{};
-  std::array<DWORD, 4> errors_{};
+  std::array<bool, 3> registered_{};
+  std::array<DWORD, 3> errors_{};
   bool preview_{};
 };
 }  // namespace taxi_camera::standalone

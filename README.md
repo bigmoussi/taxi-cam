@@ -27,7 +27,7 @@ If you find Taxi Cam useful, please consider donating.
 - **iniBuilds A350-900**, including **ULR**
 - **iniBuilds A350-1000**
 - **iniBuilds A380** — use keyboard shortcuts or manual previews because its TAXI buttons are marked INOP.
-- **PMDG 777** (777-200ER, 777-300ER and 777F) — one inboard camera page on the shared `DUS` texture (`DU_LeftInboard` and `DU_RightInboard`). Assign the **Camera** shortcut; it has no default combination. There is no cockpit CAM button, and alignment markers are not required.
+- **PMDG 777** (777-200ER, 777-300ER and 777F) — the navigation display, on the shared `DUS` texture (`DU_LeftInboard` and `DU_RightInboard`). Use the same Ctrl + Shift + L / R / B shortcuts as the other aircraft. There is no cockpit CAM button, and alignment markers are not required.
 
 ## Installation
 
@@ -49,7 +49,7 @@ On its first launch, **Settings** opens so you can explore the controls. Close t
 
 1. Load a supported aircraft. Leave **Auto aircraft** enabled in **Overview** to select the matching settings automatically.
 2. Allow a few seconds for the cameras to become ready.
-3. Press the left or right EFIS **TAXI** button to show the cameras on that side's PFD. On the iniBuilds A380, use **Ctrl + Shift + B** to turn both displays on. On the PMDG 777, assign **Camera** under **Keyboard shortcuts** and use that. Repeat the control to turn them off.
+3. Press the left or right EFIS **TAXI** button to show the cameras on that side's PFD. On the iniBuilds A380 and the PMDG 777, use **Ctrl + Shift + L**, **R** or **B**. Repeat the control to turn them off.
 
 The cameras switch off above **60 knots**. If a view appears on the wrong display, use **PFD routing** in Settings to correct it.
 

@@ -7,17 +7,10 @@ namespace taxi_camera::standalone {
 // Only changes session-scoped intent. The bridge still owns service, aircraft
 // identity, flight-session, telemetry and speed-cutoff checks.
 inline void toggle_manual_camera(Settings& settings, unsigned action, std::uint32_t automatic_mask = 0) noexcept {
-  if (action > 3)
+  if (action > 2)
     return;
-  const auto* profile = profiles::find(settings.profile);
-  const unsigned page = profile ? (profile->output_mask & 3u) : 3u;
   const auto mask = (settings.follow_taxi ? automatic_mask : settings.manual_mask) & 3u;
-  if (action == 2 || (action == 3 && page == 3))
-    settings.manual_mask = mask == 3 ? 0u : 3u;
-  else if (action == 3)
-    settings.manual_mask = (mask & page) == page ? (mask & ~page) : (mask | page);
-  else
-    settings.manual_mask = mask ^ (1u << action);
+  settings.manual_mask = action == 2 ? (mask == 3 ? 0u : 3u) : mask ^ (1u << action);
   settings.follow_taxi = 0;
   settings.calibration_mask = 0;
   settings.scene_test = 0;
@@ -26,7 +19,7 @@ inline void toggle_manual_camera(Settings& settings, unsigned action, std::uint3
 enum class CameraHotkeyResult { manual, aircraft, unavailable };
 inline CameraHotkeyResult request_camera_hotkey(Settings& settings, unsigned action, const Status& status, std::uint64_t now) noexcept {
   const auto* profile = profiles::find(settings.profile);
-  if (!profile || action > 3)
+  if (!profile || action > 2)
     return CameraHotkeyResult::unavailable;
   if (profile->taxi_control == profiles::TaxiControl::manual_only) {
     const auto follow = settings.follow_taxi;
@@ -51,11 +44,8 @@ inline CameraHotkeyResult request_camera_hotkey(Settings& settings, unsigned act
   auto mask = settings.follow_taxi ? status.taxi_buttons_mask : settings.manual_mask;
   if (settings.follow_taxi)
     mask = (mask & ~pending) | (settings.taxi_desired_mask & pending);
-  const unsigned page = profile->output_mask & 3u;
-  const auto affected = action == 3 ? page : action == 2 ? 3u : 1u << action;
-  const auto target = action == 2 || (action == 3 && page == 3) ? (mask == 3 ? 0u : 3u)
-                      : action == 3 ? ((mask & page) == page ? (mask & ~page) : (mask | page))
-                                    : mask ^ affected;
+  const auto affected = action == 2 ? 3u : 1u << action;
+  const auto target = action == 2 ? (mask == 3 ? 0u : 3u) : mask ^ affected;
   settings.taxi_desired_mask = (settings.taxi_desired_mask & pending & ~affected) | (target & affected);
   settings.taxi_selected_mask = pending | affected;
   settings.taxi_request = std::max(settings.taxi_request, status.taxi_request_seen) + 1;
