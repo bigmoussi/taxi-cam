@@ -2233,7 +2233,9 @@ bool request_scene_profile(std::uint32_t id) noexcept {
   return true;
 }
 bool request_scene_mounts(const MountPair& mounts) noexcept {
-  if (!valid_mounts(mounts))
+  // Require every MountPair slot. Legacy nose/tail files duplicate the aft mount
+  // into slot 2 in parse_mount_config; companion settings always supply three.
+  if (!valid_mounts(mounts, kMaxCameraFeeds))
     return false;
   try {
     auto& runtime = state();
