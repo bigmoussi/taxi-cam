@@ -2,6 +2,7 @@
 #define main existing_manager_validation_entry
 #include "scene_capture_manager_test.cpp"
 #undef main
+#include <chrono>
 #include <future>
 #include "../../src/graphics/native_device_identity.hpp"
 #include "../../src/hooks/queue_submit_observer.hpp"
@@ -57,6 +58,114 @@ void discover(void* opaque, ID3D12GraphicsCommandList*, std::uint64_t) noexcept 
   auto& context = *static_cast<Discovery*>(opaque);
   context.manager->statistics();  // Discovery must not retain the metadata lock either.
   context.called.store(true, std::memory_order_release);
+}
+struct Timeline {
+  void** table;
+  std::atomic<std::uint64_t> completed{0};
+  std::atomic<unsigned> cpu_signals{0};
+};
+std::uint64_t STDMETHODCALLTYPE completed_value(Timeline* self) {
+  return self->completed.load(std::memory_order_acquire);
+}
+HRESULT STDMETHODCALLTYPE cpu_signal(Timeline* self, std::uint64_t value) {
+  auto seen = self->completed.load(std::memory_order_relaxed);
+  while (seen < value && !self->completed.compare_exchange_weak(seen, value, std::memory_order_release, std::memory_order_relaxed)) {
+  }
+  self->cpu_signals.fetch_add(1, std::memory_order_relaxed);
+  return S_OK;
+}
+// ReShade 6.8's dxgi.dll flush CPU-waits on a fence queued behind the bridge
+// timeline Wait. Closing the gate must satisfy that Wait from the CPU without
+// taking the manager mutex. ReShade stays in the DXGI chain.
+void reshade_present_gate() {
+  void* device_table[]{reinterpret_cast<void*>(&identity), reinterpret_cast<void*>(&reference), reinterpret_cast<void*>(&reference)};
+  Device device{device_table};
+  std::array<void*, 19> queue_table{};
+  queue_table[7] = reinterpret_cast<void*>(&get_device);
+  queue_table[14] = reinterpret_cast<void*>(&signal);
+  queue_table[15] = reinterpret_cast<void*>(&wait_on);
+  queue_table[18] = reinterpret_cast<void*>(&description);
+  Queue queue{queue_table.data(), &device};
+  std::array<void*, 11> fence_table{};
+  fence_table[8] = reinterpret_cast<void*>(&completed_value);
+  fence_table[10] = reinterpret_cast<void*>(&cpu_signal);
+  Timeline timeline{fence_table.data()};
+  auto* native_queue = reinterpret_cast<ID3D12CommandQueue*>(&queue);
+  taxi_camera::SceneHandoff handoff;
+  auto manager = std::make_unique<Manager>(handoff);
+  auto& owner = manager->devices_[0];
+  owner.key = 7;
+  owner.native = reinterpret_cast<ID3D12Device*>(&device);
+  owner.timeline = reinterpret_cast<ID3D12Fence*>(&timeline);
+  owner.active = true;
+  manager->published_devices_[0].store(owner.native);
+  std::uintptr_t marker = 0;
+  auto* known = reinterpret_cast<ID3D12GraphicsCommandList*>(&marker);
+  auto& recording = manager->lists_[0];
+  recording.native = known;
+  recording.device_key = 7;
+  recording.object_generation = 19;
+  recording.session_generation = owner.session_generation;
+  recording.packets = 1;
+  manager->list_indices_.emplace(known, 0);
+  manager->publish_list(recording);
+  manager->set_submission_gate(false);
+  require(timeline.cpu_signals.load() == 0, "Closing the gate with no queued Wait signaled a fence");
+  manager->set_submission_gate(true);
+  require(timeline.cpu_signals.load() == 0, "Opening the gate signaled a fence");
+  const auto submit = [&] {
+    ID3D12CommandList* batch[]{known};
+    const auto receipt = manager->before_submission(native_queue, 1, batch);
+    require(receipt != 0, "ReShade-present fixture did not open an ordered transaction");
+    manager->after_submission(native_queue, receipt);
+  };
+  submit();
+  submit();
+  require(queue.signals == 2 && queue.waits == 1 && manager->published_timelines_[0].waited.load() == 1 &&
+              timeline.completed.load() == 0 && timeline.cpu_signals.load() == 0,
+          "The queued Wait value was not published ahead of the ReShade flush");
+  std::promise<void> locked;
+  std::promise<void> release_holder;
+  auto locked_future = locked.get_future();
+  auto release_future = release_holder.get_future();
+  auto holder = std::async(std::launch::async, [&] {
+    std::lock_guard lock(manager->mutex_);
+    locked.set_value();
+    release_future.wait();
+  });
+  locked_future.wait();
+  auto waiter = std::async(std::launch::async, [&] {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+    while (timeline.completed.load(std::memory_order_acquire) < 1) {
+      if (std::chrono::steady_clock::now() > deadline)
+        return false;
+    }
+    return true;
+  });
+  auto closed = std::async(std::launch::async, [&] { manager->set_submission_gate(false); });
+  const bool returned = closed.wait_for(std::chrono::milliseconds(200)) == std::future_status::ready;
+  release_holder.set_value();
+  holder.get();
+  if (returned)
+    closed.get();
+  else
+    closed.wait();
+  require(returned, "set_submission_gate(false) blocked while the manager mutex was held");
+  require(waiter.get(), "ReShade-shaped waiter was not released by the CPU fence signal");
+  require(timeline.cpu_signals.load() == 1 && timeline.completed.load() == 1 && manager->statistics().released_waits == 1,
+          "Gate close did not CPU-signal the waited timeline value once");
+  manager->set_submission_gate(false);
+  manager->set_submission_gate(true);
+  require(timeline.cpu_signals.load() == 1, "A repeated close or an open signaled the fence again");
+  submit();
+  require(manager->published_timelines_[0].waited.load() == 2 && timeline.completed.load() == 1,
+          "A later transaction did not publish its new Wait");
+  manager->set_submission_gate(false);
+  require(timeline.cpu_signals.load() == 2 && timeline.completed.load() >= 2 && manager->statistics().released_waits == 2,
+          "A newer outstanding Wait was not released when the gate closed again");
+  manager->set_submission_gate(true);
+  manager->set_submission_gate(false);
+  require(timeline.cpu_signals.load() == 2, "Closing the gate after the waited value completed signaled again");
 }
 void run() {
   void* device_table[]{reinterpret_cast<void*>(&identity), reinterpret_cast<void*>(&reference), reinterpret_cast<void*>(&reference)};
@@ -454,6 +563,7 @@ void run() {
   require((saturated >> 32) == UINT32_MAX && (saturated & (1u << 29)) && exhausted.effects.load() == saturated &&
               !manager->classify_unobserved(helper_native, 1, helper_batch).unrelated,
           "Publication version exhaustion stays permanently conservative instead of wrapping to an ABA match");
+  reshade_present_gate();
   std::printf(
       "PASS CPU-only submission locks: cross-queue helpers, nonblocking refusals/private deferral, exact retirement marks and GPU "
       "guards.\n");

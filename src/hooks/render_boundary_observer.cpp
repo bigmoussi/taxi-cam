@@ -1,4 +1,5 @@
 #include "render_boundary_observer.hpp"
+#include "../graphics/native_device_identity.hpp"
 #include <array>
 #include <atomic>
 #include <unordered_map>
@@ -37,8 +38,15 @@ struct Slot {
 };
 struct Identity {
   std::uint64_t generation = 0;
-  bool active = false, suspended = false, invalid = false, prior_work = false;
+  bool active = false, suspended = false, invalid = false, prior_work = false, pass_closed = false;
 };
+// D3D12_RENDER_PASS_FLAG_BIND_READ_ONLY_DEPTH (0x8) and
+// D3D12_RENDER_PASS_FLAG_BIND_READ_ONLY_STENCIL (0x10) are legal Agility SDK
+// flags. ReShade forwards them unchanged. Bits outside this mask still
+// invalidate the recording. PRESERVE_LOCAL access types stay invalid.
+constexpr UINT known_render_pass_flags = static_cast<UINT>(D3D12_RENDER_PASS_FLAG_ALLOW_UAV_WRITES) |
+                                         static_cast<UINT>(D3D12_RENDER_PASS_FLAG_SUSPENDING_PASS) |
+                                         static_cast<UINT>(D3D12_RENDER_PASS_FLAG_RESUMING_PASS) | 0x8u | 0x10u;
 SRWLOCK registry_lock = SRWLOCK_INIT, control_lock = SRWLOCK_INIT;
 std::unordered_map<ID3D12GraphicsCommandList*, Identity> identities;
 Callbacks callbacks;
@@ -83,9 +91,28 @@ struct Lock {
       ReleaseSRWLockShared(&lock);
   }
 };
+// ReShade's command-list proxy and the native list are different pointers.
+// IID_UnwrappedObject returns the native object and AddRefs it. The test fake
+// returns the same pointer without AddRef, so that result is not released.
+// The pointer is a map key only; no method is called on it after Release.
+ID3D12GraphicsCommandList* identity_key(ID3D12GraphicsCommandList* list) noexcept {
+  if (!list)
+    return nullptr;
+  IUnknown* unwrapped = nullptr;
+  const HRESULT hr = list->QueryInterface(taxi_camera::UnwrappedObjectId, reinterpret_cast<void**>(&unwrapped));
+  if (FAILED(hr) || !unwrapped || unwrapped == static_cast<IUnknown*>(list)) {
+    if (unwrapped && unwrapped != static_cast<IUnknown*>(list))
+      unwrapped->Release();
+    return list;
+  }
+  auto* native = static_cast<ID3D12GraphicsCommandList*>(unwrapped);
+  unwrapped->Release();
+  return native;
+}
 Identity lookup(ID3D12GraphicsCommandList* list) noexcept {
+  const auto key = identity_key(list);
   const Lock lock(registry_lock, false);
-  const auto it = identities.find(list);
+  const auto it = identities.find(key);
   return it == identities.end() ? Identity{} : it->second;
 }
 void disable_capture() noexcept {
@@ -161,8 +188,9 @@ void observe_work(ID3D12GraphicsCommandList* list) noexcept {
   const auto identity = lookup(list);
   if (!identity.generation || identity.prior_work || identity.active || identity.suspended || identity.invalid)
     return;
+  const auto key = identity_key(list);
   const Lock lock(registry_lock, true);
-  const auto it = identities.find(list);
+  const auto it = identities.find(key);
   if (it != identities.end() && it->second.generation == identity.generation && !it->second.active && !it->second.suspended &&
       !it->second.invalid)
     it->second.prior_work = true;
@@ -402,17 +430,18 @@ void STDMETHODCALLTYPE begin(ID3D12GraphicsCommandList4* list,
     original(list, count, targets, depth, flags);
     return;
   }
+  const auto key = identity_key(list);
   const Guard guard;
-  const auto identity = lookup(list);
+  const auto identity = lookup(key);
   bool ordinary_access = false;
   if (identity.generation) {
     const Lock lock(registry_lock, true);
-    const auto it = identities.find(list);
+    const auto it = identities.find(key);
     if (it != identities.end() && it->second.generation == identity.generation) {
       auto& value = it->second;
       if (value.active)
         value.invalid = true;
-      if ((static_cast<UINT>(flags) & ~7u) != 0)
+      if ((static_cast<UINT>(flags) & ~known_render_pass_flags) != 0)
         value.invalid = true;
       // PRESERVE_LOCAL passes permit state setup between passes, but no added
       // GPU operations. Refuse their entire recording rather than inferring a
@@ -432,15 +461,16 @@ void STDMETHODCALLTYPE begin(ID3D12GraphicsCommandList4* list,
       if (value.suspended && (flags & D3D12_RENDER_PASS_FLAG_RESUMING_PASS) == 0)
         value.invalid = true;
       value.active = true;
+      value.pass_closed = false;
       value.suspended = (flags & D3D12_RENDER_PASS_FLAG_SUSPENDING_PASS) != 0;
     }
   }
   if (identity.generation && callbacks.pass_began)
-    callbacks.pass_began(callbacks.context, list, identity.generation, flags, ordinary_access);
+    callbacks.pass_began(callbacks.context, key, identity.generation, flags, ordinary_access);
   if (identity.generation && callbacks.pass_targets)
-    callbacks.pass_targets(callbacks.context, list, identity.generation, count, targets, depth);
-  const auto after_begin_state = lookup(list);
-  notify_invalidation(list, identity.generation,
+    callbacks.pass_targets(callbacks.context, key, identity.generation, count, targets, depth);
+  const auto after_begin_state = lookup(key);
+  notify_invalidation(key, identity.generation,
                       InvalidationPassBegin | scope_invalidation(identity) |
                           ((after_begin_state.invalid || after_begin_state.suspended || (flags & D3D12_RENDER_PASS_FLAG_RESUMING_PASS) != 0)
                                ? InvalidationPassState
@@ -457,22 +487,32 @@ void end_impl(ID3D12GraphicsCommandList4* list, End original) noexcept {
     original(list);
     return;
   }
+  const auto key = identity_key(list);
   const Guard guard;
-  const auto identity = lookup(list);
+  const auto identity = lookup(key);
+  // ReShade's proxy End and the active-pass vtable End are separate calls.
+  // A repeated End of an ordinary pass that already closed is not PassState.
+  // An End with no Begin still invalidates: pass_closed is false.
+  if (identity.generation && identity.pass_closed && !identity.active && !identity.suspended && !identity.invalid &&
+      enabled.load(std::memory_order_acquire)) {
+    original(list);
+    return;
+  }
   if (!identity.active || identity.suspended || identity.invalid || !enabled.load(std::memory_order_acquire))
-    notify_invalidation(list, identity.generation, InvalidationPassState | scope_invalidation(identity));
+    notify_invalidation(key, identity.generation, InvalidationPassState | scope_invalidation(identity));
   original(list);
   if (identity.generation && callbacks.pass_ended)
-    callbacks.pass_ended(callbacks.context, list, identity.generation);
+    callbacks.pass_ended(callbacks.context, key, identity.generation);
   // End access can discard/resolve; no image is copied here and no RTV binding
   // is presumed to survive. Only later actual transitions prove layout/state.
   if (identity.generation) {
     const Lock lock(registry_lock, true);
-    const auto it = identities.find(list);
+    const auto it = identities.find(key);
     if (it != identities.end() && it->second.generation == identity.generation) {
       if (!it->second.active)
         it->second.invalid = true;
       it->second.active = false;
+      it->second.pass_closed = true;
       if (!it->second.invalid && !it->second.suspended)
         it->second.prior_work = true;
     }
@@ -848,15 +888,16 @@ Result register_list(ID3D12GraphicsCommandList* list, std::uint64_t generation, 
     }
   }
   {
+    const auto key = identity_key(list);
     const Lock lock(registry_lock, true);
-    const auto found = identities.find(list);
+    const auto found = identities.find(key);
     if (found != identities.end() && found->second.generation != generation)
       return result("identity_not_retired");
     if (found == identities.end()) {
       if (identities.size() >= 8192)
         return result("identity_limit");
       try {
-        identities.emplace(list, Identity{generation});
+        identities.emplace(key, Identity{generation});
       } catch (...) {
         return result("allocation_failed");
       }
@@ -866,14 +907,16 @@ Result register_list(ID3D12GraphicsCommandList* list, std::uint64_t generation, 
   return result("registered", 0, true);
 }
 void unregister_list(ID3D12GraphicsCommandList* list, std::uint64_t generation) noexcept {
+  const auto key = identity_key(list);
   const Lock lock(registry_lock, true);
-  const auto it = identities.find(list);
+  const auto it = identities.find(key);
   if (it != identities.end() && it->second.generation == generation)
     identities.erase(it);
 }
 void successful_reset(ID3D12GraphicsCommandList* list, std::uint64_t generation) noexcept {
+  const auto key = identity_key(list);
   const Lock lock(registry_lock, true);
-  const auto it = identities.find(list);
+  const auto it = identities.find(key);
   if (it != identities.end() && it->second.generation == generation)
     it->second = Identity{generation, false, false, !enabled.load(std::memory_order_acquire)};
 }
@@ -881,15 +924,16 @@ void reset_failed(ID3D12GraphicsCommandList* list, std::uint64_t generation) noe
   invalidate_recording(list, generation, InvalidationResetFailed);
 }
 void invalidate_recording(ID3D12GraphicsCommandList* list, std::uint64_t generation, std::uint32_t reasons) noexcept {
+  const auto key = identity_key(list);
   {
     const Lock lock(registry_lock, true);
-    const auto it = identities.find(list);
+    const auto it = identities.find(key);
     if (it == identities.end() || it->second.generation != generation)
       return;
     it->second.invalid = true;
   }
   const ScopedBypass bypass;
-  notify_invalidation(list, generation, reasons ? reasons : InvalidationUnobservedWork);
+  notify_invalidation(key, generation, reasons ? reasons : InvalidationUnobservedWork);
 }
 Result remove() noexcept {
   if (inside)

@@ -47,6 +47,14 @@ The bridge does not bootstrap a D3D11On12 device or install native D3D11 draw de
 
 Pure D3D12 pre-existing descriptors still require creation evidence or an unambiguous same-recording association; cross-list timing cannot authorize a guessed descriptor map. Overview says **waiting for cockpit displays** only while the PFD list is empty. A nonzero capture/composition count cannot establish successful PFD routing or presentation. See [PFD-copy diagnostics](runtime-reference.md#pfd-copy-diagnostics) for the separate delivery counters.
 
+## Presentation stall with ReShade's immediate list
+
+ReShade 6.8 stays enabled. Its injected `dxgi.dll` flushes an immediate command list on the native queue from inside proxy `ExecuteCommandLists`, then CPU-waits until ReShade's own fence is signaled. That fence is queued after Taxi Cam's `queue->Wait` on the bridge timeline. A presentation-watchdog trip (`presentation_and_sim_frame_stalled`) used to close the submission gate and release bridge resources while that GPU wait stayed queued, so the flush never returned and the simulator stayed frozen. `gated` stayed 0 because the stuck thread never reached another submit.
+
+Closing the gate now CPU-signals the timeline value already passed to that `Wait`, on the watchdog thread, without taking a bridge mutex. A repeated close, or a close after the value has already completed, does not signal again. Opening the gate does not signal. Read-only depth and stencil render-pass flags (`D3D12_RENDER_PASS_FLAG_BIND_READ_ONLY_DEPTH`, `D3D12_RENDER_PASS_FLAG_BIND_READ_ONLY_STENCIL`) no longer mark the recording invalid. A second `EndRenderPass` of an ordinary pass that already closed is forwarded and is not `PassState`. Command-list pass identity follows `IID_UnwrappedObject`, so the proxy and the native list share one pass. `PRESERVE_LOCAL` access still invalidates the recording.
+
+These checks do not establish live MSFS behaviour. Shader output and PFD pixels with ReShade 6.8.0 still need a simulator session.
+
 ## Validation
 
 `build.ps1 -Validate` runs the bounded COM-chain tests, genuine WARP device/resource identity tests and normal hardware/WARP graphics suite. `smoke-test.ps1` verifies the resulting native delivery artifacts.

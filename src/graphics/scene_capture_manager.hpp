@@ -141,6 +141,9 @@ class SceneCaptureManager {
     // recording was invalidated and the models wiped.
     std::uint64_t contended_evidence = 0, contended_lifecycle = 0, contended_submissions = 0;
     std::uint64_t unordered_submissions = 0, deferred_retirements = 0, gated_submissions = 0;
+    // CPU signals of a timeline value already passed to queue Wait, issued when
+    // the submission gate closes. One count per Signal that actually ran.
+    std::uint64_t released_waits = 0;
     std::uint64_t deferred_evidence = 0, deferred_overflows = 0;
     // Consumer recordings forwarded without ordering by a bounded escape: the
     // source model was invalidated and the device kept, unlike a contended escape.
@@ -308,7 +311,10 @@ class SceneCaptureManager {
   void forwarded_unordered(ID3D12CommandQueue*) noexcept;
   // Closed by the presentation watchdog. While closed, before_submission opens
   // no transaction and treats every batch as an escaped contended batch; the
-  // simulator thread returns immediately. Atomic; callable from any thread.
+  // simulator thread returns immediately. The transition to closed CPU-signals
+  // each published timeline value already passed to queue Wait, without taking
+  // a bridge mutex, so a flush blocked behind that GPU wait can finish.
+  // Atomic; callable from any thread.
   void set_submission_gate(bool open) noexcept;
   bool submission_gate_open() const noexcept;
   // True when the most recent evidence or registration call on this thread
@@ -499,6 +505,8 @@ class SceneCaptureManager {
                       Packet* required_packet = nullptr) noexcept;
   bool record_copy(ID3D12GraphicsCommandList*, ID3D12Resource*, ID3D12Resource*, bool, std::uint64_t, bool) noexcept;
   Submission begin_transaction(Device&, ID3D12CommandQueue*, std::uint16_t, bool) noexcept;
+  void publish_queued_wait(Device&) noexcept;
+  void release_queued_waits() noexcept;
   bool finish_transaction(std::uint64_t, bool refused, bool fatal = true) noexcept;
 
   SceneHandoff& handoff_;
@@ -508,12 +516,20 @@ class SceneCaptureManager {
   std::array<List, MaximumLists> lists_{};
   std::array<PublishedList, MaximumLists> published_lists_{};
   std::array<std::atomic<ID3D12Device*>, MaximumDevices> published_devices_{};
+  // Fence pointer and the timeline value already passed to queue Wait. The
+  // watchdog reads these without mutex_ so a stuck submit can still be released.
+  struct PublishedTimeline {
+    std::atomic<ID3D12Fence*> fence{nullptr};
+    std::atomic<std::uint64_t> waited{0};
+    std::atomic<std::uint64_t> released{0};
+  };
+  std::array<PublishedTimeline, MaximumDevices> published_timelines_{};
   std::atomic<std::uint32_t> deferred_sources_{}, deferred_uncertain_{}, deferred_origins_{};
   std::atomic<bool> deferred_recordings_{};
   DeferredRing<DeferredWork, 256> deferred_work_;
   std::atomic<bool> submission_gate_{true};
   std::atomic<std::uint64_t> contended_evidence_{}, contended_lifecycle_{}, contended_submissions_{};
-  std::atomic<std::uint64_t> unordered_submissions_{}, deferred_retirement_count_{}, gated_submissions_{};
+  std::atomic<std::uint64_t> unordered_submissions_{}, deferred_retirement_count_{}, gated_submissions_{}, released_waits_{};
   std::atomic<std::uint64_t> deferred_evidence_count_{};
   std::unordered_map<ID3D12GraphicsCommandList*, std::size_t> list_indices_;
   std::array<Packet, MaximumPackets> packets_{};

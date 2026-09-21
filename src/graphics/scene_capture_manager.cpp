@@ -131,7 +131,45 @@ void SceneCaptureManager::forwarded_unordered(ID3D12CommandQueue*) noexcept {
     submission_refused_completed(sources);
 }
 void SceneCaptureManager::set_submission_gate(bool open) noexcept {
-  submission_gate_.store(open, std::memory_order_release);
+  const bool was_open = submission_gate_.exchange(open, std::memory_order_acq_rel);
+  if (!open && was_open)
+    release_queued_waits();
+}
+void SceneCaptureManager::release_queued_waits() noexcept {
+  // Called on the watchdog thread while a simulator thread may hold mutex_
+  // inside the queue Wait that ReShade's immediate-list flush is stuck behind.
+  // ID3D12Fence::Signal from the CPU satisfies that GPU wait. It does not take
+  // either bridge mutex, and it signals only the value already passed to Wait.
+  constexpr auto removed = std::numeric_limits<std::uint64_t>::max();
+  for (auto& slot : published_timelines_) {
+    auto* fence = slot.fence.load(std::memory_order_acquire);
+    const auto waited = slot.waited.load(std::memory_order_acquire);
+    if (!fence || !waited)
+      continue;
+    auto released = slot.released.load(std::memory_order_acquire);
+    if (waited <= released)
+      continue;
+    const auto completed = fence->GetCompletedValue();
+    if (completed == removed || completed >= waited) {
+      slot.released.compare_exchange_strong(released, waited, std::memory_order_release, std::memory_order_relaxed);
+      continue;
+    }
+    if (FAILED(fence->Signal(waited)))
+      continue;
+    slot.released.store(waited, std::memory_order_release);
+    released_waits_.fetch_add(1, std::memory_order_relaxed);
+  }
+}
+void SceneCaptureManager::publish_queued_wait(Device& owner) noexcept {
+  const auto index = static_cast<std::size_t>(&owner - devices_.data());
+  if (index >= published_timelines_.size() || !owner.timeline || !owner.last_signal)
+    return;
+  auto& slot = published_timelines_[index];
+  slot.fence.store(owner.timeline, std::memory_order_release);
+  auto seen = slot.waited.load(std::memory_order_relaxed);
+  while (seen < owner.last_signal &&
+         !slot.waited.compare_exchange_weak(seen, owner.last_signal, std::memory_order_release, std::memory_order_relaxed)) {
+  }
 }
 bool SceneCaptureManager::submission_gate_open() const noexcept {
   return submission_gate_.load(std::memory_order_acquire);
@@ -284,7 +322,9 @@ bool SceneCaptureManager::register_device(std::uint64_t key, ID3D12Device* nativ
     item.native = native;
     item.timeline = timeline;
     item.active = true;
-    published_devices_[&item - devices_.data()].store(native, std::memory_order_release);
+    const auto index = static_cast<std::size_t>(&item - devices_.data());
+    published_devices_[index].store(native, std::memory_order_release);
+    published_timelines_[index].fence.store(timeline, std::memory_order_release);
     return true;
   }
   return false;
@@ -1519,6 +1559,8 @@ SceneCaptureManager::Submission SceneCaptureManager::begin_transaction(Device& o
     fail_device(owner);
     return {};
   }
+  if (owner.last_signal)
+    publish_queued_wait(owner);
   transaction_ = {++next_receipt_, &owner, queue, owner.last_signal + 1, packets, private_work};
   transaction_.session_generation = owner.session_generation;
   for (std::size_t index = 0; index < packets_.size(); ++index)
@@ -1942,6 +1984,7 @@ SceneCaptureManager::Statistics SceneCaptureManager::statistics() const noexcept
   result.unordered_submissions = unordered_submissions_.load(std::memory_order_relaxed);
   result.deferred_retirements = deferred_retirement_count_.load(std::memory_order_relaxed);
   result.gated_submissions = gated_submissions_.load(std::memory_order_relaxed);
+  result.released_waits = released_waits_.load(std::memory_order_relaxed);
   result.deferred_evidence = deferred_evidence_count_.load(std::memory_order_relaxed);
   return result;
 }
