@@ -11,6 +11,7 @@
 
 #include <array>
 #include <atomic>
+#include <climits>
 #include <mutex>
 #include <unordered_map>
 
@@ -61,6 +62,41 @@ class SceneCaptureManager {
     std::uint32_t height = 0, format = 0, mips = 0;
     const char* last_refusal = "not_observed";
   };
+  // Every writer of a global source-model wipe (Tracker::invalidate_all or
+  // clear) names itself. A skipped bounded wait is never a writer: skipped
+  // evidence and retirements are replayed under the lock instead. Only a
+  // recording the manager genuinely lost track of may wipe: an unregistered or
+  // unobserved list in a batch, an invalid recording, a lost deferred entry,
+  // an escaped or refused batch, and device or session ends.
+  enum class WipeSite : std::uint8_t {
+    none,
+    fail_device,
+    unordered_consumer,
+    deferred_sources,
+    unknown_lists_no_owner,
+    unknown_lists,
+    invalid_recording,
+    lease_overflow,
+    refused_transaction,
+    observer_disabled,
+    session_reset,
+    count
+  };
+  static constexpr const char* wipe_site_name(WipeSite site) noexcept {
+    constexpr const char* names[]{
+        "none",          "fail_device",       "unordered_consumer", "deferred_sources",    "unknown_lists_no_owner",
+        "unknown_lists", "invalid_recording", "lease_overflow",     "refused_transaction", "observer_disabled",
+        "session_reset"};
+    return static_cast<unsigned>(site) < static_cast<unsigned>(WipeSite::count) ? names[static_cast<unsigned>(site)] : "invalid_site";
+  }
+  // Publishers of the deferred source invalidation, one bit each; the bits
+  // pending at a deferred_sources wipe are copied into last_wipe_origins.
+  enum UncertaintyOrigin : std::uint32_t {
+    OriginEscapeUnordered = 1u << 0,
+    OriginRefusedCompleted = 1u << 1,
+    OriginRefusedContended = 1u << 2,
+    OriginDeferredOverflow = 1u << 3,
+  };
   struct Statistics {
     GpuTimingStatistics capture_copy_gpu;
     std::uint64_t captures = 0, submissions = 0, resets = 0;
@@ -76,6 +112,9 @@ class SceneCaptureManager {
     // Limited global reports (PassBegin, PassState, unsupported work) on a list
     // that never named a published camera source; nothing was retired.
     std::uint64_t ignored_source_recordings = 0;
+    // Limited reports that named a published camera source: that source's live
+    // model was retired to other while its retained RT history stayed.
+    std::uint64_t retired_source_recordings = 0;
     std::uint64_t invalid_draws = 0, source_lease_failures = 0, global_aliases = 0, recording_overflows = 0;
     std::uint32_t last_invalidation_reasons = 0;
     // Simulator-thread waits that hit their budget and skipped. evidence: barrier,
@@ -83,11 +122,20 @@ class SceneCaptureManager {
     // source registration; submissions: ExecuteCommandLists ordering fallbacks.
     // unordered: batches forwarded without a transaction because of the budget
     // or a closed gate. deferred_retirements: Reset/destroy retired later.
+    // deferred_evidence: barrier, target and report evidence replayed onto its
+    // recording later. deferred_overflows: the ring lost entries; every current
+    // recording was invalidated and the models wiped.
     std::uint64_t contended_evidence = 0, contended_lifecycle = 0, contended_submissions = 0;
     std::uint64_t unordered_submissions = 0, deferred_retirements = 0, gated_submissions = 0;
+    std::uint64_t deferred_evidence = 0, deferred_overflows = 0;
     // Consumer recordings forwarded without ordering by a bounded escape: the
     // source model was invalidated and the device kept, unlike a contended escape.
     std::uint64_t unordered_consumers = 0;
+    // Global source-model wipes by writer. last_wipe_us is steady_clock time.
+    std::uint64_t wipes = 0, last_wipe_us = 0;
+    std::array<std::uint64_t, static_cast<std::size_t>(WipeSite::count)> wipe_counts{};
+    WipeSite last_wipe_site = WipeSite::none;
+    std::uint32_t last_wipe_origins = 0;
   };
 
   explicit SceneCaptureManager(SceneHandoff& handoff) noexcept;
@@ -118,7 +166,8 @@ class SceneCaptureManager {
   void stop_source_tracking() noexcept;
   // Restore last observed RT models after an AA/upscaler wipe that left the
   // same camera allocations registered. Does not invent RT from a draw.
-  void rearm_source_states() noexcept;
+  // Returns how many sources were restored.
+  unsigned rearm_source_states() noexcept;
   void set_source_rate(std::uint32_t frames_per_second) noexcept;
   // Suppress NEW GPU capture work only. Source state/alias/draw observation,
   // immutable replay effects and existing packet/consumer ordering must continue
@@ -347,17 +396,43 @@ class SceneCaptureManager {
     std::uint32_t sources = 0, uncertain = 0;
     bool unrelated = true;
   };
-  struct DeferredRetirement {
+  // Work a simulator thread could not do because its bounded wait expired.
+  // Retirements and evidence share one ring so a Reset skipped after evidence
+  // on the same list is still replayed after it. Resource pointers are
+  // registry identities compared against the candidate table, never read.
+  struct DeferredWork {
+    enum class Kind : std::uint8_t { none, reset, destroy, legacy_barrier, enhanced_barrier, recording_report, target_report };
+    static constexpr UINT TruncatedTargets = UINT_MAX;
+    Kind kind = Kind::none;
     ID3D12GraphicsCommandList* native = nullptr;
     std::uint64_t generation = 0;
-    bool destroy = false;
+    D3D12_RESOURCE_BARRIER legacy{};
+    D3D12_TEXTURE_BARRIER enhanced{};
+    bool global = false;
+    std::uint32_t reasons = 0;
+    UINT target_count = 0;
+    std::array<ID3D12Resource*, 8> targets{};
+    std::array<std::uint64_t, 8> target_generations{};
   };
-  // Simulator-thread lock acquisition with a budget. Failure publishes a
-  // conservative source invalidation for every device and records contention.
+  struct TailBatch {
+    std::array<ID3D12CommandList*, 2> lists{};
+    unsigned count = 0;
+  };
+  // Simulator-thread lock acquisition with a budget. Failure records
+  // contention and returns false; the caller defers or skips its own work.
+  // Nothing global is invalidated. Success first drains the deferred ring so
+  // a skipped Reset or earlier evidence on the same list precedes this call.
   bool evidence_lock(std::unique_lock<std::mutex>& lock, std::uint32_t budget_us, std::atomic<std::uint64_t>& counter) noexcept;
-  void publish_source_uncertainty() noexcept;
+  void defer(const DeferredWork&) noexcept;
+  void publish_source_uncertainty(std::uint32_t origin, std::uint32_t devices) noexcept;
   void escape_unordered(ID3D12CommandQueue*, UINT, ID3D12CommandList* const*) noexcept;
-  void apply_deferred_retirements() noexcept;
+  void apply_deferred_work() noexcept;
+  void apply_legacy_barrier(List&, const D3D12_RESOURCE_BARRIER&) noexcept;
+  void apply_enhanced_barrier(List&, const D3D12_TEXTURE_BARRIER&) noexcept;
+  void apply_recording_report(List&, bool global, std::uint32_t reasons) noexcept;
+  void apply_target_report(List&, UINT count, ID3D12Resource* const*, const std::uint64_t*) noexcept;
+  void wipe(Device&, WipeSite, std::uint32_t origins = 0) noexcept;
+  void note_wipe(WipeSite, std::uint32_t origins = 0) noexcept;
   void retire_native_list(List&, bool destroy) noexcept;
   Device* device(std::uint64_t) noexcept;
   List* list(ID3D12GraphicsCommandList*) noexcept;
@@ -387,7 +462,9 @@ class SceneCaptureManager {
   SourceCandidate* source_candidate(ID3D12Resource*) noexcept;
   bool may_be_source(ID3D12Resource*) const noexcept;
   bool prepare_tail(Packet&, Device&) noexcept;
-  void record_queue_tail(Transaction&) noexcept;
+  // Records and closes this receipt's private tail captures under mutex_ and
+  // returns them for the caller to Execute after releasing it.
+  void record_queue_tail(Transaction&, TailBatch&) noexcept;
   bool compatible_queue(ID3D12CommandQueue*, const Device&) noexcept;
   bool capture_source(List&,
                       Device&,
@@ -409,18 +486,20 @@ class SceneCaptureManager {
   std::array<List, MaximumLists> lists_{};
   std::array<PublishedList, MaximumLists> published_lists_{};
   std::array<std::atomic<ID3D12Device*>, MaximumDevices> published_devices_{};
-  std::atomic<std::uint32_t> deferred_sources_{}, deferred_uncertain_{};
+  std::atomic<std::uint32_t> deferred_sources_{}, deferred_uncertain_{}, deferred_origins_{};
   std::atomic<bool> deferred_recordings_{};
-  DeferredRing<DeferredRetirement, 64> deferred_retirements_;
+  DeferredRing<DeferredWork, 256> deferred_work_;
   std::atomic<bool> submission_gate_{true};
   std::atomic<std::uint64_t> contended_evidence_{}, contended_lifecycle_{}, contended_submissions_{};
   std::atomic<std::uint64_t> unordered_submissions_{}, deferred_retirement_count_{}, gated_submissions_{};
+  std::atomic<std::uint64_t> deferred_evidence_count_{};
   std::unordered_map<ID3D12GraphicsCommandList*, std::size_t> list_indices_;
   std::array<Packet, MaximumPackets> packets_{};
   std::array<SourceCandidate, MaximumDevices * 128> sources_{};
   std::array<std::atomic<std::uint64_t>, MaximumDevices * 128> source_handles_{}, source_generations_{}, source_device_keys_{};
   std::array<std::atomic<std::uint64_t>, 16> source_filter_{};
   bool source_tracking_ = false;
+  bool draining_ = false;  // apply_deferred_work is running on the lock holder; nested calls return.
   bool capture_enabled_ = true;
   bool gpu_timing_enabled_ = false;
   std::uint32_t source_rate_ = kDefaultCameraRate;
