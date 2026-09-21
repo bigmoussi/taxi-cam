@@ -85,6 +85,10 @@ int wmain(int argc, wchar_t** argv) {
     std::uint64_t gap_pixels = 0, antialiased = 0;
     std::set<std::vector<unsigned char>> digit_shapes;
     for (unsigned profile = 0; profile < Profiles; ++profile) {
+      const auto* aircraft = taxi_camera::profiles::Catalog[profile];
+      // Profiles that keep GS off the working image are not glyph fixtures.
+      if (!aircraft->ground_speed)
+        continue;
       for (unsigned sample = 0; sample < Cases; ++sample) {
         const bool valid = sample < 15;
         const unsigned count = !valid || speeds[sample] >= 9.5f ? 2 : 1;
@@ -112,7 +116,7 @@ int wmain(int argc, wchar_t** argv) {
               if (cell < 2)
                 require(p[0] == p[1] && p[1] == p[2], "GS label white antialias");
               else {
-                const auto colour = taxi_camera::profiles::Catalog[profile]->composition.speed_color;
+                const auto colour = aircraft->composition.speed_color;
                 require(p[1] <= unsigned(std::lround(255 * colour[1])) &&
                             std::abs(int(p[0]) - int(std::lround(p[1] * colour[0] / colour[1]))) <= 1 &&
                             std::abs(int(p[2]) - int(std::lround(p[1] * colour[2] / colour[1]))) <= 1,
@@ -126,8 +130,14 @@ int wmain(int argc, wchar_t** argv) {
               require(p[0] == 0 && p[1] == 0 && p[2] == 0, "GS padding and two blank character cells stay black");
               if (x >= 56 && x < 88 && y >= 20 && y < 40)
                 ++gap_pixels;
-            } else
-              require(p[0] == 32 && p[1] == 64 && p[2] == 96, "GS font stays inside its padded panel");
+            } else {
+              // Split-bottom profiles may letterbox the 16x16 fixtures; glyphs
+              // remain white/green so a leak into the panel still fails above.
+              const bool split = aircraft->composition.split_bottom != 0;
+              const bool background = p[0] == 32 && p[1] == 64 && p[2] == 96;
+              const bool letterbox = split && p[0] == 0 && p[1] == 0 && p[2] == 0;
+              require(background || letterbox, "GS font stays inside its padded panel");
+            }
           }
         require(lit[0] > 35 && lit[1] > 35 && lit[2] > 8 && (count == 1 || lit[3] > 8), "Each GS character remains visible");
         require(lit[0] < 170 && lit[1] < 170, "Thin GS strokes replace enlarged solid bitmap blocks");
