@@ -230,6 +230,36 @@ void pass_other_keeps_retained_rt() {
   state_is(tracker, nose, Model::legacy_rt, true);
 }
 
+void retire_live_models_keeps_retained_rt() {
+  // An escaped batch: every live model retires to other (never unknown, so no
+  // CaptureProgress stall), retained_rt survives, and the in-place rearm puts
+  // the RT models back with only the draw evidence lost.
+  Tracker tracker;
+  require(tracker.register_source(nose, Model::legacy_rt) && tracker.register_source(tail, Model::enhanced_rt),
+          "retire pair registration refused");
+  require(tracker.apply(record({{nose, Kind::legacy_rt}, {nose, Kind::draw}, {tail, Kind::enhanced_rt}, {tail, Kind::draw}})),
+          "retire RT setup refused");
+  tracker.retire_live_models();
+  state_is(tracker, nose, Model::other, false);
+  state_is(tracker, tail, Model::other, false);
+  require(tracker.rearm_retained_rt() == 2, "retire_live_models cleared retained_rt");
+  state_is(tracker, nose, Model::legacy_rt, false);
+  state_is(tracker, tail, Model::enhanced_rt, false);
+  require(tracker.apply(record({{nose, Kind::draw}})), "draw after in-place rearm refused");
+  state_is(tracker, nose, Model::legacy_rt, true);
+  // A source that had genuinely left RT stays other: nothing is resurrected.
+  require(tracker.apply(record({{tail, Kind::other}})), "explicit leave-RT refused");
+  tracker.retire_live_models();
+  require(tracker.rearm_retained_rt() == 1, "retire rearm resurrected a source that left RT");
+  state_is(tracker, nose, Model::legacy_rt, false);
+  state_is(tracker, tail, Model::other, false);
+  // Unregistered slots stay empty: a later registration starts from its own model.
+  Tracker empty;
+  empty.retire_live_models();
+  require(empty.rearm_retained_rt() == 0 && empty.register_source(nose, Model::unknown), "retire touched an empty slot");
+  state_is(empty, nose, Model::unknown, false);
+}
+
 void barrier_other_clears_retained_rt() {
   Tracker tracker;
   require(tracker.register_source(nose, Model::legacy_rt), "barrier other registration refused");
@@ -355,6 +385,7 @@ int main() {
   invalidation();
   retained_rt_rearm_after_aa_wipe();
   pass_other_keeps_retained_rt();
+  retire_live_models_keeps_retained_rt();
   barrier_other_clears_retained_rt();
   recording_bounds();
   interleaved_draw_compression();

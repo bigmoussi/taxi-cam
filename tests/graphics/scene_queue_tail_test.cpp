@@ -145,28 +145,50 @@ void run() {
   require(!queue.signals && !queue.waits, "Unrelated submission queues no timeline operations");
   const taxi_camera::source_state::Key source{0x1234, 1};
   require(owner.source_states.register_source(source, taxi_camera::source_state::Model::legacy_rt), "Seed ordered source-state evidence");
+  {
+    taxi_camera::source_state::Recording seed;
+    require(seed.append({source, taxi_camera::source_state::Effect::Kind::draw}) && owner.source_states.apply(seed) &&
+                owner.source_states.state(source).drawn,
+            "Seed draw evidence on the fixture source");
+  }
   recording.source_touched = true;
+  const auto escape_before = manager->statistics();
   held_lock(known, false, true);
   manager->apply_deferred();
-  require(owner.source_states.state(source).model == taxi_camera::source_state::Model::unknown && !owner.failed,
-          "A source recording escaped within budget must invalidate the source model after its forward");
+  // Part 10: an escaped source recording retires the live model in place and
+  // rearms retained_rt on the same drain; only the draw evidence is lost. No
+  // Tracker::invalidate_all, so CaptureProgress has nothing to wait 500 ms for.
+  {
+    const auto state = owner.source_states.state(source);
+    const auto after = manager->statistics();
+    require(state.model == taxi_camera::source_state::Model::legacy_rt && !state.drawn && !owner.failed,
+            "A source recording escaped within budget must retire and rearm the source model in place after its forward");
+    require(after.wipes == escape_before.wipes && after.source_retirements == escape_before.source_retirements + 1 &&
+                (after.last_retirement_origins & Manager::OriginRefusedCompleted) &&
+                after.retirement_origin_counts[1] == escape_before.retirement_origin_counts[1] + 1 &&
+                after.retirement_restored == escape_before.retirement_restored + 1,
+            "An escaped source recording did not count one scoped retirement through refused_completed");
+  }
   require(!queue.signals && !queue.waits, "An escaped batch queued a timeline operation");
-  require(owner.source_states.rearm_retained_rt() == 1, "Restore source fixture after the escape");
+  require(owner.source_states.rearm_retained_rt() == 0, "The in-place rearm left a retained RT model unrestored");
   recording.source_touched = false;
   recording.packets = 1;
   held_lock(known, false, true);
   recording.packets = 0;
   require(!queue.signals && !queue.waits, "An escaped capture batch queued a timeline operation");
   // A consumer recording escaped by OUR expired budget keeps the device: the
-  // source model is invalidated and counted, unlike a helper-contended escape.
+  // source model is retired and rearmed in place and counted, unlike a
+  // helper-contended escape, which still fails the device.
   recording.consumer = true;
   held_lock(known, false, true);
   manager->apply_deferred();
   require(!owner.failed && manager->statistics().unordered_consumers == 1,
           "A budget-expiry escape of a consumer recording failed the device for the session");
-  require(owner.source_states.state(source).model == taxi_camera::source_state::Model::unknown,
-          "A budget-expiry consumer escape must still invalidate the source model");
-  require(owner.source_states.rearm_retained_rt() == 1, "Restore source fixture after the consumer escape");
+  require(owner.source_states.state(source).model == taxi_camera::source_state::Model::legacy_rt &&
+              manager->statistics().wipes == escape_before.wipes &&
+              (manager->statistics().last_retirement_origins & Manager::OriginUnorderedConsumer),
+          "A budget-expiry consumer escape wiped the source model instead of retiring it in place");
+  require(owner.source_states.rearm_retained_rt() == 0, "The consumer-escape rearm left a retained RT model unrestored");
   ordered(known, true);
   recording.consumer = false;
   recording.source_touched = true;
@@ -182,21 +204,28 @@ void run() {
   held_lock(known, false, true);
   recording.awaiting_native_reset = false;
   manager->apply_deferred();
-  require(owner.source_states.rearm_retained_rt() == 1, "Restore source fixture after the unobserved escape");
+  require(owner.source_states.state(source).model == taxi_camera::source_state::Model::legacy_rt &&
+              owner.source_states.rearm_retained_rt() == 0,
+          "An escaped unobserved recording was not retired and rearmed in place");
   const auto wipes_before_unknown = manager->statistics().wipes;
+  const auto retirements_before_unknown = manager->statistics().source_retirements;
   held_lock(unknown, true, true);
   manager->apply_deferred();
-  require(owner.source_states.state(source).model == taxi_camera::source_state::Model::unknown && !owner.failed,
-          "Unknown and unobserved submissions retain conservative source invalidation");
-  require(manager->statistics().wipes == wipes_before_unknown + 1 &&
-              manager->statistics().last_wipe_site == Manager::WipeSite::deferred_sources &&
-              (manager->statistics().last_wipe_origins & Manager::OriginRefusedCompleted),
-          "An escaped unknown list did not name its wipe site and origin");
+  // An escaped batch with an unregistered list is a bounded escape like any
+  // other: its recordings were never applied, so the retained RT model is the
+  // last positively observed one and is restored in place.
+  require(owner.source_states.state(source).model == taxi_camera::source_state::Model::legacy_rt && !owner.failed,
+          "An escaped unknown list wiped the source model instead of retiring it in place");
+  require(manager->statistics().wipes == wipes_before_unknown &&
+              manager->statistics().source_retirements == retirements_before_unknown + 1 &&
+              (manager->statistics().last_retirement_origins & Manager::OriginRefusedCompleted),
+          "An escaped unknown list did not name its retirement origin");
   require(queue.signals == 3 && queue.waits == 2, "Unobserved recordings never invent a receipt");
-  require(owner.source_states.rearm_retained_rt() == 1, "Restore source fixture before the ordered unknown-list check");
   ordered(unknown, false);
+  // The ordered path still has the list in hand and knows nothing about its
+  // recording: this remains a genuine wipe through unknown_lists_no_owner.
   require(owner.source_states.state(source).model == taxi_camera::source_state::Model::unknown &&
-              manager->statistics().wipes == wipes_before_unknown + 2 &&
+              manager->statistics().wipes == wipes_before_unknown + 1 &&
               manager->statistics().last_wipe_site == Manager::WipeSite::unknown_lists_no_owner,
           "An ordered batch with an unregistered list did not wipe through unknown_lists_no_owner");
 
@@ -364,16 +393,25 @@ void run() {
       "Private composition cannot wait for native tail metadata lock");
   manager->apply_deferred();
   require(!owner.failed, "Source-only refusals recover without permanently failing capture");
-  require(owner.source_states.rearm_retained_rt() == 1, "Restore source fixture before completion-order regression");
+  // The legacy contended refusal above published refused_contended: retired
+  // and rearmed in place, so nothing is left for a later rearm to restore.
+  require(owner.source_states.state(source).model == taxi_camera::source_state::Model::legacy_rt &&
+              (manager->statistics().last_retirement_origins & Manager::OriginRefusedContended) &&
+              owner.source_states.rearm_retained_rt() == 0,
+          "A legacy contended refusal wiped the source model instead of retiring it in place");
+  const auto retirements_before_completion = manager->statistics().source_retirements;
   const auto post_token =
       manager->submission_refused_batch(native_queue, taxi_camera::engine_hook::queue_submit::Refusal::contended_submission, 1, batch);
   manager->apply_deferred();
-  require(owner.source_states.state(source).model == taxi_camera::source_state::Model::legacy_rt,
+  require(owner.source_states.state(source).model == taxi_camera::source_state::Model::legacy_rt &&
+              manager->statistics().source_retirements == retirements_before_completion,
           "Source refusal is not prematurely consumed before native forward");
   manager->submission_refused_completed(post_token);
   manager->apply_deferred();
-  require(owner.source_states.state(source).model == taxi_camera::source_state::Model::unknown,
-          "Source completion invalidates proof after the exact native batch returns");
+  require(owner.source_states.state(source).model == taxi_camera::source_state::Model::legacy_rt &&
+              manager->statistics().source_retirements == retirements_before_completion + 1 &&
+              (manager->statistics().last_retirement_origins & Manager::OriginRefusedCompleted),
+          "Source completion did not retire the proof in place after the exact native batch returned");
 
   // Reproduce the classification-to-notification gap: mark the exact recording,
   // pause before its wake flag is posted, then Reset before deferred processing.

@@ -92,7 +92,7 @@ void log_startup(const win::Status& status, const StartupTiming& timing, const c
   log_status(status, detail);
 }
 void log_contention(const win::Status& status, const win::GraphicsStatus& graphics, const scene_runtime::Snapshot& output) {
-  char detail[1024];
+  char detail[1536];
   auto used = static_cast<std::size_t>(std::snprintf(
       detail, sizeof(detail),
       "Render-thread contention: armed=%u pulse=%llu queue_calls=%llu queue_contended=%llu manager_evidence=%llu "
@@ -100,7 +100,7 @@ void log_contention(const win::Status& status, const win::GraphicsStatus& graphi
       "deferred_overflows=%llu deferred_lifecycle=%llu "
       "runtime_writes=%llu watchdog_trips=%u last_stall_ms=%llu notifications=%u/%llu hook_failures=%llu "
       "failure_rate_peak=%llu admission_halted=%u wipes=%llu last_wipe=%s unordered_consumers=%llu contended_invalidations=%llu "
-      "unobserved_admissions=%llu",
+      "unobserved_admissions=%llu source_retirements=%llu retirement_restored=%llu last_retirement=0x%x",
       graphics.armed, static_cast<unsigned long long>(graphics.frame_pulse), static_cast<unsigned long long>(graphics.queue_calls),
       static_cast<unsigned long long>(graphics.queue_contended), static_cast<unsigned long long>(output.capture.contended_evidence),
       static_cast<unsigned long long>(output.capture.contended_lifecycle),
@@ -117,15 +117,27 @@ void log_contention(const win::Status& status, const win::GraphicsStatus& graphi
       graphics.admission_halted, static_cast<unsigned long long>(output.capture.wipes),
       SceneCaptureManager::wipe_site_name(output.capture.last_wipe_site),
       static_cast<unsigned long long>(output.capture.unordered_consumers),
-      static_cast<unsigned long long>(graphics.contended_invalidations), static_cast<unsigned long long>(graphics.unobserved_admissions)));
-  for (unsigned i = 0; i < graphics.contention.size() && used < sizeof(detail); ++i) {
+      static_cast<unsigned long long>(graphics.contended_invalidations), static_cast<unsigned long long>(graphics.unobserved_admissions),
+      static_cast<unsigned long long>(output.capture.source_retirements),
+      static_cast<unsigned long long>(output.capture.retirement_restored), output.capture.last_retirement_origins));
+  const auto append = [&](const char* prefix, const char* name, std::uint64_t value) {
+    if (used >= sizeof(detail))
+      return;
     const auto written =
-        std::snprintf(detail + used, sizeof(detail) - used, " %s=%llu", win::contention_site_name(static_cast<win::ContentionSite>(i)),
-                      static_cast<unsigned long long>(graphics.contention[i]));
-    if (written < 0 || static_cast<std::size_t>(written) >= sizeof(detail) - used)
-      break;
-    used += static_cast<std::size_t>(written);
+        std::snprintf(detail + used, sizeof(detail) - used, " %s%s=%llu", prefix, name, static_cast<unsigned long long>(value));
+    if (written > 0 && static_cast<std::size_t>(written) < sizeof(detail) - used)
+      used += static_cast<std::size_t>(written);
+    else
+      used = sizeof(detail);
+  };
+  // Per-origin deferred_sources wipes and scoped retirements: which publisher
+  // still wipes, and which one now retires and rearms in place.
+  for (std::size_t bit = 0; bit < SceneCaptureManager::OriginCount; ++bit) {
+    append("wipe_", SceneCaptureManager::uncertainty_origin_name(bit), output.capture.wipe_origin_counts[bit]);
+    append("retire_", SceneCaptureManager::uncertainty_origin_name(bit), output.capture.retirement_origin_counts[bit]);
   }
+  for (unsigned i = 0; i < graphics.contention.size(); ++i)
+    append("", win::contention_site_name(static_cast<win::ContentionSite>(i)), graphics.contention[i]);
   log_status(status, detail);
 }
 // Dedicated thread: reads counters, never takes a bridge lock, and flips the
@@ -273,8 +285,22 @@ DWORD run_impl() {
   struct WipeTrace {
     std::uint64_t wipes{}, evidence{}, lifecycle{}, submit{}, unordered{}, unordered_consumers{}, deferred_retirements{};
     std::uint64_t deferred_evidence{}, unknown_lists{}, invalid_recordings{}, retired_recordings{}, registry_recording{};
-    std::uint64_t contended_invalidations{};
+    std::uint64_t contended_invalidations{}, source_retirements{}, retirement_restored{};
   } wipe_trace;
+  const auto log_retirement = [&](const win::Status& at, const scene_runtime::Snapshot& output) {
+    const auto& capture = output.capture;
+    char detail[320];
+    std::snprintf(detail, sizeof(detail),
+                  "Source-state retire: n=%llu origins=0x%x restored=+%llu tail=%s deferred_retirements=+%llu manager_submit=+%llu "
+                  "unordered=+%llu unordered_consumers=+%llu",
+                  static_cast<unsigned long long>(capture.source_retirements), capture.last_retirement_origins,
+                  static_cast<unsigned long long>(capture.retirement_restored - wipe_trace.retirement_restored), capture.tail_status,
+                  static_cast<unsigned long long>(capture.deferred_retirements - wipe_trace.deferred_retirements),
+                  static_cast<unsigned long long>(capture.contended_submissions - wipe_trace.submit),
+                  static_cast<unsigned long long>(capture.unordered_submissions - wipe_trace.unordered),
+                  static_cast<unsigned long long>(capture.unordered_consumers - wipe_trace.unordered_consumers));
+    log_status(at, detail);
+  };
   const auto log_wipe = [&](const win::Status& at, const scene_runtime::Snapshot& output, const win::GraphicsStatus& graphics) {
     const auto& capture = output.capture;
     const auto registry_recording = graphics.contention[static_cast<unsigned>(win::ContentionSite::registry_recording)];
@@ -314,7 +340,9 @@ DWORD run_impl() {
                   capture.invalid_source_recordings,
                   capture.retired_source_recordings,
                   graphics.contention[static_cast<unsigned>(win::ContentionSite::registry_recording)],
-                  graphics.contended_invalidations};
+                  graphics.contended_invalidations,
+                  capture.source_retirements,
+                  capture.retirement_restored};
   };
   for (;;) {
     control.refresh(mailbox);
@@ -765,6 +793,8 @@ DWORD run_impl() {
     const auto graphics = win::graphics_status();
     if (graphics_diagnostics && output.capture.wipes != wipe_trace.wipes)
       log_wipe(status, output, graphics);
+    if (graphics_diagnostics && output.capture.source_retirements != wipe_trace.source_retirements)
+      log_retirement(status, output);
     remember_wipe_trace(output, graphics);
     status = {};
     status.heartbeat = now;
@@ -941,7 +971,7 @@ DWORD run_impl() {
           "draws=%llu unknown_lists=%llu invalid_recordings=%llu scoped_invalidations=%llu ignored_recordings=%llu "
           "pass_no_rts=%llu pass_unresolved_rts=%llu invalid_draws=%llu "
           "lease_failures=%llu global_aliases=%llu overflows=%llu reasons=0x%x capture_stalled=%u "
-          "wipes=%llu last_wipe=%s retired_recordings=%llu unordered_consumers=%llu "
+          "wipes=%llu last_wipe=%s retired_recordings=%llu unordered_consumers=%llu retirements=%llu "
           "barrier_max=%llu barrier_truncated=%llu probe_ms=%.3f queries=%llu query_ms=%.3f read_ms=%.3f "
           "allocation_queries=%llu page_queries=%llu region_queries=%llu aa_ms=%.3f "
           "inspections=%llu updates=%llu clear_states=%llu | %.256s",
@@ -966,6 +996,7 @@ DWORD run_impl() {
           static_cast<unsigned long long>(output.capture.wipes), SceneCaptureManager::wipe_site_name(output.capture.last_wipe_site),
           static_cast<unsigned long long>(output.capture.retired_source_recordings),
           static_cast<unsigned long long>(output.capture.unordered_consumers),
+          static_cast<unsigned long long>(output.capture.source_retirements),
           static_cast<unsigned long long>(boundaries.maximum_legacy_batch),
           static_cast<unsigned long long>(boundaries.metadata_truncated_calls), scene.observer_last_ms,
           static_cast<unsigned long long>(scene.performance.query_calls), scene.performance.query_ms, scene.performance.read_ms,

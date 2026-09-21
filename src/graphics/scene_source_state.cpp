@@ -141,6 +141,12 @@ void Tracker::invalidate_all() noexcept {
     slot.state = {};
 }
 
+void Tracker::retire_live_models() noexcept {
+  for (auto& slot : sources_)
+    if (slot.key.handle)
+      slot.state = {Model::other, false};
+}
+
 unsigned Tracker::rearm_retained_rt() noexcept {
   unsigned count = 0;
   for (auto& slot : sources_) {

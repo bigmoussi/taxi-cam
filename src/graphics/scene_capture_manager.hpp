@@ -67,7 +67,9 @@ class SceneCaptureManager {
   // evidence and retirements are replayed under the lock instead. Only a
   // recording the manager genuinely lost track of may wipe: an unregistered or
   // unobserved list in a batch, an invalid recording, a lost deferred entry,
-  // an escaped or refused batch, and device or session ends.
+  // and device or session ends. An escaped or refused batch retires the live
+  // models in place instead (retire_sources); unordered_consumer and the
+  // bounded deferred_sources origins remain in the enum for old logs only.
   enum class WipeSite : std::uint8_t {
     none,
     fail_device,
@@ -91,12 +93,24 @@ class SceneCaptureManager {
   }
   // Publishers of the deferred source invalidation, one bit each; the bits
   // pending at a deferred_sources wipe are copied into last_wipe_origins.
+  // Only GlobalOrigins still wipe (Tracker::invalidate_all): a lost ring entry
+  // may have been a Reset of any recording. The bounded-escape origins mark
+  // the device's live models other, keep retained_rt and rearm it in place
+  // (retire_sources): an escaped batch never saw a different RT model than the
+  // last positively observed one, so the next ordered draw captures again.
   enum UncertaintyOrigin : std::uint32_t {
     OriginEscapeUnordered = 1u << 0,
     OriginRefusedCompleted = 1u << 1,
     OriginRefusedContended = 1u << 2,
     OriginDeferredOverflow = 1u << 3,
+    OriginUnorderedConsumer = 1u << 4,
   };
+  static constexpr std::size_t OriginCount = 5;
+  static constexpr std::uint32_t GlobalOrigins = OriginDeferredOverflow;
+  static constexpr const char* uncertainty_origin_name(std::size_t bit) noexcept {
+    constexpr const char* names[]{"escape_unordered", "refused_completed", "refused_contended", "deferred_overflow", "unordered_consumer"};
+    return bit < OriginCount ? names[bit] : "invalid_origin";
+  }
   struct Statistics {
     GpuTimingStatistics capture_copy_gpu;
     std::uint64_t captures = 0, submissions = 0, resets = 0;
@@ -136,6 +150,13 @@ class SceneCaptureManager {
     std::array<std::uint64_t, static_cast<std::size_t>(WipeSite::count)> wipe_counts{};
     WipeSite last_wipe_site = WipeSite::none;
     std::uint32_t last_wipe_origins = 0;
+    // deferred_sources wipes by publisher bit: names the origin that still wipes.
+    std::array<std::uint64_t, OriginCount> wipe_origin_counts{};
+    // Scoped retirements (retire_live_models + rearm_retained_rt in place) by
+    // origin bit, with how many RT models the in-place rearm restored in total.
+    std::uint64_t source_retirements = 0, retirement_restored = 0, last_retirement_us = 0;
+    std::array<std::uint64_t, OriginCount> retirement_origin_counts{};
+    std::uint32_t last_retirement_origins = 0;
   };
 
   explicit SceneCaptureManager(SceneHandoff& handoff) noexcept;
@@ -433,6 +454,7 @@ class SceneCaptureManager {
   void apply_target_report(List&, UINT count, ID3D12Resource* const*, const std::uint64_t*) noexcept;
   void wipe(Device&, WipeSite, std::uint32_t origins = 0) noexcept;
   void note_wipe(WipeSite, std::uint32_t origins = 0) noexcept;
+  void retire_sources(Device&, std::uint32_t origins) noexcept;
   void retire_native_list(List&, bool destroy) noexcept;
   Device* device(std::uint64_t) noexcept;
   List* list(ID3D12GraphicsCommandList*) noexcept;

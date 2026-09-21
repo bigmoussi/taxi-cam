@@ -86,10 +86,31 @@ void SceneCaptureManager::note_wipe(WipeSite site, std::uint32_t origins) noexce
   stats_.last_wipe_site = site;
   stats_.last_wipe_origins = origins;
   stats_.last_wipe_us = steady_now_us();
+  for (std::size_t bit = 0; bit < OriginCount; ++bit)
+    if (origins & (1u << bit))
+      ++stats_.wipe_origin_counts[bit];
 }
 void SceneCaptureManager::wipe(Device& owner, WipeSite site, std::uint32_t origins) noexcept {
   owner.source_states.invalidate_all();
   note_wipe(site, origins);
+}
+void SceneCaptureManager::retire_sources(Device& owner, std::uint32_t origins) noexcept {
+  // The escaped batch's own recordings were never applied, so nothing here can
+  // have moved a model away from its last positively observed RT state. Retire
+  // the live models like a named-source pass report and restore that RT model
+  // now, on this lock holder, rather than after CaptureProgress::StallMs. The
+  // drawn flag is cleared, so the next ordered draw is the first capture.
+  owner.source_states.retire_live_models();
+  const auto restored = owner.source_states.rearm_retained_rt();
+  ++stats_.source_retirements;
+  stats_.retirement_restored += restored;
+  stats_.last_retirement_origins = origins;
+  stats_.last_retirement_us = steady_now_us();
+  for (std::size_t bit = 0; bit < OriginCount; ++bit)
+    if (origins & (1u << bit))
+      ++stats_.retirement_origin_counts[bit];
+  if (restored)
+    stats_.tail_status = "awaiting_ordered_source_state";
 }
 void SceneCaptureManager::escape_unordered(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists) noexcept {
   // Same shape as the PR 31 contended path: owned recordings are marked before
@@ -484,7 +505,7 @@ void SceneCaptureManager::apply_recording_refusal(std::uint32_t effects, bool fa
     if (fatal) {
       fail_device(devices_[index]);
     } else {
-      wipe(devices_[index], WipeSite::unordered_consumer);
+      retire_sources(devices_[index], OriginUnorderedConsumer);
       ++stats_.unordered_consumers;
     }
   }
@@ -507,8 +528,12 @@ void SceneCaptureManager::apply_deferred() noexcept {
       continue;
     if (failed & (1u << index))
       fail_device(owner);
-    else if (sources & (1u << index))
+    else if (!(sources & (1u << index)))
+      continue;
+    else if (origins & GlobalOrigins)
       wipe(owner, WipeSite::deferred_sources, origins);
+    else
+      retire_sources(owner, origins);
   }
 }
 
