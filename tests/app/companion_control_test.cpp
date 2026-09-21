@@ -11,6 +11,9 @@ void require(bool ok, const char* label) {
     throw std::runtime_error(label);
 }
 using namespace taxi_camera::standalone;
+using taxi_camera::NotificationReader;
+using taxi_camera::SimEvent;
+using taxi_camera::SimEventLog;
 void publish(Mailbox& owner, std::uint64_t beat, const Settings& settings) {
   require(owner.lock(1000), "Writer lock");
   owner.data()->owner_pid = GetCurrentProcessId();
@@ -60,6 +63,18 @@ int main() {
     settings.tail_inner = {0.375f, 0.875f};
     settings.guide_color = {0.125f, 0.5f, 0.875f};
     settings.speed_color = {0.25f, 0.75f, 0.375f};
+    settings.parked_rate = 8;
+    require(valid_settings(settings), "Adjusted parked floor is valid");
+    settings.parked_rate = 3;
+    require(!valid_settings(settings), "Parked floor below the schedule minimum is rejected");
+    settings.parked_rate = 0;
+    require(valid_settings(settings), "Parked floor 0 disables the floor and stays valid");
+    settings.parked_rate = 8;
+    settings.notifications = 0;
+    require(valid_settings(settings), "Notifications off is valid");
+    settings.notifications = 2;
+    require(!valid_settings(settings), "Notifications is a 0/1 flag");
+    settings.notifications = 0;
     settings.route_request = 12;
     settings.taxi_request = 7;
     settings.taxi_selected_mask = 3;
@@ -87,10 +102,30 @@ int main() {
     require(change.started && change.generation == 4, "New companion owner restarts setup despite reused serial");
     change = setup.observe(true, false, control.owner_pid() + 1, 2);
     require(change.stopped, "Disabled connection closes output without waiting for heartbeat timeout");
-    require(ProtocolVersion == 9 && control.settings().nose_dot == settings.nose_dot &&
+    require(ProtocolVersion == 12 && control.settings().nose_dot == settings.nose_dot &&
                 control.settings().tail_upper == settings.tail_upper && control.settings().tail_corner == settings.tail_corner &&
                 control.settings().tail_inner == settings.tail_inner,
-            "Protocol9 guide coordinates roundtrip");
+            "Protocol11 guide coordinates roundtrip");
+    require(control.settings().parked_rate == settings.parked_rate, "Protocol11 parked floor roundtrip");
+    require(control.settings().notifications == 0, "Protocol12 notification preference roundtrip");
+    {
+      // Protocol 12 status: the bridge's notification log travels in Status
+      // and the companion reader orders it by serial.
+      SimEventLog log;
+      log.publish(SimEvent::bridge_connected, 20000);
+      log.publish(SimEvent::cameras_ready, 20100);
+      require(owner.lock(1000), "Status lock");
+      log.snapshot(owner.data()->status.notifications);
+      owner.unlock();
+      require(reader.lock(1000), "Status read lock");
+      const auto wire = reader.data()->status.notifications;
+      reader.unlock();
+      NotificationReader companion;
+      std::array<SimEvent, 4> events{};
+      require(companion.take(wire, 20200, events.data(), events.size()) == 2 && events[0] == SimEvent::bridge_connected &&
+                  events[1] == SimEvent::cameras_ready,
+              "Protocol12 notification log roundtrip");
+    }
     require(control.settings().guide_color == settings.guide_color && control.settings().speed_color == settings.speed_color,
             "Independent marking and ground-speed colours roundtrip");
     require(control.settings().taxi_request == 7 && control.settings().taxi_selected_mask == 3 && control.settings().taxi_desired_mask == 2,
@@ -175,11 +210,13 @@ int main() {
     publish(owner, 17000, settings);
     control.refresh(reader);
     require(control.connected(17000), "Valid message restores connection");
-    require(owner.lock(1000), "Protocol mutation lock");
-    owner.data()->version = 8;
-    owner.unlock();
-    control.refresh(reader);
-    require(!control.connected(17000), "Old protocol8 is rejected by the protocol9 settings layout");
+    for (const std::uint32_t old_version : {9u, 10u, 11u}) {
+      require(owner.lock(1000), "Protocol mutation lock");
+      owner.data()->version = old_version;
+      owner.unlock();
+      control.refresh(reader);
+      require(!control.connected(17000), "Old protocol 9/10/11 is rejected by the protocol12 layout");
+    }
     require(owner.lock(1000), "Restore protocol lock");
     owner.data()->version = ProtocolVersion;
     owner.unlock();

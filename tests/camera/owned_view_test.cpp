@@ -22,6 +22,9 @@ constexpr std::uint64_t kBitmap = 0x700000;
 constexpr std::uint64_t kRecord = 0x800000;
 constexpr std::uint64_t kWrapper = 0x900000;
 constexpr std::uint64_t kResource = 0xa00000;
+constexpr std::uint64_t kRtRecord = 0xe00000;
+constexpr std::uint64_t kRtTable = 0xf00000;
+constexpr std::uint64_t kRtEntries = 0x1000000;
 constexpr std::uint64_t kControl = 0xb00000;
 constexpr std::uint64_t kId = 0x1122334455667788;
 std::uint32_t checks = 0;
@@ -119,6 +122,24 @@ struct Fixture {
     reader.word(kBitmap + 88, kRecord);
     reader.word(kRecord + 16, kWrapper);
     reader.word(kWrapper + 168, kResource);
+    // Render-target record resolution as the captured replay performs it: no
+    // per-subresource table, so the direct record at T+0x40 is used.
+    reader.word(kRecord + 0x48, 0);
+    reader.word(kRecord + 0x40, kRtRecord);
+    // Add-diffuse (664) and depth-stencil (712) slots are absent by default.
+    null_handle(kMaterial + 664);
+    null_handle(kMaterial + 712);
+  }
+  void null_handle(std::uint64_t address) {
+    reader.word(address, 0);
+    reader.word(address + 8, 0);
+    reader.permitted.emplace_back(address, 16);
+  }
+  // Route the diffuse record through a per-subresource table instead.
+  void table_record(std::uint64_t entry0) {
+    reader.word(kRecord + 0x48, kRtTable);
+    reader.word(kRtTable + 8, kRtEntries);
+    reader.word(kRtEntries, entry0);
   }
 
   OwnedViewCloseSnapshot run_close() {
@@ -183,7 +204,7 @@ void successful_and_pending() {
               complete.view_address == kView && complete.node_address == kNode && complete.camera_address == kCamera &&
               complete.view_index == 0 && complete.mode == 2 && complete.fov == 1.25f,
           "Full owned-view chain was not observed exactly");
-  require(complete.read_bytes == 518 && full.reader.reads.size() == 64, "Full trace read extent changed unexpectedly");
+  require(complete.read_bytes == 614 && full.reader.reads.size() == 72, "Full trace read extent changed unexpectedly");
   require(complete.dimensions == std::array<std::array<std::int32_t, 2>, 3>{{{768, 763}, {868, 863}, {968, 963}}} &&
               complete.flags == std::array<std::uint64_t, 2>{0x1234567890abcdefull, 0xfedcba0987654321ull},
           "Dimension pair order, signed scalar decoding or exact64-bit flag values changed");
@@ -247,6 +268,59 @@ void absent_output() {
   require(std::none_of(stale.reader.reads.begin(), stale.reader.reads.end(),
                        [](const auto& read) { return read.first == kControl + 0x400 || read.first == kBitmap + 88; }),
           "Stale bitmap generation permitted following its payload");
+}
+
+void render_target_records() {
+  // Direct record at T+0x40: the diffuse slot reports Bitmap, texture and record.
+  Fixture direct;
+  auto result = direct.run();
+  require(result.ready && result.resource_present && result.output_slots[0].bitmap && result.output_slots[0].texture &&
+              result.output_slots[0].render_target_record && result.output_slots[0].mask() == 7,
+          "Direct render-target record was not observed");
+  require(result.output_slots[1].mask() == 0 && result.output_slots[2].mask() == 0, "Absent slots reported an output");
+  // Per-subresource table: [T+0x48]->[+8]->[0] decides, the direct field is not read.
+  Fixture table;
+  table.table_record(kRtRecord);
+  result = table.run();
+  require(result.ready && result.output_slots[0].render_target_record, "Table-resolved render-target record was not observed");
+  require(std::none_of(table.reader.reads.begin(), table.reader.reads.end(), [](const auto& read) { return read.first == kRecord + 0x40; }),
+          "The direct record was read although a subresource table exists");
+  Fixture empty_table;
+  empty_table.table_record(0);
+  result = empty_table.run();
+  require(result.ready && result.resource_present && !result.output_slots[0].render_target_record,
+          "A null table entry was reported as a render-target record");
+  Fixture no_entries;
+  no_entries.reader.word(kRecord + 0x48, kRtTable);
+  no_entries.reader.word(kRtTable + 8, 0);
+  result = no_entries.run();
+  require(result.ready && !result.output_slots[0].render_target_record, "A table without entries was reported as a record");
+  // The retained fault state: resource present, pane-sized Bitmap, no record.
+  Fixture recordless;
+  recordless.reader.word(kRecord + 0x40, 0);
+  result = recordless.run();
+  require(result.ready && result.resource_present && result.output_dimensions == std::array<std::int32_t, 2>{736, 251} &&
+              result.output_slots[0].texture && !result.output_slots[0].render_target_record && result.output_slots[0].mask() == 3,
+          "A texture without a render-target record was not reported as such");
+  // A malformed table pointer refuses the snapshot rather than guessing.
+  Fixture malformed;
+  malformed.reader.word(kRecord + 0x48, kRtTable + 4);
+  result = malformed.run();
+  require(!result.complete && result.status == OwnedViewStatus::invalid_pointer, "A misaligned record table was followed");
+  // Other slots: Bitmap only, Bitmap plus texture, and a complete record.
+  Fixture others;
+  others.reader.handle(kMaterial + 664, 5, kBitmap + 0x1000);
+  others.reader.word(kBitmap + 0x1000 + 88, 0);
+  others.reader.handle(kMaterial + 712, 6, kBitmap + 0x2000);
+  others.reader.word(kBitmap + 0x2000 + 88, kRecord + 0x1000);
+  others.reader.word(kRecord + 0x1000 + 0x48, 0);
+  others.reader.word(kRecord + 0x1000 + 0x40, kRtRecord + 0x1000);
+  result = others.run();
+  require(result.ready && result.output_slots[1].mask() == 1 && result.output_slots[2].mask() == 7,
+          "Add-diffuse and depth-stencil slot observations were wrong");
+  // Nothing beyond the record pointer itself is dereferenced.
+  for (const auto& read : direct.reader.reads)
+    require(read.first < kRtRecord || read.first >= kRtRecord + 0x1000, "A render-target record was dereferenced");
 }
 
 void numeric_diagnostics() {
@@ -569,7 +643,7 @@ void close_only_contract() {
           "Close-only trace did not retain exactly its sixteen guarded fields");
   const auto trace = fixture.reader.reads;
   const auto full = fixture.run();
-  require(full.dimensions == result.dimensions && full.flags == result.flags && full.read_bytes == 518,
+  require(full.dimensions == result.dimensions && full.flags == result.flags && full.read_bytes == 614,
           "Close-only numeric fields differ from the full inspection");
 
   Fixture no_graph;
@@ -664,7 +738,7 @@ void close_only_contract() {
   require(malformed.run_close().status == OwnedViewStatus::invalid_request && malformed.reader.reads.empty(),
           "Close-only API read a malformed address");
   std::printf(
-      "Close trace:32 exact reads/258 bytes; full trace:64 exact reads/518 bytes. OS query counts not measured by synthetic reader.\n");
+      "Close trace:32 exact reads/258 bytes; full trace:72 exact reads/614 bytes. OS query counts not measured by synthetic reader.\n");
 }
 }  // namespace
 
@@ -673,6 +747,7 @@ int main() {
     close_only_contract();
     successful_and_pending();
     absent_output();
+    render_target_records();
     numeric_diagnostics();
     output_dimension_observations();
     mode_observations();

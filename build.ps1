@@ -309,6 +309,7 @@ if ($Validate) {
         @{Name='aircraft-profiles'; Sources=@('tests/app/aircraft_profiles_test.cpp','src/camera/view_resize.cpp')},
         @{Name='profile-selection'; Sources=@('tests/app/profile_selection_test.cpp')},
         @{Name='night-boost-migration'; Sources=@('tests/app/night_boost_migration_test.cpp')},
+        @{Name='notification-settings'; Sources=@('tests/app/notification_settings_test.cpp')},
         @{Name='companion-control'; Sources=@('tests/app/companion_control_test.cpp')},
         @{Name='startup-state'; Sources=@('tests/app/startup_state_test.cpp')},
         @{Name='camera-status'; Sources=@('tests/app/camera_status_test.cpp')},
@@ -339,6 +340,8 @@ if ($Validate) {
         @{Name='ground-speed-display'; Sources=@('tests/graphics/ground_speed_display_test.cpp')},
         @{Name='calibration'; Sources=@('tests/graphics/calibration_test.cpp')},
         @{Name='write-budget'; Sources=@('tests/graphics/write_budget_test.cpp')},
+        @{Name='freeze-guards'; Sources=@('tests/graphics/freeze_guards_test.cpp')},
+        @{Name='sim-messages'; Sources=@('tests/app/sim_messages_test.cpp')},
         @{Name='scene-handoff'; Sources=@('tests/graphics/scene_handoff_test.cpp','src/graphics/scene_handoff.cpp')},
         @{Name='source-state'; Sources=@('tests/graphics/scene_source_state_test.cpp','src/graphics/scene_source_state.cpp')},
         @{Name='queue-submit'; Sources=@('tests/hooks/queue_submit_observer_test.cpp','src/hooks/queue_submit_observer.cpp')}
@@ -423,7 +426,8 @@ if ($Validate) {
             'both native release queues and first-free view retirement admission','partial camera-pair cleanup and deferred startup with request cancellation',
             'nonblocking telemetry shutdown with retained worker ownership','private composition contention retry with retained leases and GPU pixels','nonblocking helper refusal and retained GPU submission ordering',
             'same-submit iniBuilds and FBW camera/calibration pixels after barrier-only lists and before mixed exit/consumer lists including first-list insertion, replay and subsequent native overwrite','exact RT exit proof including COMMON and SRV, pass and generation refusal','bounded display copy packets with fence-held source/target lifetime and mip preservation','prepared camera/calibration patches with nonblocking snapshots and manager timeline ordering','late display submission activity with unchanged automatic side ordering',
-            'native imports and header dependency closure','embedded multi-resolution application icon and Windows shell extraction','release selection, download integrity and updater handoff guards'));
+            'native imports and header dependency closure','embedded multi-resolution application icon and Windows shell extraction','release selection, download integrity and updater handoff guards',
+            'bounded simulator-thread lock budgets, deferred lifecycle ring and presentation watchdog','unordered submission notification and presentation pulse statistics','tray notification events, toast policy, edges, rate limit and IPC log','notification setting migration from [messages] in_simulator'));
         gpuValidation=[ordered]@{hardware=$(if ($WarpOnly) { 'not-run' } else { 'passed' });warp='passed'};
         simulatorVerified=$false
     } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $out 'validation.json') -Encoding utf8

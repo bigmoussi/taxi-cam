@@ -61,6 +61,9 @@ struct Snapshot {
   std::uint64_t completed_frames = 0;
   std::uint64_t stamps = 0;
   std::uint64_t state_skips = 0;
+  // Close/barrier-time PFD writes skipped because the runtime lock was held
+  // (by the bridge worker's compose/prepare) past the simulator thread's budget.
+  std::uint64_t contended_writes = 0;
   std::uint64_t stale_frames = 0;
   std::uint32_t patch_requests = 0;
   std::uint64_t patch_draws = 0;

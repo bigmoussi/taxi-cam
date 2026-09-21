@@ -84,19 +84,37 @@ void run() {
   recording.native = known;
   recording.device_key = 7;
   recording.object_generation = 19;
+  recording.session_generation = owner.session_generation;  // A current-session recording, not a stale one.
   manager->list_indices_.emplace(known, 0);
   manager->publish_list(recording);
   auto& helper_recording = manager->lists_[1];
   helper_recording.native = helper_list;
   helper_recording.device_key = 7;
   helper_recording.object_generation = 20;
+  helper_recording.session_generation = owner.session_generation;
   manager->list_indices_.emplace(helper_list, 1);
   manager->publish_list(helper_recording);
   Discovery discovery{manager.get()};
   require(manager->set_unknown_list_observer(discover, &discovery), "Install CPU-only discovery callback");
-  const auto blocked = [&](ID3D12GraphicsCommandList* list, bool should_bypass, bool expect_receipt, bool expect_discovery) {
+  // Uncontended: related recordings open an exact ordered transaction.
+  const auto ordered = [&](ID3D12GraphicsCommandList* list, bool expect_receipt) {
+    manager->publish_list(recording);
+    ID3D12CommandList* batch[]{list};
+    const auto receipt = manager->before_submission(native_queue, 1, batch);
+    if (receipt)
+      manager->after_submission(native_queue, receipt);
+    else
+      manager->forwarded_unordered(native_queue);  // The wrapper pairs every zero receipt.
+    require((receipt != 0) == expect_receipt, "Related recordings retain exact transaction admission");
+  };
+  // Another thread holds submission serialization for longer than the
+  // simulator thread's budget. The submit thread must return within that
+  // budget: unrelated recordings bypass, everything else escapes without a
+  // receipt (no Wait is queued) and publishes its invalidation after the forward.
+  const auto held_lock = [&](ID3D12GraphicsCommandList* list, bool expect_discovery, bool expect_escape) {
     manager->publish_list(recording);
     discovery.called.store(false, std::memory_order_release);
+    const auto before = manager->statistics();
     std::unique_lock held(manager->submission_mutex_);
     std::promise<void> entered;
     auto started = entered.get_future();
@@ -106,40 +124,217 @@ void run() {
       const auto receipt = manager->before_submission(native_queue, 1, batch);
       if (receipt)
         manager->after_submission(native_queue, receipt);
+      else
+        manager->forwarded_unordered(native_queue);
       return receipt;
     });
     started.wait();
-    const bool returned_while_locked = completed.wait_for(std::chrono::milliseconds(100)) == std::future_status::ready;
+    const bool returned_while_locked = completed.wait_for(std::chrono::milliseconds(200)) == std::future_status::ready;
     const bool discovered_while_locked = discovery.called.load(std::memory_order_acquire);
     held.unlock();  // Always release before checking, including regression failure.
     const auto receipt = completed.get();
-    require(returned_while_locked == should_bypass, "Only known unrelated recordings bypass held submission serialization");
-    require((receipt != 0) == expect_receipt, "Related recordings retain exact transaction admission");
+    const auto after = manager->statistics();
+    require(returned_while_locked, "A simulator thread was parked on held submission serialization past its budget");
+    require(receipt == 0, "A batch that could not be ordered within budget invented a receipt");
     require(discovered_while_locked == expect_discovery, "Unknown discovery runs before acquiring submission serialization");
+    require((after.unordered_submissions == before.unordered_submissions + 1) == expect_escape &&
+                (after.contended_submissions == before.contended_submissions + 1) == expect_escape,
+            "Escaped ordering was not counted exactly once, or an unrelated bypass was counted as contention");
   };
-  blocked(known, true, false, false);
+  held_lock(known, false, false);
   require(!queue.signals && !queue.waits, "Unrelated submission queues no timeline operations");
-  recording.consumer = true;
-  blocked(known, false, true, false);
-  recording.consumer = false;
+  const taxi_camera::source_state::Key source{0x1234, 1};
+  require(owner.source_states.register_source(source, taxi_camera::source_state::Model::legacy_rt), "Seed ordered source-state evidence");
+  {
+    taxi_camera::source_state::Recording seed;
+    require(seed.append({source, taxi_camera::source_state::Effect::Kind::draw}) && owner.source_states.apply(seed) &&
+                owner.source_states.state(source).drawn,
+            "Seed draw evidence on the fixture source");
+  }
   recording.source_touched = true;
-  blocked(known, false, true, false);
+  const auto escape_before = manager->statistics();
+  held_lock(known, false, true);
+  manager->apply_deferred();
+  // Part 10: an escaped source recording retires the live model in place and
+  // rearms retained_rt on the same drain; only the draw evidence is lost. No
+  // Tracker::invalidate_all, so CaptureProgress has nothing to wait 500 ms for.
+  {
+    const auto state = owner.source_states.state(source);
+    const auto after = manager->statistics();
+    require(state.model == taxi_camera::source_state::Model::legacy_rt && !state.drawn && !owner.failed,
+            "A source recording escaped within budget must retire and rearm the source model in place after its forward");
+    require(after.wipes == escape_before.wipes && after.source_retirements == escape_before.source_retirements + 1 &&
+                (after.last_retirement_origins & Manager::OriginRefusedCompleted) &&
+                after.retirement_origin_counts[1] == escape_before.retirement_origin_counts[1] + 1 &&
+                after.retirement_restored == escape_before.retirement_restored + 1,
+            "An escaped source recording did not count one scoped retirement through refused_completed");
+  }
+  require(!queue.signals && !queue.waits, "An escaped batch queued a timeline operation");
+  require(owner.source_states.rearm_retained_rt() == 0, "The in-place rearm left a retained RT model unrestored");
   recording.source_touched = false;
   recording.packets = 1;
-  blocked(known, false, true, false);
+  held_lock(known, false, true);
+  recording.packets = 0;
+  require(!queue.signals && !queue.waits, "An escaped capture batch queued a timeline operation");
+  // A consumer recording escaped by OUR expired budget keeps the device: the
+  // source model is retired and rearmed in place and counted, unlike a
+  // helper-contended escape, which still fails the device.
+  recording.consumer = true;
+  held_lock(known, false, true);
+  manager->apply_deferred();
+  require(!owner.failed && manager->statistics().unordered_consumers == 1,
+          "A budget-expiry escape of a consumer recording failed the device for the session");
+  require(owner.source_states.state(source).model == taxi_camera::source_state::Model::legacy_rt &&
+              manager->statistics().wipes == escape_before.wipes &&
+              (manager->statistics().last_retirement_origins & Manager::OriginUnorderedConsumer),
+          "A budget-expiry consumer escape wiped the source model instead of retiring it in place");
+  require(owner.source_states.rearm_retained_rt() == 0, "The consumer-escape rearm left a retained RT model unrestored");
+  ordered(known, true);
+  recording.consumer = false;
+  recording.source_touched = true;
+  ordered(known, true);
+  recording.source_touched = false;
+  recording.packets = 1;
+  ordered(known, true);
   recording.packets = 0;
   require(queue.signals == 3 && queue.waits == 2 && !queue.future_wait && owner.last_signal == 3,
           "Consumer/source/capture paths preserve ordered Wait and Signal receipts");
   recording.awaiting_native_reset = true;
-  blocked(known, false, false, false);
+  ordered(known, false);
+  held_lock(known, false, true);
   recording.awaiting_native_reset = false;
-  const taxi_camera::source_state::Key source{0x1234, 1};
-  require(owner.source_states.register_source(source, taxi_camera::source_state::Model::legacy_rt), "Seed ordered source-state evidence");
-  blocked(unknown, false, false, true);
   manager->apply_deferred();
-  require(owner.source_states.state(source).model == taxi_camera::source_state::Model::unknown && !owner.failed,
-          "Unknown and unobserved submissions retain conservative source invalidation");
+  require(owner.source_states.state(source).model == taxi_camera::source_state::Model::legacy_rt &&
+              owner.source_states.rearm_retained_rt() == 0,
+          "An escaped unobserved recording was not retired and rearmed in place");
+  const auto wipes_before_unknown = manager->statistics().wipes;
+  const auto retirements_before_unknown = manager->statistics().source_retirements;
+  held_lock(unknown, true, true);
+  manager->apply_deferred();
+  // An escaped batch with an unregistered list is a bounded escape like any
+  // other: its recordings were never applied, so the retained RT model is the
+  // last positively observed one and is restored in place.
+  require(owner.source_states.state(source).model == taxi_camera::source_state::Model::legacy_rt && !owner.failed,
+          "An escaped unknown list wiped the source model instead of retiring it in place");
+  require(manager->statistics().wipes == wipes_before_unknown &&
+              manager->statistics().source_retirements == retirements_before_unknown + 1 &&
+              (manager->statistics().last_retirement_origins & Manager::OriginRefusedCompleted),
+          "An escaped unknown list did not name its retirement origin");
   require(queue.signals == 3 && queue.waits == 2, "Unobserved recordings never invent a receipt");
+  ordered(unknown, false);
+  // The ordered path still has the list in hand and knows nothing about its
+  // recording: this remains a genuine wipe through unknown_lists_no_owner.
+  require(owner.source_states.state(source).model == taxi_camera::source_state::Model::unknown &&
+              manager->statistics().wipes == wipes_before_unknown + 1 &&
+              manager->statistics().last_wipe_site == Manager::WipeSite::unknown_lists_no_owner,
+          "An ordered batch with an unregistered list did not wipe through unknown_lists_no_owner");
+
+  // A contended evidence callback never wipes the model: the skipped evidence
+  // is deferred and replayed onto its exact recording by the next lock holder.
+  {
+    using taxi_camera::source_state::Model;
+    require(owner.source_states.rearm_retained_rt() == 1, "Restore source fixture before the contended-evidence checks");
+    auto* const source_resource = reinterpret_cast<ID3D12Resource*>(source.handle);
+    D3D12_RESOURCE_DESC desc{};
+    desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    desc.Width = 736;
+    desc.Height = 251;
+    desc.DepthOrArraySize = desc.MipLevels = 1;
+    desc.SampleDesc.Count = 1;
+    desc.Format = DXGI_FORMAT_R11G11B10_FLOAT;
+    desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+    require(manager->register_source_candidate(owner.key, source_resource, source.generation, desc, Model::legacy_rt),
+            "Register the fixture source as a candidate");
+    const auto model = [&] { return owner.source_states.state(source).model; };
+    D3D12_RESOURCE_BARRIER into_rt{};
+    into_rt.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    into_rt.Transition = {source_resource, 0, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET};
+    // Runs the call on another thread while this thread holds the manager lock
+    // past every evidence budget; the call must return and report contention.
+    const auto contended = [&](auto&& call, const char* label) {
+      std::unique_lock held(manager->mutex_);
+      auto result = std::async(std::launch::async, [&] {
+        call();
+        return Manager::last_call_contended();
+      });
+      const bool returned = result.wait_for(std::chrono::milliseconds(500)) == std::future_status::ready;
+      held.unlock();
+      const bool was_contended = result.get();
+      require(returned && was_contended, label);
+    };
+    const auto before = manager->statistics();
+    contended([&] { manager->observe_source_legacy(known, recording.object_generation, into_rt); },
+              "A barrier observer was parked on the held manager lock past its budget");
+    contended(
+        [&] {
+          manager->invalidate_source_recording(known, recording.object_generation, true,
+                                               taxi_camera::engine_hook::render_boundary::InvalidationPassState);
+        },
+        "An invalidation observer was parked on the held manager lock past its budget");
+    auto after = manager->statistics();
+    require(after.contended_evidence == before.contended_evidence + 2 && after.deferred_evidence == before.deferred_evidence + 2,
+            "Contended evidence callbacks were not counted and deferred");
+    require(after.wipes == before.wipes && model() == Model::legacy_rt, "A contended evidence callback wiped the source model");
+    manager->apply_deferred();
+    after = manager->statistics();
+    require(after.wipes == before.wipes && model() == Model::legacy_rt, "Replaying deferred evidence wiped the source model");
+    require(recording.source_touched && !recording.source_effects.invalid && recording.source_effects.count == 1 &&
+                recording.source_effects.effects[0].key == source &&
+                recording.source_effects.effects[0].kind == taxi_camera::source_state::Effect::Kind::legacy_rt,
+            "Deferred barrier evidence was not replayed onto its recording");
+    require(after.ignored_source_recordings == before.ignored_source_recordings + 1,
+            "A deferred PassState report on a list that never named a published source was not ignored");
+    ordered(known, true);
+    require(model() == Model::legacy_rt && !owner.failed && manager->statistics().wipes == before.wipes,
+            "Executing a recording with replayed evidence wiped the model");
+
+    // A Reset skipped on its thread retires before any later evidence on the
+    // same list and before any transaction; the completed recording keeps the model.
+    const auto resets = manager->statistics().resets;
+    contended([&] { manager->successful_reset(known, recording.object_generation); },
+              "successful_reset was parked on the held manager lock past its budget");
+    after = manager->statistics();
+    require(after.deferred_retirements == before.deferred_retirements + 1 && after.resets == resets, "A contended Reset was not deferred");
+    require(after.wipes == before.wipes && model() == Model::legacy_rt, "A deferred Reset wiped the source model");
+    manager->observe_source_legacy(known, recording.object_generation, into_rt);  // Uncontended: drains the Reset first.
+    require(manager->statistics().resets == resets + 1 && recording.source_touched && recording.source_effects.count == 1,
+            "The deferred Reset did not retire the recording before later evidence was appended");
+    ordered(known, true);
+    require(model() == Model::legacy_rt && !owner.failed && manager->statistics().wipes == before.wipes,
+            "A deferred Reset followed by normal completion wiped the model");
+
+    // Ring overflow is the one skipped path that may still wipe: a lost entry
+    // may have been a Reset, so every current recording becomes inapplicable.
+    {
+      const auto overflow_before = manager->statistics();
+      std::unique_lock held(manager->mutex_);
+      auto flood = std::async(std::launch::async, [&] {
+        for (unsigned i = 0; i < 260; ++i)
+          manager->observe_source_legacy(known, recording.object_generation, into_rt);
+      });
+      const bool returned = flood.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+      held.unlock();
+      flood.get();
+      require(returned, "Flooding contended evidence parked the recording thread");
+      manager->apply_deferred();
+      const auto overflowed = manager->statistics();
+      require(overflowed.deferred_overflows == overflow_before.deferred_overflows + 1, "Ring overflow was not counted");
+      require(overflowed.wipes == overflow_before.wipes + 1 && overflowed.last_wipe_site == Manager::WipeSite::deferred_sources &&
+                  (overflowed.last_wipe_origins & Manager::OriginDeferredOverflow),
+              "Ring overflow did not wipe exactly once through deferred_sources with its origin");
+      require(recording.source_effects.invalid && model() == Model::unknown, "Ring overflow left a possibly stale recording applicable");
+      recording.source_effects.reset();
+      recording.source_touched = false;
+      helper_recording.source_effects.reset();
+      helper_recording.source_touched = false;
+      manager->publish_list(recording);
+      manager->publish_list(helper_recording);
+      require(owner.source_states.rearm_retained_rt() == 1, "Restore source fixture after the overflow");
+    }
+    recording.source_touched = false;
+    recording.source_effects.reset();
+    manager->publish_list(recording);
+  }
 
   Queue helper_queue{queue_table.data(), &device};
   auto* helper_native = reinterpret_cast<ID3D12CommandQueue*>(&helper_queue);
@@ -198,16 +393,25 @@ void run() {
       "Private composition cannot wait for native tail metadata lock");
   manager->apply_deferred();
   require(!owner.failed, "Source-only refusals recover without permanently failing capture");
-  require(owner.source_states.rearm_retained_rt() == 1, "Restore source fixture before completion-order regression");
+  // The legacy contended refusal above published refused_contended: retired
+  // and rearmed in place, so nothing is left for a later rearm to restore.
+  require(owner.source_states.state(source).model == taxi_camera::source_state::Model::legacy_rt &&
+              (manager->statistics().last_retirement_origins & Manager::OriginRefusedContended) &&
+              owner.source_states.rearm_retained_rt() == 0,
+          "A legacy contended refusal wiped the source model instead of retiring it in place");
+  const auto retirements_before_completion = manager->statistics().source_retirements;
   const auto post_token =
       manager->submission_refused_batch(native_queue, taxi_camera::engine_hook::queue_submit::Refusal::contended_submission, 1, batch);
   manager->apply_deferred();
-  require(owner.source_states.state(source).model == taxi_camera::source_state::Model::legacy_rt,
+  require(owner.source_states.state(source).model == taxi_camera::source_state::Model::legacy_rt &&
+              manager->statistics().source_retirements == retirements_before_completion,
           "Source refusal is not prematurely consumed before native forward");
   manager->submission_refused_completed(post_token);
   manager->apply_deferred();
-  require(owner.source_states.state(source).model == taxi_camera::source_state::Model::unknown,
-          "Source completion invalidates proof after the exact native batch returns");
+  require(owner.source_states.state(source).model == taxi_camera::source_state::Model::legacy_rt &&
+              manager->statistics().source_retirements == retirements_before_completion + 1 &&
+              (manager->statistics().last_retirement_origins & Manager::OriginRefusedCompleted),
+          "Source completion did not retire the proof in place after the exact native batch returned");
 
   // Reproduce the classification-to-notification gap: mark the exact recording,
   // pause before its wake flag is posted, then Reset before deferred processing.
@@ -532,6 +736,74 @@ void tail_run(bool warp_requested, bool enhanced, bool born_render_target) {
   manager->begin_source_tracking();
   require(manager->statistics().capture_copy_gpu.samples == 0, "GPU capture timing default inactive");
   manager->set_gpu_timing_enabled(true);
+  {
+    const auto model = [&](unsigned feed) {
+      return manager->device(DeviceKey)->source_states.state({reinterpret_cast<std::uint64_t>(sources[feed].p), ids[feed]}).model;
+    };
+    const auto before_left = model(0);
+    const auto before_right = model(1);
+    require(before_left != taxi_camera::source_state::Model::unknown && before_right != taxi_camera::source_state::Model::unknown,
+            "Camera sources had no RT evidence before the PassState check");
+    Commands bystander;
+    bystander.initialize(device.p);
+    constexpr std::uint64_t BystanderGeneration = Generation + 9;
+    require(manager->register_command_list(bystander.list.p, DeviceKey, BystanderGeneration),
+            "Register list that never observed published camera sources");
+    auto* untouched = manager->list(bystander.list.p);
+    require(untouched, "Bystander recording missing");
+    const auto ignored_before = manager->statistics().ignored_source_recordings;
+    const auto require_ignored = [&](std::uint32_t reasons, const char* label) {
+      const auto ignored = manager->statistics().ignored_source_recordings;
+      manager->invalidate_source_recording(bystander.list.p, BystanderGeneration, true, reasons);
+      require(!untouched->source_effects.invalid && !untouched->source_touched, label);
+      require(manager->statistics().ignored_source_recordings == ignored + 1, "Ignored limited report was not counted");
+      require(manager->statistics().last_invalidation_reasons == reasons, "Ignored limited report did not record its reasons");
+      ID3D12CommandList* batch = bystander.list.p;
+      require(manager->before_submission(bystander.queue.p, 1, &batch) == 0, label);
+      require(model(0) == before_left && model(1) == before_right, label);
+    };
+    require_ignored(Boundary::InvalidationPassBegin,
+                    "PassBegin on a list that never named a published camera source prepared a global wipe");
+    require_ignored(Boundary::InvalidationPassState,
+                    "PassState on a list that never named a published camera source prepared a global wipe");
+    require_ignored(Boundary::InvalidationUnobservedWork,
+                    "Unsupported command on a list that never named a published camera source prepared a global wipe");
+    manager->invalidate_source_recording(bystander.list.p, BystanderGeneration, true, Boundary::InvalidationBarrierBatch);
+    require(untouched->source_effects.invalid && untouched->source_touched,
+            "Barrier invalidation no longer discards an uncertain recording");
+    manager->successful_reset(bystander.list.p, BystanderGeneration);
+    manager->invalidate_source_recording(bystander.list.p, BystanderGeneration, true,
+                                         Boundary::InvalidationPassBegin | Boundary::InvalidationObserverDisabled);
+    require(untouched->source_effects.invalid && untouched->source_touched, "Observer-disabled PassBegin no longer discards the recording");
+    require(manager->statistics().ignored_source_recordings == ignored_before + 3, "Discarding reports were counted as ignored");
+    manager->successful_reset(bystander.list.p, BystanderGeneration);
+    manager->invalidate_source_recording(bystander.list.p, BystanderGeneration, true,
+                                         Boundary::InvalidationUnobservedWork | Boundary::InvalidationResetFailed);
+    require(untouched->source_effects.invalid && untouched->source_touched,
+            "Reset failure combined with an unsupported command no longer discards the recording");
+    manager->successful_reset(bystander.list.p, BystanderGeneration);
+    const auto require_scoped = [&](std::uint32_t reasons, const char* label) {
+      require(untouched->source_effects.append(
+                  {{reinterpret_cast<std::uint64_t>(sources[0].p), ids[0]}, taxi_camera::source_state::Effect::Kind::legacy_rt}),
+              label);
+      manager->invalidate_source_recording(bystander.list.p, BystanderGeneration, true, reasons);
+      require(!untouched->source_effects.invalid, label);
+      require(untouched->source_touched, label);
+      bool retired = false;
+      for (std::size_t index = 0; index < untouched->source_effects.count; ++index) {
+        const auto& effect = untouched->source_effects.effects[index];
+        retired |= effect.key.handle == reinterpret_cast<std::uint64_t>(sources[0].p) &&
+                   effect.kind == taxi_camera::source_state::Effect::Kind::pass_other;
+      }
+      require(retired, label);
+      require(model(0) == before_left && model(1) == before_right, label);
+      manager->successful_reset(bystander.list.p, BystanderGeneration);
+    };
+    require_scoped(Boundary::InvalidationPassBegin, "PassBegin globally invalidated a recording that named one published camera source");
+    require_scoped(Boundary::InvalidationPassState, "PassState globally invalidated a recording that named one published camera source");
+    require_scoped(Boundary::InvalidationUnobservedWork,
+                   "Unsupported command globally invalidated a recording that named one published camera source");
+  }
   DrawFixture draw;
   draw.initialize(device.p, DXGI_FORMAT_R11G11B10_FLOAT);
   constexpr float colors[2][2][4] = {{{0.25f, 0.5f, 0.75f, 1}, {2, 4, 0.125f, 1}}, {{1, 0, 0.5f, 1}, {0.125f, 1, 2, 1}}};
@@ -676,6 +948,7 @@ void tail_run(bool warp_requested, bool enhanced, bool born_render_target) {
     require(manager->discard_frame(unused[i].token), "Discard unused rate-check frame");
   require(manager->poll_completed_frames(unused.data(), unused.size()) == 0, "Rate-check frame remained unretired");
   // Unknown actual recordings must destroy global model proof, even if empty.
+  const auto wipes_before_unknown = manager->statistics().wipes;
   check(unknown.list->Close(), "Close unknown list");
   ID3D12CommandList* unregistered = unknown.list.p;
   producer.queue->ExecuteCommandLists(1, &unregistered);
@@ -683,11 +956,15 @@ void tail_run(bool warp_requested, bool enhanced, bool born_render_target) {
   producer.queue->ExecuteCommandLists(1, &original);
   drain(producer.queue.p);
   require(manager->statistics().tail_captures == rate_checked_captures, "Unregistered submission left stale state proof usable");
+  require(manager->statistics().wipes > wipes_before_unknown &&
+              manager->statistics().wipe_counts[static_cast<std::size_t>(Manager::WipeSite::unknown_lists_no_owner)] > 0,
+          "An unregistered list's wipe was not attributed to unknown_lists_no_owner");
   require(Boundary::remove().protection_restored, "Remove boundary observation");
   producer.queue->ExecuteCommandLists(1, &original);
   drain(producer.queue.p);
   require(manager->statistics().tail_captures == rate_checked_captures &&
-              std::strcmp(manager->statistics().tail_status, "observer_disabled") == 0,
+              std::strcmp(manager->statistics().tail_status, "observer_disabled") == 0 &&
+              manager->statistics().last_wipe_site == Manager::WipeSite::observer_disabled,
           "Disabled observer left prior immutable recording eligible");
   manager->stop_source_tracking();
   require(queue_context->source_deaths.load() == 0, "A source died while the application still owned it");

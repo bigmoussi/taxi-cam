@@ -15,7 +15,11 @@ struct Key {
   bool operator==(const Key&) const = default;
 };
 struct Effect {
-  enum class Kind { legacy_rt, enhanced_rt, other, draw };
+  // other: leave RT and clear retained history (barrier/alias/reset/observer-disabled).
+  // pass_other: leave the live model without clearing retained_rt (PassState/PassBegin/
+  // unsupported-work reports that named a published source). Encoded in Kind so apply()
+  // does not guess from ambient state.
+  enum class Kind { legacy_rt, enhanced_rt, other, pass_other, draw };
   Key key;
   Kind kind = Kind::other;
   bool operator==(const Effect&) const = default;
@@ -69,6 +73,11 @@ class Tracker {
   bool apply(const Recording& recording) noexcept;
   State state(Key key) const noexcept;
   void invalidate_all() noexcept;
+  // Retire every live model to other and keep retained_rt: the treatment a
+  // named-source pass-state report gets, applied to a whole tracker when a
+  // batch escaped ordering. rearm_retained_rt() then restores the RT models
+  // in place, so the cost is one missed draw instead of an unknown state.
+  void retire_live_models() noexcept;
   // After an unknown-list / invalid-log wipe, restore the last positively
   // observed RT model for the same generation. Does not infer RT from a draw
   // and does not revive a source that already left RT. Returns how many

@@ -49,11 +49,12 @@ void select_fixture(const std::wstring& name) {
 }
 
 bool same_preferences(const Settings& a, const Settings& b) {
-  return a.enabled == b.enabled && a.camera_rate == b.camera_rate && a.automatic_exposure == b.automatic_exposure &&
-         a.exposure == b.exposure && a.night_boost == b.night_boost && a.auto_profile == b.auto_profile && a.speed_color == b.speed_color &&
-         a.nose_dot == b.nose_dot && a.tail_upper == b.tail_upper && a.tail_corner == b.tail_corner && a.tail_inner == b.tail_inner &&
-         a.profile == b.profile && a.follow_taxi == b.follow_taxi && a.auto_detect == b.auto_detect && a.single_camera == b.single_camera &&
-         a.calibration_budget == b.calibration_budget && a.mounts == b.mounts;
+  return a.enabled == b.enabled && a.camera_rate == b.camera_rate && a.parked_rate == b.parked_rate &&
+         a.automatic_exposure == b.automatic_exposure && a.exposure == b.exposure && a.night_boost == b.night_boost &&
+         a.auto_profile == b.auto_profile && a.speed_color == b.speed_color && a.nose_dot == b.nose_dot && a.tail_upper == b.tail_upper &&
+         a.tail_corner == b.tail_corner && a.tail_inner == b.tail_inner && a.profile == b.profile && a.follow_taxi == b.follow_taxi &&
+         a.auto_detect == b.auto_detect && a.single_camera == b.single_camera && a.calibration_budget == b.calibration_budget &&
+         a.mounts == b.mounts;
 }
 
 Settings customized(const profiles::AircraftProfile& profile) {
@@ -65,6 +66,7 @@ Settings customized(const profiles::AircraftProfile& profile) {
   value.follow_taxi = 0;
   value.auto_detect = 0;
   value.camera_rate = 10;
+  value.parked_rate = 8;
   value.single_camera = 1;
   value.calibration_budget = 2048;
   value.automatic_exposure = 0;
@@ -105,6 +107,30 @@ void missing_rate_uses_shipped_default_without_rewriting_saved_fifteen() {
               loaded.mounts == saved.mounts,
           "A profile with no camera_rate key uses the shipped default of 10");
   require(!contains_utf16(contents(path), L"camera_rate="), "Loading a missing rate must not write a rate key");
+}
+
+void parked_rate_persists_and_defaults() {
+  select_fixture(L"parked-rate");
+  auto saved = customized(profiles::A380);
+  saved.parked_rate = 0;
+  require(save_settings(saved), "Save a profile with the parked floor disabled");
+  Settings loaded;
+  require(load_settings(loaded, L"missing-installation", saved.profile) && loaded.parked_rate == 0 && loaded.camera_rate == 10,
+          "A disabled parked floor (0) persists without touching camera_rate");
+  const auto path = settings_path(saved);
+  patch(path, L"display", L"parked_rate", nullptr);
+  require(ini(path, L"display", L"parked_rate") == L"<missing>", "parked_rate key removed from isolated profile");
+  require(load_settings(loaded, L"missing-installation", saved.profile) && loaded.parked_rate == taxi_camera::kDefaultParkedCameraRate,
+          "A profile with no parked_rate key uses the shipped floor of 5");
+  require(!contains_utf16(contents(path), L"parked_rate="), "Loading a missing floor must not write a floor key");
+  patch(path, L"display", L"parked_rate", L"3");
+  require(load_settings(loaded, L"missing-installation", saved.profile) && loaded.parked_rate == taxi_camera::kMinimumCameraRate &&
+              loaded.mounts == saved.mounts,
+          "An out-of-range floor is clamped instead of rejecting the calibration file");
+  patch(path, L"display", L"parked_rate", L"8");
+  require(load_settings(loaded, L"missing-installation", saved.profile) && loaded.parked_rate == 8, "An adjusted floor loads");
+  saved.parked_rate = 8;
+  require(save_settings(saved) && ini(path, L"display", L"parked_rate") == L"8", "Save writes the parked floor next to camera_rate");
 }
 
 void all_profiles_migrate_once() {
@@ -317,9 +343,11 @@ int main() {
     fixture_root = std::wstring(repository) + L"\\build\\night-boost-test-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
                    std::to_wstring(GetTickCount64());
     require(std::filesystem::create_directories(fixture_root), "Create ignored test root");
-    require(Settings{}.night_boost == 8.f && Settings{}.camera_rate == taxi_camera::kDefaultCameraRate && valid_settings(Settings{}),
-            "Default night boost is eight and the shipped camera rate is ten");
+    require(Settings{}.night_boost == 8.f && Settings{}.camera_rate == taxi_camera::kDefaultCameraRate &&
+                Settings{}.parked_rate == taxi_camera::kDefaultParkedCameraRate && valid_settings(Settings{}),
+            "Default night boost is eight, the shipped camera rate is ten and the parked floor is five");
     missing_rate_uses_shipped_default_without_rewriting_saved_fifteen();
+    parked_rate_persists_and_defaults();
     all_profiles_migrate_once();
     completed_revisions_preserve_custom_values();
     incomplete_revisions_migrate();

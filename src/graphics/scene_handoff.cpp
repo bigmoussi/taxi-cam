@@ -114,6 +114,15 @@ void SceneHandoff::unregister_resource(std::uint64_t key, std::uint64_t handle) 
   if (auto* item = device(key))
     item->resources.erase(handle);
 }
+bool SceneHandoff::try_unregister_resource(std::uint64_t key, std::uint64_t handle, std::uint32_t budget_us) noexcept {
+  const BoundedLock lock(mutex_, budget_us);
+  if (!lock)
+    return false;
+  lifecycle_event(handle);
+  if (auto* item = device(key))
+    item->resources.erase(handle);
+  return true;
+}
 
 std::uint64_t SceneHandoff::begin_scene() {
   const std::lock_guard lock(mutex_);

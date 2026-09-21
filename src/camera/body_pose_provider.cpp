@@ -91,6 +91,15 @@ std::atomic<std::uint64_t> session_epoch{0};
 // before returning to0. Repeated invalid samples cannot churn epochs.
 std::atomic<unsigned> invalid_world{0};
 SRWLOCK lifecycle = SRWLOCK_INIT;
+// Last complete readiness a nonblocking reader observed. Only readers write it,
+// never the telemetry worker, so waiting on this lock costs a copy of the
+// struct and can never park a simulator thread behind an SDK call.
+struct ReadinessCache {
+  SRWLOCK lock = SRWLOCK_INIT;
+  AircraftSessionReadiness value{};
+  std::uint64_t sampled_ms = 0;
+};
+ReadinessCache readiness_cache;
 bool fresh(std::uint64_t sample, std::uint64_t now) noexcept;
 void reset_session_locked() noexcept {
   state.identity = {};
@@ -870,16 +879,48 @@ AircraftIdentitySample get_aircraft_identity() noexcept {
 std::uint64_t get_aircraft_session_epoch() noexcept {
   return session_epoch.load(std::memory_order_acquire);
 }
-AircraftSessionReadiness get_aircraft_session_readiness() noexcept {
+namespace {
+void publish_readiness(const AircraftSessionReadiness& value, std::uint64_t now) noexcept {
+  // A concurrent reader is publishing an equally fresh reading; skip rather than wait.
+  if (!TryAcquireSRWLockExclusive(&readiness_cache.lock))
+    return;
+  readiness_cache.value = value;
+  readiness_cache.sampled_ms = now;
+  ReleaseSRWLockExclusive(&readiness_cache.lock);
+}
+AircraftSessionReadiness nonblocking_readiness(std::uint64_t now) noexcept {
   AircraftSessionReadiness out;
   out.epoch = get_aircraft_session_epoch();
-  out.loading = invalid_world.load(std::memory_order_acquire) != 0;
+  const auto pending = invalid_world.load(std::memory_order_acquire);
+  out.loading = pending != 0;
   out.error = "aircraft_session_cache_busy";
   if (TryAcquireSRWLockShared(&state.lock)) {
-    out = readiness_locked(GetTickCount64());
+    out = readiness_locked(now);
     ReleaseSRWLockShared(&state.lock);
+    publish_readiness(out, now);
+    return out;
+  }
+  // The telemetry worker holds the cache. Reuse the last complete reading of
+  // this epoch while it is younger than the age bound; a native invalid-WORLD
+  // notice still gates readiness immediately, as on the locked path.
+  AcquireSRWLockShared(&readiness_cache.lock);
+  const auto cached = readiness_cache.value;
+  const auto sampled = readiness_cache.sampled_ms;
+  ReleaseSRWLockShared(&readiness_cache.lock);
+  if (!sampled || now < sampled || now - sampled > ReadinessCacheMaxAgeMs || cached.epoch != out.epoch)
+    return out;
+  out = cached;
+  out.cached = true;
+  if (pending & 1u) {
+    out.ready = false;
+    out.loading = true;
+    out.error = "camera_world_revalidation";
   }
   return out;
+}
+}  // namespace
+AircraftSessionReadiness get_aircraft_session_readiness() noexcept {
+  return nonblocking_readiness(GetTickCount64());
 }
 void notify_invalid_camera_world() noexcept {
   invalid_world.fetch_or(1u, std::memory_order_acq_rel);
@@ -1147,6 +1188,15 @@ AircraftSessionReadiness session_readiness_at(std::uint64_t now_ms) noexcept {
   const auto out = readiness_locked(now_ms);
   ReleaseSRWLockShared(&state.lock);
   return out;
+}
+AircraftSessionReadiness session_readiness_nonblocking_at(std::uint64_t now_ms) noexcept {
+  return nonblocking_readiness(now_ms);
+}
+void hold_telemetry_lock(bool hold) noexcept {
+  if (hold)
+    AcquireSRWLockExclusive(&state.lock);
+  else
+    ReleaseSRWLockExclusive(&state.lock);
 }
 void service_world_invalidation() noexcept {
   native_camera::service_world_invalidation();

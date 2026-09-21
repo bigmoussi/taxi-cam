@@ -10,6 +10,7 @@ bool valid(Effect::Kind kind) noexcept {
     case Effect::Kind::legacy_rt:
     case Effect::Kind::enhanced_rt:
     case Effect::Kind::other:
+    case Effect::Kind::pass_other:
     case Effect::Kind::draw:
       return true;
   }
@@ -113,6 +114,10 @@ bool Tracker::apply(const Recording& recording) noexcept {
           slot.state = {Model::other, false};
           slot.retained_rt = Model::unknown;
           break;
+        case Effect::Kind::pass_other:
+          // Pass-state reports retire the live model; the bitmap's RT history remains.
+          slot.state = {Model::other, false};
+          break;
         case Effect::Kind::draw:
           slot.state.drawn = render_target_model(slot.state.model);
           break;
@@ -134,6 +139,12 @@ State Tracker::state(Key key) const noexcept {
 void Tracker::invalidate_all() noexcept {
   for (auto& slot : sources_)
     slot.state = {};
+}
+
+void Tracker::retire_live_models() noexcept {
+  for (auto& slot : sources_)
+    if (slot.key.handle)
+      slot.state = {Model::other, false};
 }
 
 unsigned Tracker::rearm_retained_rt() noexcept {

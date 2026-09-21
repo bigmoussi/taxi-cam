@@ -85,6 +85,25 @@ inline constexpr const char* display_submission_outcome_name(DisplaySubmissionOu
   return static_cast<unsigned>(value) < static_cast<unsigned>(DisplaySubmissionOutcome::count) ? names[static_cast<unsigned>(value)]
                                                                                                : "invalid_outcome";
 }
+// Simulator-thread bounded waits that expired and skipped their work. Each
+// site names the lock and the caller: the registry from per-command recording
+// hooks, from Close-time PFD delivery, from device creation hooks and from the
+// D3D12 lifetime callback; the observation lock from Reset/new-list admission.
+enum class ContentionSite : unsigned {
+  registry_recording,
+  registry_close,
+  registry_creation,
+  registry_lifecycle,
+  observation_recording,
+  handoff_lifecycle,
+  skipped_pfd_writes,
+  count
+};
+inline constexpr const char* contention_site_name(ContentionSite value) noexcept {
+  constexpr const char* names[]{"registry_recording",    "registry_close",    "registry_creation", "registry_lifecycle",
+                                "observation_recording", "handoff_lifecycle", "skipped_pfd_writes"};
+  return static_cast<unsigned>(value) < static_cast<unsigned>(ContentionSite::count) ? names[static_cast<unsigned>(value)] : "invalid_site";
+}
 struct GraphicsStatus {
   bool ready{};
   // draws counts fully observed recordings; idle retains only per-resource
@@ -100,6 +119,10 @@ struct GraphicsStatus {
   std::uint64_t fallback_attempts{}, fallback_stamps{}, fallback_query_refused{}, fallback_state_refused{};
   std::uint64_t preferred_copy_attempts{}, preferred_copy_stamps{}, preferred_copy_no_proof{};
   const char* preferred_copy_reason = "not_attempted";
+  // Arm-to-first-stamp cover: carried covers planned on a quiet Execute; Close
+  // settlements skipped within budget and replayed later; ring overflows that
+  // set settlement_stale; carried covers refused while it was set.
+  std::uint64_t carried_covers{}, settlement_skips{}, settlement_replays{}, settlement_stale_events{}, carried_refused_stale{};
   std::uint64_t dynamic_depth_bias_calls{}, dynamic_strip_cut_calls{}, sample_position_calls{};
   std::uint64_t recording_end_draws{}, shader_deferred{}, close_forward_refused{};
   const char* target_detection = "warming_up";
@@ -114,6 +137,25 @@ struct GraphicsStatus {
   std::array<std::uint64_t, static_cast<unsigned>(PfdSubmissionProof::Refusal::count)> queue_proof_refusals{};
   unsigned queue_last_proof_flags{};
   std::array<std::uint64_t, 81> queue_prefix_blockers{};
+  std::array<std::uint64_t, static_cast<unsigned>(ContentionSite::count)> contention{};
+  // Deferred lifecycle work drained by discover_pfds after a simulator thread
+  // could not take its lock: source candidates and handoff retirements.
+  std::uint64_t deferred_lifecycle{};
+  // Registration failures exceeded FailureStormPerSecond: admission halted and
+  // the bridge disarmed for this process. failure_rate_peak is the worst
+  // one-second count seen.
+  bool admission_halted{};
+  std::uint64_t failure_rate_peak{};
+  // PassBegin reports the bridge could not scope to tracked render targets and
+  // therefore forwarded as global: the pass bound no RTV, or RTVs unresolved.
+  std::uint64_t pass_no_targets{}, pass_unresolved_targets{};
+  // Recordings invalidated on the hit after a contended find_list miss (each
+  // becomes a PassState report on that recording), and lists admitted
+  // mid-recording that wipe the source model until their observed Reset.
+  std::uint64_t contended_invalidations{}, unobserved_admissions{};
+  bool armed{};
+  std::uint64_t frame_pulse{};
+  std::uint64_t queue_calls{}, queue_contended{};
 };
 bool initialize_graphics() noexcept;
 // Resolve a reported device's optional COM proxy chain before native hooks or
@@ -128,6 +170,17 @@ bool graphics_ready() noexcept;
 void set_graphics_observation_demand(bool enabled) noexcept;
 void set_graphics_diagnostics_enabled(bool enabled) noexcept;
 GraphicsStatus graphics_status() noexcept;
+// Presentation pulse: every hooked ExecuteCommandLists on a registered direct
+// queue and every hooked Close. Lock-free; readable from any thread.
+std::uint64_t frame_pulse() noexcept;
+// Watchdog gate. Closed: observation is idle for every hook, no PFD write or
+// queue copy is planned, and the capture manager escapes every submission.
+// An atomic store; never waits and never touches a GPU resource.
+void set_graphics_armed(bool armed) noexcept;
+bool graphics_armed() noexcept;
+// True once hook registration failures exceeded the storm rate; the bridge
+// stays disarmed for the rest of the simulator process.
+bool graphics_admission_halted() noexcept;
 std::vector<PfdTargetObservation> pfd_inventory();
 // Control-thread only. Turns off late-attach barrier/copy/OM extras after the
 // profile's complete display set has distinct RTV associations, or after a short empty-list timeout. A filled

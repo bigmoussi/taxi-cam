@@ -576,6 +576,39 @@ void later_list_overwrite() {
   require(uav_clear.suffix_candidate(left, 1).state_after == uav && !uav_clear.prefix_candidate(left, 1),
           "Carried UAV clear did not become a suffix");
 }
+void carried_across_execute() {
+  Proof other;
+  other.reset(1, true);
+  other.observe_legacy(right, rt, psr, 0);
+  other.close(1, true);
+  const Proof::Recording quiet[]{{&other, 1}};
+  const auto cover = Proof::carried_overlay(quiet, 1, left, psr);
+  require(cover && !cover.before && cover.list == 0 && cover.candidate.state_after == psr,
+          "A quiet execute did not copy after the last list using the settled display state");
+  Proof touched = exit_recording();
+  const Proof::Recording mentioned[]{{&touched, 1}};
+  require(!Proof::carried_overlay(mentioned, 1, left, psr), "Carried state crossed a list that already touches the display");
+  require(!Proof::carried_overlay(quiet, 1, left, D3D12_RESOURCE_STATE_COMMON), "COMMON carried state became a copy");
+  require(!Proof::carried_overlay(quiet, 1, left, D3D12_RESOURCE_STATE_COPY_DEST), "COPY_DEST carried state became a copy");
+  Proof::Settlement rows[4]{};
+  Proof enter;
+  enter.reset(1, true);
+  enter.observe_legacy(left, psr, rt, 0);
+  enter.close(1, true);
+  require(enter.settlements(1, rows, 4) == 1 && rows[0].wrote && !rows[0].restorable,
+          "Barrier-only RT entry stayed restorable after close");
+  Proof carried;
+  carried.reset(1, true);
+  carried.note_render_target_write(left, 12);
+  carried.close(1, true);
+  require(carried.settlements(1, rows, 4) == 1 && rows[0].restorable && rows[0].after == rt && rows[0].wrote,
+          "Carried RT write was not a restorable settlement");
+  Proof exit = exit_recording();
+  require(exit.settlements(1, rows, 4) == 1 && rows[0].restorable && rows[0].after == psr && !rows[0].wrote,
+          "RT exit did not settle as a shader-resource state");
+  const Proof::Recording flashed[]{{&enter, 1}, {&exit, 1}};
+  require(!Proof::carried_overlay(flashed, 2, left, psr), "Carried state was used on a batch that writes the display");
+}
 }  // namespace
 
 int main() {
@@ -588,6 +621,7 @@ int main() {
     leading_exit_prefix();
     state_disjoint_prefix_work();
     later_list_overwrite();
+    carried_across_execute();
     std::printf("PASS PFD submission proof: %u lifecycle, final-state, GPU-work, whole-batch pass and bound checks.\n", checks);
     return 0;
   } catch (const std::exception& error) {

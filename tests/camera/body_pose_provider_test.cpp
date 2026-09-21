@@ -220,12 +220,38 @@ void session_readiness_regressions(Check check) {
   check(testing::accept_session_packet(flow.data(), flow.size()) && !testing::session_readiness_at(now).ready);
   supply();
   check(testing::session_readiness_at(now).ready);
+  // A reader that loses the lock race against the telemetry worker keeps the
+  // last complete reading of this epoch instead of reporting "not ready": the
+  // bridge gates render demand on this every tick, and a one-tick refusal
+  // closed and reopened the cameras (IPC taxi_mask dropouts on 0.9.35).
+  auto nonblocking = testing::session_readiness_nonblocking_at(now);
+  check(nonblocking.ready && !nonblocking.cached);
+  testing::hold_telemetry_lock(true);
+  nonblocking = testing::session_readiness_nonblocking_at(now + 1);
+  check(nonblocking.ready && nonblocking.cached && nonblocking.epoch == get_aircraft_session_epoch());
+  nonblocking = testing::session_readiness_nonblocking_at(now + ReadinessCacheMaxAgeMs);
+  check(nonblocking.ready && nonblocking.cached);
+  nonblocking = testing::session_readiness_nonblocking_at(now + ReadinessCacheMaxAgeMs + 1);
+  check(!nonblocking.ready && !nonblocking.cached && std::strcmp(nonblocking.error, "aircraft_session_cache_busy") == 0);
+  nonblocking = testing::session_readiness_nonblocking_at(now - 1);
+  check(!nonblocking.ready && !nonblocking.cached);
+  // The native invalid-WORLD notice gates the cached reading too.
+  notify_invalid_camera_world();
+  nonblocking = testing::session_readiness_nonblocking_at(now + 1);
+  check(!nonblocking.ready && nonblocking.cached && nonblocking.loading &&
+        std::strcmp(nonblocking.error, "camera_world_revalidation") == 0);
+  testing::hold_telemetry_lock(false);
   // Native precursor is nonblocking and immediately gates output. Repeated
   // bad WORLD packets invalidate intermediate fresh data without more epochs.
-  notify_invalid_camera_world();
   check(!get_aircraft_session_readiness().ready);
   testing::service_world_invalidation();
   check(get_aircraft_session_epoch() == epoch + 3);
+  // The cache belongs to the previous epoch: a busy read after an epoch change
+  // must not carry the old session's readiness across.
+  testing::hold_telemetry_lock(true);
+  nonblocking = testing::session_readiness_nonblocking_at(now + 1);
+  check(!nonblocking.ready && !nonblocking.cached && nonblocking.epoch == epoch + 3);
+  testing::hold_telemetry_lock(false);
   supply();
   notify_invalid_camera_world();
   testing::service_world_invalidation();

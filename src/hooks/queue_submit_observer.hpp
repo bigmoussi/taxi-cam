@@ -59,6 +59,10 @@ struct Callbacks {
   // conservatively through the outer receipt even when insertion is refused.
   // Must not submit work, change the plan's lifetime or wait.
   void (*augmentation_result)(void*, ID3D12CommandQueue*, std::uint64_t receipt, UINT inserted) noexcept = nullptr;
+  // Optional notification after a batch whose before returned zero has been
+  // forwarded. Lets before publish post-forward invalidation for a batch it
+  // could not order within its wait budget. Must not wait or submit.
+  void (*forwarded_unordered)(void*, ID3D12CommandQueue*) noexcept = nullptr;
 };
 
 enum class Status {
@@ -96,6 +100,12 @@ struct Statistics {
   std::uint64_t submissions = 0;
   std::uint64_t receipts = 0;
   std::uint64_t refusals = 0;
+  // Every wrapper entry for a registered queue, including disabled, contended
+  // and unrelated forwards: a presentation pulse independent of capture state.
+  std::uint64_t calls = 0;
+  // Another thread owned this queue's submit lock: Present/frame-generation
+  // helpers or other injectors submitting while an observed batch was in flight.
+  std::uint64_t contended = 0;
 };
 
 // Current-process public COM objects supplied by the caller only. Installs one
@@ -151,6 +161,8 @@ Result disable_queue(ID3D12CommandQueue* queue) noexcept;
 Result remove() noexcept;
 Result restore_protection() noexcept;
 Statistics statistics(ID3D12CommandQueue* queue) noexcept;
+// Sum over every registered queue. Lock-free; safe from any thread.
+Statistics total_statistics() noexcept;
 const char* status_name(Status status) noexcept;
 
 }  // namespace taxi_camera::engine_hook::queue_submit

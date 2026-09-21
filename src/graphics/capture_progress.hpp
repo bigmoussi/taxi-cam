@@ -8,6 +8,10 @@ namespace taxi_camera {
 // GPU state. Detect that specific stall without admitting an unknown state as RT.
 class CaptureProgress {
  public:
+  // ~4× a pair interval at the useful-rate ceiling (15 Hz → ~267 ms), floored at
+  // 500 ms so a PassState retirement that kept retained_rt can rearm within 0.5 s.
+  static constexpr std::uint64_t StallMs = 500;
+
   bool observe(std::uint64_t now, bool eligible, std::uint64_t frames, std::uint64_t draws, bool unknown_state) noexcept {
     if (!eligible || !unknown_state || frames != frames_ || now < since_) {
       watching_ = false;
@@ -22,7 +26,7 @@ class CaptureProgress {
       draws_ = draws;
       return false;
     }
-    if (now - since_ < 2000 || draws <= draws_)
+    if (now - since_ < StallMs || draws <= draws_)
       return false;
     watching_ = false;
     stalled_ = true;

@@ -17,10 +17,13 @@ $common = @('-std=c++20', '-O2', '-Wall', '-Wextra', '-Werror', '-static', '-mun
 $executable = Join-Path $output 'taxi-performance-sampler.exe'
 & (Join-Path $toolchain 'clang++.exe') @common (Join-Path $PSScriptRoot 'sampler.cpp') '-lbcrypt' '-o' $executable
 if ($LASTEXITCODE -ne 0) { throw 'Performance sampler compilation failed.' }
+$poller = Join-Path $output 'ipc-poll.exe'
+& (Join-Path $toolchain 'clang++.exe') @common (Join-Path $PSScriptRoot 'ipc-poll.cpp') '-o' $poller
+if ($LASTEXITCODE -ne 0) { throw 'IPC poller compilation failed.' }
 if ($Test) {
     & (Join-Path $repository 'tests/performance/test.ps1')
 }
-$sources = @('tools/performance/sampler.cpp', 'src/shared/protocol.hpp', 'src/shared/camera_rate.hpp', 'src/shared/exposure_settings.hpp', 'src/profiles/catalog.hpp', 'src/shared/version.hpp', 'version.json')
+$sources = @('tools/performance/sampler.cpp', 'src/shared/protocol.hpp', 'src/shared/sim_messages.hpp', 'src/shared/camera_rate.hpp', 'src/shared/exposure_settings.hpp', 'src/profiles/catalog.hpp', 'src/shared/version.hpp', 'version.json')
 $manifest = @($sources | ForEach-Object {
     [ordered]@{path=$_; sha256=(Get-FileHash -LiteralPath (Join-Path $repository $_) -Algorithm SHA256).Hash}
 })

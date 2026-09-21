@@ -4,6 +4,7 @@
 #include "../camera/aircraft_identity.hpp"
 #include <dwmapi.h>
 #include <shellapi.h>
+#include <shobjidl.h>
 #include <uxtheme.h>
 #include <atomic>
 #include <cwchar>
@@ -13,7 +14,9 @@
 #include "launcher.hpp"
 #include "launcher_log.hpp"
 #include "connection_recoverability.hpp"
+#include "../shared/camera_rate_policy.hpp"
 #include "../shared/protocol.hpp"
+#include "../shared/sim_messages.hpp"
 #include "settings_store.hpp"
 #include "startup_state.hpp"
 #include "camera_hotkeys.hpp"
@@ -48,6 +51,11 @@ std::mutex app_mutex;
 win::Settings current;
 win::Status status;
 bool received_bridge_status{};  // Guarded by app_mutex; retained across simulator sessions.
+// Guarded by app_mutex. The connection worker takes unseen bridge events from
+// every status sample; the UI thread shows them (Shell_NotifyIcon from the
+// window thread only) and clears the queue.
+NotificationReader notification_reader;
+std::vector<SimEvent> pending_notifications;
 std::wstring connection = L"Waiting for Microsoft Flight Simulator 2024";
 std::atomic<bool> running{true};
 std::atomic<DWORD> simulator_pid{};
@@ -775,16 +783,87 @@ void tray(bool add) {
     Shell_NotifyIconW(NIM_SETVERSION, &data);
   }
 }
-void update_balloon() {
-  NOTIFYICONDATAW data{};
+// NIM_MODIFY balloons need the icon still registered (NIM_ADD already done) and,
+// under NOTIFYICON_VERSION_4 on Windows 10/11, a process AppUserModelID so the
+// shell can deliver a toast instead of silently dropping the legacy balloon.
+void fill_tray_identity(NOTIFYICONDATAW& data) {
   data.cbSize = sizeof(data);
   data.hWnd = window;
   data.uID = 1;
-  data.uFlags = NIF_INFO;
-  data.dwInfoFlags = NIIF_INFO | NIIF_RESPECT_QUIET_TIME;
-  wcscpy_s(data.szInfoTitle, L"Taxi Cam update downloaded");
-  wcscpy_s(data.szInfo, L"Close Microsoft Flight Simulator, then use Check for updates in the tray menu to install.");
+  data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_INFO;
+  data.uCallbackMessage = TrayMessage;
+  data.hIcon = icon;
+}
+void surface_notification(const std::wstring& body, bool alert) {
+  if (body.empty())
+    return;
+  NOTIFYICONDATAW data{};
+  fill_tray_identity(data);
+  // Never NIIF_RESPECT_QUIET_TIME: Focus Assist "when I'm playing a game" (and
+  // Quiet Hours) suppress those banners while MSFS is fullscreen — exactly when
+  // bridge events matter. Shell_NotifyIcon still returns success when suppressed.
+  data.dwInfoFlags = alert ? NIIF_WARNING : NIIF_INFO;
+  wcscpy_s(data.szInfoTitle, L"Taxi Cam");
+  wcscpy_s(data.szInfo, body.c_str());
+  std::wstring tip = body;
+  if (tip.size() >= 128)
+    tip.resize(127);
+  for (auto& ch : tip)
+    if (ch == L'\n')
+      ch = L' ';
+  wcscpy_s(data.szTip, tip.c_str());
   Shell_NotifyIconW(NIM_MODIFY, &data);
+  // Fallback when the OS still hides the banner (Focus Assist priority, per-app
+  // toast mute on a generated AUMID, full-screen cover): status line + taskbar flash.
+  notice = body;
+  if (window) {
+    FLASHWINFO flash{sizeof(flash), window, FLASHW_TRAY | FLASHW_TIMERNOFG, 4, 0};
+    FlashWindowEx(&flash);
+    InvalidateRect(window, nullptr, FALSE);
+  }
+}
+void update_balloon() {
+  surface_notification(
+      L"Update downloaded. Close Microsoft Flight Simulator, then use Check for updates in the tray menu to install.",
+      false);
+}
+// Bridge events as tray notifications. Events from one sample share a balloon
+// while they fit; a later balloon replaces an earlier one on screen, and the
+// notification centre keeps them. The bridge applied the repeat limiter.
+void show_notifications() {
+  std::vector<SimEvent> events;
+  {
+    const std::lock_guard lock(app_mutex);
+    events.swap(pending_notifications);
+  }
+  if (events.empty() || preview_ui)
+    return;
+  NOTIFYICONDATAW sizing{};
+  constexpr std::size_t capacity = sizeof(sizing.szInfo) / sizeof(sizing.szInfo[0]) - 1;
+  std::wstring body;
+  bool alert = false;
+  const auto flush = [&] {
+    if (body.empty())
+      return;
+    surface_notification(body, alert);
+    body.clear();
+    alert = false;
+  };
+  for (const auto event : events) {
+    const auto message = sim_message_for(event);
+    std::wstring line;
+    for (const char* c = message.text; *c; ++c)
+      line += static_cast<wchar_t>(static_cast<unsigned char>(*c));
+    if (line.empty() || line.size() > capacity)
+      continue;
+    if (!body.empty() && body.size() + 1 + line.size() > capacity)
+      flush();
+    if (!body.empty())
+      body += L'\n';
+    body += line;
+    alert = alert || message.alert;
+  }
+  flush();
 }
 void show() {
   ShowWindow(window, SW_SHOW);
@@ -847,7 +926,7 @@ void draw_page(HDC dc) {
          264, 446, 530, 30, small, Muted, DT_LEFT | DT_WORDBREAK);
     panel(dc, 244, 511, 766, 102);
     text(dc, L"Camera frame rate", 264, 525, 460, 30, heading);
-    text(dc, L"Min 5 fps per camera (range 5–60). This install sets 10.", 264, 564, 540, 24, small, Muted);
+    text(dc, L"Range 5–60 per camera; install default 10. Parked aircraft run at the 5 fps floor.", 264, 564, 560, 24, small, Muted);
     text(dc, L"Cameras and TAXI buttons turn off above 60 knots.", 250, 630, 730, 24, small, Muted);
   } else if (page == 1) {
     constexpr const wchar_t* labels[]{L"Right (m)", L"Up (m)", L"Forward (m)", L"Pitch (deg)", L"Yaw (deg)", L"Lens (rad)"};
@@ -871,7 +950,7 @@ void draw_page(HDC dc) {
     const wchar_t* descriptions[]{L"Exposure compensation in EV. Your calibrated baseline is −8.8.",
                                   L"Gradually brighten the camera display as ambient light drops.",
                                   L"Additional exposure at night, from 0 to +8 EV. Default: +8 EV.",
-                                  L"Activation limit per camera: min 5 fps, range 5–60. Install default: 10."};
+                                  L"Per camera, 5–60; default 10. Parked aircraft use the 5 fps floor; higher rates are capped."};
     for (int i = 0; i < 4; ++i) {
       panel(dc, 244, ys[i], 766, 105);
       text(dc, names[i], 264, ys[i] + 12, 515, 29, heading);
@@ -880,6 +959,12 @@ void draw_page(HDC dc) {
     wchar_t value[96];
     std::swprintf(value, 96, L"Currently applied exposure: %.2f EV", sample.exposure);
     text(dc, sample.heartbeat ? value : L"Applied exposure appears when the camera bridge connects.", 251, 630, 480, 24, small, Muted);
+    if (sample.heartbeat) {
+      wchar_t rate_line[192];
+      std::swprintf(rate_line, 192, L"Camera rate in use: %u fps%ls. Useful maximum on this aircraft: %u fps.", sample.effective_rate,
+                    camera_rate_limit_text(sample.rate_limits), sample.useful_rate);
+      text(dc, rate_line, 251, 654, 740, 24, small, Muted);
+    }
   } else if (page == 3) {
     panel(dc, 244, 119, 766, 226);
     text(dc, L"PFD assignment", 262, 127, 420, 30, heading);
@@ -1050,6 +1135,11 @@ DWORD WINAPI connection_worker(void*) {
     if (pid && pid != attached) {
       win::log_attach(win::settings_directory(), attach, expected_simulator);
       attached = pid;
+      {
+        // A new simulator process restarts the bridge's notification serial.
+        const std::lock_guard lock(app_mutex);
+        notification_reader.reset();
+      }
       simulator_pid = pid;
       attempted = false;
       load_started_this_session = false;
@@ -1172,6 +1262,14 @@ DWORD WINAPI connection_worker(void*) {
     if (running.load() && exchange_control(mailbox, &sample)) {
       {
         const std::lock_guard lock(app_mutex);
+        std::array<SimEvent, 8> events{};
+        const auto count = notification_reader.take(sample.notifications, GetTickCount64(), events.data(), events.size());
+        // The bridge stops publishing once it reads the setting; this covers the poll in between.
+        // The toast policy is applied here as well so routine events never reach the desktop.
+        if (current.notifications && pending_notifications.size() + count <= 32)
+          for (std::size_t i = 0; i < count; ++i)
+            if (sim_event_toasts(events[i]))
+              pending_notifications.push_back(events[i]);
         if (!connection_disconnected.load(std::memory_order_acquire)) {
           status = sample;
           if (!win::heartbeat_confirms_bridge(sample.heartbeat, ignore_heartbeat_through))
@@ -1443,6 +1541,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       refresh_connection_button();
       sync_aircraft_session();
       auto_profile();
+      show_notifications();
       if (page == 3)
         target_combos(draft());
       if (IsWindowVisible(hwnd))
@@ -1459,6 +1558,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
                     win::connection_button_label(connection_requested.load(std::memory_order_acquire)));
         AppendMenuW(menu, MF_STRING | (preview_ui || updater.busy() || update_prompt ? MF_GRAYED : 0), 603,
                     updater.busy() ? L"Checking for updates..." : L"Check for updates");
+        AppendMenuW(menu, MF_STRING | (draft().notifications ? MF_CHECKED : MF_UNCHECKED), 605, L"Show notifications");
         AppendMenuW(menu, MF_STRING, 512, L"Report a bug");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING, 601, L"Exit");
@@ -1474,6 +1574,15 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         }
         if (selected == 603)
           check_updates(true);
+        if (selected == 605) {
+          // Global preference; persisted with the other selections in settings.ini.
+          auto s = draft();
+          s.notifications = s.notifications ? 0u : 1u;
+          publish(s);
+          if (!win::save_settings(draft()))
+            notice = L"Could not save settings. Check access to your local settings folder.";
+          InvalidateRect(hwnd, nullptr, FALSE);
+        }
         if (selected == 512)
           report_bug();
         if (selected == 601) {
@@ -1761,6 +1870,10 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
 }  // namespace
 int WINAPI wWinMain(HINSTANCE app, HINSTANCE, LPWSTR, int) {
   instance = app;
+  // Required for NOTIFYICON_VERSION_4 tray toasts on Windows 10/11. Without an
+  // explicit AppUserModelID the shell assigns a generated one and often drops
+  // NIF_INFO balloons (or stores them under a muteable NotifyIconGeneratedAumid).
+  SetCurrentProcessExplicitAppUserModelID(L"TaxiCam.Companion");
   SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
   int argc{};
   auto** argv = CommandLineToArgvW(GetCommandLineW(), &argc);

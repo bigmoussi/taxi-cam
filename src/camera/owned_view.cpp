@@ -115,7 +115,7 @@ class BoundedReader {
 
   MemoryReader& reader_;
   Result& result_;
-  std::array<Observation, 32> observations_{};
+  std::array<Observation, 64> observations_{};
   std::size_t count_ = 0;
 };
 
@@ -135,12 +135,68 @@ bool valid_pool(const ViewPoolSnapshot& pool) noexcept {
   return true;
 }
 
+// The captured SetRenderTargets replay (1.9.12.0 +0x3E70BE0 and the +0x3E51C5D
+// family) binds a texture T = Bitmap+88 through
+//   record = [T+0x48] ? [[[T+0x48]+8] + 8*index] : [T+0x40]
+// and increments the bound-target count only for a non-null record, while the
+// binder (+0x3E5BFA0) walks the first `count` slots without a null check.
+// Observe exactly that resolution for subresource index 0. A null result is an
+// available observation, not a failure; malformed pointers refuse the snapshot.
+bool render_target_record(BoundedReader<OwnedViewSnapshot>& source, std::uint64_t texture, bool& present) noexcept {
+  present = false;
+  std::uint64_t table = 0;
+  if (!source.word(texture, 0x48, table))
+    return false;
+  if (table != 0) {
+    std::uint64_t entries = 0;
+    if (!source.word(table, 8, entries))
+      return false;
+    if (entries == 0)
+      return true;
+    std::uint64_t entry = 0;
+    if (!source.word(entries, 0, entry))
+      return false;
+    present = entry != 0;
+    return true;
+  }
+  std::uint64_t direct = 0;
+  if (!source.word(texture, 0x40, direct))
+    return false;
+  present = direct != 0;
+  return true;
+}
+
+// Diagnostic observation of the two other material slots the captured output
+// routine manages (add-diffuse 664, depth-stencil 712): Bitmap, texture and
+// render-target record presence only. Nothing here changes camera readiness.
+bool output_slot(BoundedReader<OwnedViewSnapshot>& source,
+                 std::uint64_t material,
+                 std::uint64_t offset,
+                 OutputSlotObservation& slot) noexcept {
+  slot = {};
+  std::uint64_t bitmap = 0;
+  if (!source.handle(material, offset, bitmap))
+    return false;
+  if (bitmap == 0)
+    return true;
+  slot.bitmap = true;
+  std::uint64_t texture = 0;
+  if (!source.word(bitmap, 88, texture))
+    return false;
+  if (texture == 0)
+    return true;
+  slot.texture = true;
+  return render_target_record(source, texture, slot.render_target_record);
+}
+
 bool output_resource(BoundedReader<OwnedViewSnapshot>& source,
                      OwnedViewSnapshot& result,
                      std::uint64_t entry,
                      std::uint64_t view,
                      std::uint64_t& address,
-                     std::array<std::int32_t, 2>& output_dimensions) noexcept {
+                     std::array<std::int32_t, 2>& output_dimensions,
+                     std::array<OutputSlotObservation, 3>& slots) noexcept {
+  slots = {};
   std::uint64_t entry_material = 0;
   std::uint64_t view_material = 0;
   if (!source.handle(entry, 80, entry_material) || !source.handle(view, 144, view_material))
@@ -154,11 +210,17 @@ bool output_resource(BoundedReader<OwnedViewSnapshot>& source,
     return false;
   if (bitmap == 0)
     return true;
+  slots[0].bitmap = true;
   std::uint64_t record = 0;
   if (!source.word(bitmap, 88, record))
     return false;
   if (record == 0)
     return true;
+  slots[0].texture = true;
+  if (!render_target_record(source, record, slots[0].render_target_record))
+    return false;
+  if (!output_slot(source, entry_material, 664, slots[1]) || !output_slot(source, entry_material, 712, slots[2]))
+    return false;
   std::uint64_t wrapper = 0;
   if (!source.word(record, 16, wrapper))
     return false;
@@ -353,7 +415,8 @@ OwnedViewSnapshot inspect_owned_view(MemoryReader& reader,
   const std::array<std::uint64_t, 2> flags{u64(bytes.data()), u64(bytes.data() + 8)};
   std::uint64_t resource_address = 0;
   std::array<std::int32_t, 2> output_dimensions{};
-  if (!output_resource(source, result, entry_address, view, resource_address, output_dimensions) || !source.recheck())
+  std::array<OutputSlotObservation, 3> output_slots{};
+  if (!output_resource(source, result, entry_address, view, resource_address, output_dimensions, output_slots) || !source.recheck())
     return result;
   result.complete = true;
   result.ready = true;
@@ -369,6 +432,7 @@ OwnedViewSnapshot inspect_owned_view(MemoryReader& reader,
   result.flags = flags;
   result.resource_present = resource_address != 0;
   result.resource_address = resource_address;
+  result.output_slots = output_slots;
   return result;
 }
 

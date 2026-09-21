@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include "../camera/body_pose_provider.hpp"
 #include "../camera/mount_config.hpp"
@@ -8,19 +9,39 @@
 #include "../graphics/display_exposure.hpp"
 #include "../graphics/taxi_button_routes.hpp"
 #include "../hooks/render_boundary_observer.hpp"
+#include "../shared/camera_rate_policy.hpp"
 #include "../shared/companion_control.hpp"
 #include "../shared/protocol.hpp"
 #include "../shared/rotating_log.hpp"
 #include "../shared/scene_demand.hpp"
+#include "../shared/sim_messages.hpp"
 #include "camera_status.hpp"
 #include "crash_evidence.hpp"
 #include "d3d12_bridge.hpp"
+#include "freeze_watchdog.hpp"
 #include "native_hooks.hpp"
 
 namespace {
 using namespace taxi_camera;
 namespace win = standalone;
 std::atomic<bool> started{};
+// Published by the bridge worker for the presentation watchdog thread.
+std::atomic<std::uint64_t> worker_heartbeat_ms{};
+std::atomic<bool> bridge_connected{};
+std::atomic<unsigned> watchdog_trips{};
+std::atomic<std::uint64_t> watchdog_last_stall_ms{};
+std::atomic<bool> notifications_enabled{};
+// Admitted events for the companion's tray notifications; the worker copies
+// the log into every IPC status it publishes. Nothing is shown from here.
+// Only sim_event_toasts() events are published; the rest are tracked for the
+// status line and the log.
+SimEventLog notification_log;
+constexpr std::uint64_t WorkerAliveMs = 10000;  // Contract scans have taken 4 s per iteration.
+void announce(SimEvent event, SimMessageLimiter& limiter, std::uint64_t now) noexcept {
+  if (!notifications_enabled.load(std::memory_order_acquire) || !admit_toast(limiter, event, now))
+    return;
+  notification_log.publish(event, now);
+}
 void log_status(const win::Status& s, const char* detail = "") noexcept {
   try {
     wchar_t directory[32768]{};
@@ -70,6 +91,107 @@ void log_startup(const win::Status& status, const StartupTiming& timing, const c
                 static_cast<unsigned long long>(timing.stamped ? timing.stamp_ms - timing.intent_ms : 0));
   log_status(status, detail);
 }
+void log_contention(const win::Status& status, const win::GraphicsStatus& graphics, const scene_runtime::Snapshot& output) {
+  char detail[1536];
+  auto used = static_cast<std::size_t>(std::snprintf(
+      detail, sizeof(detail),
+      "Render-thread contention: armed=%u pulse=%llu queue_calls=%llu queue_contended=%llu manager_evidence=%llu "
+      "manager_lifecycle=%llu manager_submit=%llu unordered=%llu gated=%llu deferred_retirements=%llu deferred_evidence=%llu "
+      "deferred_overflows=%llu deferred_lifecycle=%llu "
+      "runtime_writes=%llu watchdog_trips=%u last_stall_ms=%llu notifications=%u/%llu hook_failures=%llu "
+      "failure_rate_peak=%llu admission_halted=%u wipes=%llu last_wipe=%s unordered_consumers=%llu contended_invalidations=%llu "
+      "unobserved_admissions=%llu source_retirements=%llu retirement_restored=%llu last_retirement=0x%x",
+      graphics.armed, static_cast<unsigned long long>(graphics.frame_pulse), static_cast<unsigned long long>(graphics.queue_calls),
+      static_cast<unsigned long long>(graphics.queue_contended), static_cast<unsigned long long>(output.capture.contended_evidence),
+      static_cast<unsigned long long>(output.capture.contended_lifecycle),
+      static_cast<unsigned long long>(output.capture.contended_submissions),
+      static_cast<unsigned long long>(output.capture.unordered_submissions),
+      static_cast<unsigned long long>(output.capture.gated_submissions),
+      static_cast<unsigned long long>(output.capture.deferred_retirements),
+      static_cast<unsigned long long>(output.capture.deferred_evidence), static_cast<unsigned long long>(output.capture.deferred_overflows),
+      static_cast<unsigned long long>(graphics.deferred_lifecycle), static_cast<unsigned long long>(output.contended_writes),
+      watchdog_trips.load(std::memory_order_relaxed),
+      static_cast<unsigned long long>(watchdog_last_stall_ms.load(std::memory_order_relaxed)),
+      notifications_enabled.load(std::memory_order_relaxed), static_cast<unsigned long long>(notification_log.published()),
+      static_cast<unsigned long long>(graphics.hook_failures), static_cast<unsigned long long>(graphics.failure_rate_peak),
+      graphics.admission_halted, static_cast<unsigned long long>(output.capture.wipes),
+      SceneCaptureManager::wipe_site_name(output.capture.last_wipe_site),
+      static_cast<unsigned long long>(output.capture.unordered_consumers),
+      static_cast<unsigned long long>(graphics.contended_invalidations), static_cast<unsigned long long>(graphics.unobserved_admissions),
+      static_cast<unsigned long long>(output.capture.source_retirements),
+      static_cast<unsigned long long>(output.capture.retirement_restored), output.capture.last_retirement_origins));
+  const auto append = [&](const char* prefix, const char* name, std::uint64_t value) {
+    if (used >= sizeof(detail))
+      return;
+    const auto written =
+        std::snprintf(detail + used, sizeof(detail) - used, " %s%s=%llu", prefix, name, static_cast<unsigned long long>(value));
+    if (written > 0 && static_cast<std::size_t>(written) < sizeof(detail) - used)
+      used += static_cast<std::size_t>(written);
+    else
+      used = sizeof(detail);
+  };
+  // Per-origin deferred_sources wipes and scoped retirements: which publisher
+  // still wipes, and which one now retires and rearms in place.
+  for (std::size_t bit = 0; bit < SceneCaptureManager::OriginCount; ++bit) {
+    append("wipe_", SceneCaptureManager::uncertainty_origin_name(bit), output.capture.wipe_origin_counts[bit]);
+    append("retire_", SceneCaptureManager::uncertainty_origin_name(bit), output.capture.retirement_origin_counts[bit]);
+  }
+  for (unsigned i = 0; i < graphics.contention.size(); ++i)
+    append("", win::contention_site_name(static_cast<win::ContentionSite>(i)), graphics.contention[i]);
+  log_status(status, detail);
+}
+// Dedicated thread: reads counters, never takes a bridge lock, and flips the
+// graphics gate. The worker applies the camera disarm on its next iteration.
+DWORD WINAPI watchdog_run(void*) noexcept {
+  FreezeWatchdog watchdog;
+  SimMessageLimiter limiter;
+  for (;;) {
+    Sleep(250);
+    const auto now = GetTickCount64();
+    const auto heartbeat = worker_heartbeat_ms.load(std::memory_order_acquire);
+    const auto telemetry = native_camera::get_body_telemetry_timing();
+    const auto session = native_camera::get_aircraft_session_readiness();
+    const auto pulse = win::frame_pulse();
+    const auto decision = watchdog.observe({now, pulse, pulse != 0, telemetry.accepted_samples, session.ready,
+                                            win::graphics_ready() && bridge_connected.load(std::memory_order_acquire),
+                                            heartbeat != 0 && now >= heartbeat && now - heartbeat < WorkerAliveMs});
+    if (!decision.trip && !decision.recover && !decision.telemetry_stall_noted && !decision.presentation_stall_noted)
+      continue;
+    win::Status status{};
+    status.heartbeat = now;
+    if (decision.trip) {
+      // Atomic gate only: observation idles, PFD plans refuse, the capture
+      // manager escapes every submission. No wait, no GPU resource touched.
+      win::set_graphics_armed(false);
+      watchdog_trips.fetch_add(1, std::memory_order_relaxed);
+      watchdog_last_stall_ms.store(decision.stalled_ms, std::memory_order_relaxed);
+      // Posted here so the notice does not depend on the worker being free.
+      announce(SimEvent::presentation_stalled, limiter, now);
+    } else if (decision.recover) {
+      win::set_graphics_armed(true);
+    }
+    const auto graphics = win::graphics_status();
+    const auto output = scene_runtime::snapshot(graphics.device);
+    char detail[512];
+    std::snprintf(detail, sizeof(detail),
+                  "Presentation watchdog: event=%s reason=%s stalled_ms=%llu worker_alive=%u pulse=%llu sim_frames=%llu "
+                  "session_ready=%u trips=%u",
+                  decision.trip                       ? "tripped"
+                  : decision.recover                  ? "recovered"
+                  : decision.presentation_stall_noted ? "presentation_quiet"
+                                                      : "telemetry_stall",
+                  decision.reason, static_cast<unsigned long long>(decision.stalled_ms), decision.worker_alive,
+                  static_cast<unsigned long long>(pulse), static_cast<unsigned long long>(telemetry.accepted_samples), session.ready,
+                  watchdog.trips());
+    std::snprintf(status.message, sizeof(status.message), "%s",
+                  decision.trip                       ? "Presentation stalled: cameras disarmed so the simulator can keep running."
+                  : decision.recover                  ? "Presentation resumed: cameras re-armed."
+                  : decision.presentation_stall_noted ? "Hooked presentation went quiet while simulator frames continue."
+                                                      : "Simulator frame telemetry paused while presentation continues.");
+    log_status(status, detail);
+    log_contention(status, graphics, output);
+  }
+}
 DWORD run_impl() {
   win::Mailbox mailbox;
   if (!mailbox.open(GetCurrentProcessId(), false))
@@ -108,6 +230,12 @@ DWORD run_impl() {
                                     graphics_diagnostics_option[0] == L'1';
   win::set_graphics_diagnostics_enabled(graphics_diagnostics);
   win::set_graphics_observation_demand(false);
+  worker_heartbeat_ms.store(GetTickCount64(), std::memory_order_release);
+  if (HANDLE watchdog = CreateThread(nullptr, 0, watchdog_run, nullptr, 0, nullptr)) {
+    CloseHandle(watchdog);
+    log_status(status, "Presentation watchdog started.");
+  } else
+    log_status(status, "Presentation watchdog unavailable.");
   // The Windows companion owns mount settings for native sessions.
   TaxiButtonIntent intent;
   DisplayExposureController exposure;
@@ -128,6 +256,8 @@ DWORD run_impl() {
   };
   std::vector<PfdTargetObservation> inventory;
   unsigned rate{}, feeds{}, applied_profile{};
+  ParkedRatePolicy parked_policy;
+  EffectiveCameraRate effective_rate;
   std::uint64_t applied_profile_request{}, applied_session_epoch{};
   std::uint64_t pending_profile_request{}, pending_session_epoch{}, transition_token{};
   unsigned pending_profile{};
@@ -139,15 +269,95 @@ DWORD run_impl() {
   win::CompanionSetupSession connection_session;
   std::uint64_t applied_connection{}, pending_connection{};
   win::Status last_logged{};
-  bool logged = false, last_connected = false, last_requested = false;
+  bool logged = false, last_connected = false, last_requested = false, last_degraded = false, halted_logged = false;
+  SimEventTracker sim_events;
+  SimMessageLimiter sim_limiter;
+  const auto announce_all = [&](const SimEventInputs& inputs, std::uint64_t at) {
+    std::array<SimEvent, 8> events{};
+    const auto count = sim_events.observe(inputs, events.data(), events.size());
+    for (std::size_t i = 0; i < count; ++i)
+      announce(events[i], sim_limiter, at);
+  };
   std::uint64_t last_stop_sequence{};
   std::array<std::array<double, 6>, 2> applied_mounts{};
+  // Diagnostics: counters at the previous loop tick, so a wipe line can show
+  // which writer moved with it.
+  struct WipeTrace {
+    std::uint64_t wipes{}, evidence{}, lifecycle{}, submit{}, unordered{}, unordered_consumers{}, deferred_retirements{};
+    std::uint64_t deferred_evidence{}, unknown_lists{}, invalid_recordings{}, retired_recordings{}, registry_recording{};
+    std::uint64_t contended_invalidations{}, source_retirements{}, retirement_restored{};
+  } wipe_trace;
+  const auto log_retirement = [&](const win::Status& at, const scene_runtime::Snapshot& output) {
+    const auto& capture = output.capture;
+    char detail[320];
+    std::snprintf(detail, sizeof(detail),
+                  "Source-state retire: n=%llu origins=0x%x restored=+%llu tail=%s deferred_retirements=+%llu manager_submit=+%llu "
+                  "unordered=+%llu unordered_consumers=+%llu",
+                  static_cast<unsigned long long>(capture.source_retirements), capture.last_retirement_origins,
+                  static_cast<unsigned long long>(capture.retirement_restored - wipe_trace.retirement_restored), capture.tail_status,
+                  static_cast<unsigned long long>(capture.deferred_retirements - wipe_trace.deferred_retirements),
+                  static_cast<unsigned long long>(capture.contended_submissions - wipe_trace.submit),
+                  static_cast<unsigned long long>(capture.unordered_submissions - wipe_trace.unordered),
+                  static_cast<unsigned long long>(capture.unordered_consumers - wipe_trace.unordered_consumers));
+    log_status(at, detail);
+  };
+  const auto log_wipe = [&](const win::Status& at, const scene_runtime::Snapshot& output, const win::GraphicsStatus& graphics) {
+    const auto& capture = output.capture;
+    const auto registry_recording = graphics.contention[static_cast<unsigned>(win::ContentionSite::registry_recording)];
+    char detail[768];
+    std::snprintf(
+        detail, sizeof(detail),
+        "Source-state wipe: n=%llu site=%s origins=0x%x tail=%s unknown_lists=+%llu invalid_recordings=+%llu "
+        "retired_recordings=+%llu deferred_retirements=+%llu deferred_evidence=+%llu manager_evidence=+%llu manager_lifecycle=+%llu "
+        "manager_submit=+%llu unordered=+%llu unordered_consumers=+%llu registry_recording=+%llu contended_invalidations=+%llu",
+        static_cast<unsigned long long>(capture.wipes), SceneCaptureManager::wipe_site_name(capture.last_wipe_site),
+        capture.last_wipe_origins, capture.tail_status,
+        static_cast<unsigned long long>(capture.unknown_submitted_lists - wipe_trace.unknown_lists),
+        static_cast<unsigned long long>(capture.invalid_source_recordings - wipe_trace.invalid_recordings),
+        static_cast<unsigned long long>(capture.retired_source_recordings - wipe_trace.retired_recordings),
+        static_cast<unsigned long long>(capture.deferred_retirements - wipe_trace.deferred_retirements),
+        static_cast<unsigned long long>(capture.deferred_evidence - wipe_trace.deferred_evidence),
+        static_cast<unsigned long long>(capture.contended_evidence - wipe_trace.evidence),
+        static_cast<unsigned long long>(capture.contended_lifecycle - wipe_trace.lifecycle),
+        static_cast<unsigned long long>(capture.contended_submissions - wipe_trace.submit),
+        static_cast<unsigned long long>(capture.unordered_submissions - wipe_trace.unordered),
+        static_cast<unsigned long long>(capture.unordered_consumers - wipe_trace.unordered_consumers),
+        static_cast<unsigned long long>(registry_recording - wipe_trace.registry_recording),
+        static_cast<unsigned long long>(graphics.contended_invalidations - wipe_trace.contended_invalidations));
+    log_status(at, detail);
+  };
+  const auto remember_wipe_trace = [&](const scene_runtime::Snapshot& output, const win::GraphicsStatus& graphics) {
+    const auto& capture = output.capture;
+    wipe_trace = {capture.wipes,
+                  capture.contended_evidence,
+                  capture.contended_lifecycle,
+                  capture.contended_submissions,
+                  capture.unordered_submissions,
+                  capture.unordered_consumers,
+                  capture.deferred_retirements,
+                  capture.deferred_evidence,
+                  capture.unknown_submitted_lists,
+                  capture.invalid_source_recordings,
+                  capture.retired_source_recordings,
+                  graphics.contention[static_cast<unsigned>(win::ContentionSite::registry_recording)],
+                  graphics.contended_invalidations,
+                  capture.source_retirements,
+                  capture.retirement_restored};
+  };
   for (;;) {
     control.refresh(mailbox);
     const auto now = GetTickCount64();
+    worker_heartbeat_ms.store(now, std::memory_order_release);
     const auto& settings = control.settings();
     const auto owner_pid = control.owner_pid();
     const bool connected = control.connected(now);
+    bridge_connected.store(connected && settings.enabled != 0, std::memory_order_release);
+    notifications_enabled.store(settings.notifications != 0, std::memory_order_release);
+    SimEventInputs sim_inputs;
+    sim_inputs.connected = connected && settings.enabled;
+    // Watchdog trip: the gate is already closed on every hook; this iteration
+    // also takes the cameras down through the ordinary demand path.
+    const bool degraded = !win::graphics_armed();
     const auto connection = connection_session.observe(connected, settings.enabled != 0, control.owner_pid(), settings.profile_request);
     if (connection.stopped) {
       win::set_target_mask(0);
@@ -171,6 +381,7 @@ DWORD run_impl() {
       startup = warmup_startup = {};
       route_request = 0;
       log_status(status, "Connection stopped: camera output closed; next Connect will rescan and set up again.");
+      sim_inputs.connection_stopped = true;
     }
     const auto session_epoch = native_camera::get_aircraft_session_epoch();
     const auto session = native_camera::get_aircraft_session_readiness();
@@ -251,6 +462,7 @@ DWORD run_impl() {
                       : !telemetry_ready ? "Waiting for aircraft telemetry to stop."
                       : !public_ready    ? "Waiting for the flight to finish loading and fresh camera telemetry."
                                          : "Waiting for camera GPU session reset.");
+        notification_log.snapshot(pending.notifications);
         if (mailbox.lock()) {
           mailbox.data()->status = pending;
           mailbox.unlock();
@@ -276,6 +488,9 @@ DWORD run_impl() {
           native_camera::initialize_body_pose_provider();
           next_telemetry = now + 2000;
         }
+        sim_inputs.degraded = degraded;
+        sim_inputs.simulator_unsupported = transition.profile_transition_failed;
+        announce_all(sim_inputs, now);
         Sleep(25);
         continue;
       }
@@ -332,14 +547,14 @@ DWORD run_impl() {
     const auto buttons = native_camera::get_taxi_buttons();
     const auto cutoff = native_camera::get_taxi_cutoff();
     const auto desired = intent.observe(now, buttons.valid, buttons.left_on, buttons.right_on);
-    const unsigned mask =
-        connected && session_settings && session.ready && settings.enabled && aircraft_matches && win::graphics_ready() && !cutoff.inhibited
-            ? (settings.follow_taxi && !manual_only ? desired.buttons
-               : session_settings                   ? settings.manual_mask
-                                                    : 0)
-            : 0;
-    const bool test_scene =
-        connected && session_settings && session.ready && settings.enabled && aircraft_matches && settings.scene_test && !cutoff.inhibited;
+    const unsigned mask = connected && session_settings && session.ready && settings.enabled && aircraft_matches && win::graphics_ready() &&
+                                  !cutoff.inhibited && !degraded
+                              ? (settings.follow_taxi && !manual_only ? desired.buttons
+                                 : session_settings                   ? settings.manual_mask
+                                                                      : 0)
+                              : 0;
+    const bool test_scene = connected && session_settings && session.ready && settings.enabled && aircraft_matches && settings.scene_test &&
+                            !cutoff.inhibited && !degraded;
     const auto intent_observed_ms = GetTickCount64();
     if (!mask && !test_scene && !prewarm.active())
       failed = false;
@@ -404,19 +619,26 @@ DWORD run_impl() {
         log_status(status, detail);
       }
     }
-    const auto demand = win::scene_demand(mask, test_scene, assigned, requested, failed, background_warmup);
+    const auto demand = win::scene_demand(mask, test_scene, assigned, requested, failed, background_warmup && !degraded);
     unsigned active = demand.stamp_mask;
-    const unsigned calibration = connected && session_settings && session.ready && settings.enabled && aircraft_matches && !cutoff.inhibited
-                                     ? settings.calibration_mask
-                                     : 0;
+    const unsigned calibration =
+        connected && session_settings && session.ready && settings.enabled && aircraft_matches && !cutoff.inhibited && !degraded
+            ? settings.calibration_mask
+            : 0;
     // Warmup and scene-only diagnostics need capture observation without PFD
     // writes. Settled OFF may bypass PFD state while lifetime tracking remains.
     win::set_graphics_observation_demand(!demand.suspend || calibration != 0);
     win::set_target_mask(active);
     win::set_calibration(calibration, settings.calibration_budget);
     const win::OwnedWork owned;
-    if (connected && (rate != settings.camera_rate || feeds != (settings.single_camera ? 1u : 2u))) {
-      rate = settings.camera_rate;
+    // Only the schedule rate changes here. The pair, its gates and the saved
+    // camera_rate are untouched; configure() on a live pair retains deadlines.
+    const bool parked = parked_policy.update(now, speed.valid, speed.knots);
+    const auto* rate_profile = profiles::find(applied_profile ? applied_profile : settings.profile);
+    effective_rate =
+        effective_camera_rate(settings.camera_rate, rate_profile ? rate_profile->pfd_refresh_hz : 0, parked, settings.parked_rate);
+    if (connected && (rate != effective_rate.rate || feeds != (settings.single_camera ? 1u : 2u))) {
+      rate = effective_rate.rate;
       feeds = settings.single_camera ? 1u : 2u;
       native_camera::request_scene_rate(rate, feeds);
       scene_runtime::manager().set_source_rate(rate);
@@ -553,15 +775,35 @@ DWORD run_impl() {
       // wipe source-state without new RT barriers; rearm retained RT models
       // so later draws can capture again. Never erase/recreate cameras here.
       if (progress.observe(now, eligible, output.frames, output.capture.source_draws,
-                           std::strcmp(output.capture.tail_status, "unknown_source_state") == 0))
-        scene_runtime::manager().rearm_source_states();
+                           std::strcmp(output.capture.tail_status, "unknown_source_state") == 0)) {
+        const auto restored = scene_runtime::manager().rearm_source_states();
+        if (graphics_diagnostics) {
+          const auto now_us = static_cast<std::uint64_t>(
+              std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+          const auto since_wipe_ms =
+              output.capture.last_wipe_us && now_us >= output.capture.last_wipe_us ? (now_us - output.capture.last_wipe_us) / 1000 : 0;
+          char rearm_detail[160];
+          std::snprintf(rearm_detail, sizeof(rearm_detail), "Source-state rearm: restored=%u since_wipe_ms=%llu last_wipe=%s", restored,
+                        static_cast<unsigned long long>(since_wipe_ms), SceneCaptureManager::wipe_site_name(output.capture.last_wipe_site));
+          log_status(status, rearm_detail);  // Previous tick's status: this tick's is composed below.
+        }
+      }
       next_recovery = now + 250;
     }
     const auto graphics = win::graphics_status();
+    if (graphics_diagnostics && output.capture.wipes != wipe_trace.wipes)
+      log_wipe(status, output, graphics);
+    if (graphics_diagnostics && output.capture.source_retirements != wipe_trace.source_retirements)
+      log_retirement(status, output);
+    remember_wipe_trace(output, graphics);
     status = {};
     status.heartbeat = now;
     status.active_profile = applied_profile;
     status.detected_profile = identity.fresh ? identity.detected_profile : 0;
+    status.effective_rate = rate ? rate : effective_rate.rate;
+    status.useful_rate = effective_rate.useful_maximum;
+    status.rate_limits = effective_rate.reasons;
+    status.parked = parked;
     status.identity_sample_ms = identity.fresh ? identity.sample_ms : 0;
     status.aircraft_session_epoch = session_epoch;
     // Read acknowledgement first: a retired command must never be paired with
@@ -649,10 +891,13 @@ DWORD run_impl() {
     const auto stopped_camera = camera_stop_message(scene);
     const char* message =
         !connected || !settings.enabled ? "Disconnected. Use Connect in the Windows companion."
-        : !aircraft_matches             ? aircraft_message
-        : cutoff.inhibited ? (manual_only ? "Above 60 knots: camera displays inhibited." : "Above 60 knots: TAXI buttons commanded off.")
-        : failed                                         ? scene.message.c_str()
-        : scene.pose_waiting && requested               ? scene.message.c_str()
+        : degraded && graphics.admission_halted
+            ? "Native hook failures exceeded the safe rate; Taxi Cam is disarmed for this simulator session. Restart MSFS to re-enable it."
+        : degraded          ? "Presentation stalled: cameras disarmed so the simulator can keep running; they re-arm when frames resume."
+        : !aircraft_matches ? aircraft_message
+        : cutoff.inhibited  ? (manual_only ? "Above 60 knots: camera displays inhibited." : "Above 60 knots: TAXI buttons commanded off.")
+        : failed            ? scene.message.c_str()
+        : scene.pose_waiting && requested                                                               ? scene.message.c_str()
         : scene.view_waiting && scene.stop_reason == native_camera::SceneStopReason::resolution_changed ? scene.message.c_str()
         : !manual_only && !buttons.valid                                                                ? buttons.error
         : !manual_only && taxi_request_status.failed && taxi_request_status.serial == settings.taxi_request
@@ -669,15 +914,38 @@ DWORD run_impl() {
         : output.output && !output.stamps      ? "Camera images ready; waiting for a verified PFD write opportunity."
                                                : output.message;
     std::snprintf(status.message, sizeof(status.message), "%s", message);
+    notification_log.snapshot(status.notifications);
     if (mailbox.lock()) {
       mailbox.data()->status = status;
       mailbox.unlock();
     }
-    const bool changed = !logged || connected != last_connected || requested != last_requested ||
+    if (graphics.admission_halted && !halted_logged) {
+      halted_logged = true;
+      char halt_detail[384];
+      std::snprintf(halt_detail, sizeof(halt_detail),
+                    "Hook admission halted: registration failures reached %llu in one second (total %llu). Cameras disarmed and "
+                    "admission stopped for this simulator process.",
+                    static_cast<unsigned long long>(graphics.failure_rate_peak), static_cast<unsigned long long>(graphics.hook_failures));
+      log_status(status, halt_detail);
+      log_contention(status, graphics, output);
+    }
+    sim_inputs.hook_storm = graphics.admission_halted;
+    sim_inputs.cameras_ready = output.output;
+    sim_inputs.simulator_unsupported =
+        scene.pair.state == engine_camera::State::blocked || scene.stop_reason == native_camera::SceneStopReason::identity_refused;
+    sim_inputs.degraded = degraded;
+    sim_inputs.speed_cutoff = cutoff.inhibited;
+    sim_inputs.aircraft_mismatch = !aircraft_matches && identity.fresh;
+    sim_inputs.camera_startup_failed =
+        (failed && requested) || (stopped_camera != nullptr && !native_camera::retryable_scene_stop(scene.stop_reason));
+    sim_inputs.capture_paused = active && requested && progress.stalled();
+    announce_all(sim_inputs, now);
+    const bool changed = !logged || connected != last_connected || requested != last_requested || degraded != last_degraded ||
                          status.taxi_mask != last_logged.taxi_mask || status.left_id != last_logged.left_id ||
                          status.right_id != last_logged.right_id || status.speed_inhibited != last_logged.speed_inhibited ||
                          scene.stop_sequence != last_stop_sequence || output.output != last_output ||
-                         scene.view_wait_count != last_view_wait_count;
+                         scene.view_wait_count != last_view_wait_count || status.effective_rate != last_logged.effective_rate ||
+                         status.parked != last_logged.parked;
     loop_max_ms = std::max(loop_max_ms, GetTickCount64() - now);
     if (changed || now >= next_log) {
       if (!logged || status.active_profile != last_logged.active_profile || status.detected_profile != last_logged.detected_profile ||
@@ -692,44 +960,55 @@ DWORD run_impl() {
       }
       char detail[1536];
       const auto boundaries = engine_hook::render_boundary::statistics();
-      std::snprintf(detail, sizeof(detail),
-                    "profile=%u matched=%u connected=%u requested=%u ipc_busy=%llu buttons_valid=%u held=%u expired=%u output=%u "
-                    "stop_seq=%llu stop=%s "
-                    "retry=%u pending=%u pose_wait=%u view_wait=%u waits=%llu ready=%u/%u outputs=%u/%u output_waits=%u inspection=%s/%s "
-                    "entries=%llu/%llu suspended=%u "
-                    "gates=%u/%u tail=%s "
-                    "draws=%llu unknown_lists=%llu invalid_recordings=%llu scoped_invalidations=%llu invalid_draws=%llu "
-                    "lease_failures=%llu global_aliases=%llu overflows=%llu reasons=0x%x capture_stalled=%u "
-                    "barrier_max=%llu barrier_truncated=%llu probe_ms=%.3f queries=%llu query_ms=%.3f read_ms=%.3f "
-                    "allocation_queries=%llu page_queries=%llu region_queries=%llu aa_ms=%.3f "
-                    "inspections=%llu updates=%llu clear_states=%llu | %.256s",
-                    applied_profile, aircraft_matches, connected, requested, static_cast<unsigned long long>(control.busy_reads()),
-                    buttons.valid, desired.held, desired.timed_out, output.output, static_cast<unsigned long long>(scene.stop_sequence),
-                    native_camera::scene_stop_reason_name(scene.stop_reason), scene.recovery_attempts, scene.recovery_pending,
-                    scene.pose_waiting, scene.view_waiting, static_cast<unsigned long long>(scene.view_wait_count), scene.ready[0],
-                    scene.ready[1], scene.output_ready[0], scene.output_ready[1], scene.output_waits, scene.inspection_status[0],
-                    scene.inspection_status[1], static_cast<unsigned long long>(scene.pair.owned_ids[0]),
-                    static_cast<unsigned long long>(scene.pair.owned_ids[1]), demand.suspend, scene.gates[0], scene.gates[1],
-                    output.capture.tail_status, static_cast<unsigned long long>(output.capture.source_draws),
-                    static_cast<unsigned long long>(output.capture.unknown_submitted_lists),
-                    static_cast<unsigned long long>(output.capture.invalid_source_recordings),
-                    static_cast<unsigned long long>(output.capture.scoped_source_invalidations),
-                    static_cast<unsigned long long>(output.capture.invalid_draws),
-                    static_cast<unsigned long long>(output.capture.source_lease_failures),
-                    static_cast<unsigned long long>(output.capture.global_aliases),
-                    static_cast<unsigned long long>(output.capture.recording_overflows), output.capture.last_invalidation_reasons,
-                    progress.stalled(), static_cast<unsigned long long>(boundaries.maximum_legacy_batch),
-                    static_cast<unsigned long long>(boundaries.metadata_truncated_calls), scene.observer_last_ms,
-                    static_cast<unsigned long long>(scene.performance.query_calls), scene.performance.query_ms, scene.performance.read_ms,
-                    static_cast<unsigned long long>(scene.performance.query_allocation_calls),
-                    static_cast<unsigned long long>(scene.performance.query_page_calls),
-                    static_cast<unsigned long long>(scene.performance.query_fallback_calls),
-                    scene.performance.stage_ms[static_cast<std::size_t>(native_camera::ProbeStage::aa)],
-                    static_cast<unsigned long long>(scene.inspection_count), static_cast<unsigned long long>(scene.updates),
-                    static_cast<unsigned long long>(graphics.clear_states),
-                    scene.stop_reason != native_camera::SceneStopReason::none ? scene.stop_detail.c_str()
-                    : !scene.pair.owned_ids[0] && !scene.pair.owned_ids[1]      ? scene.message.c_str()
-                                                                                : "");
+      std::snprintf(
+          detail, sizeof(detail),
+          "profile=%u matched=%u connected=%u requested=%u ipc_busy=%llu buttons_valid=%u held=%u expired=%u output=%u "
+          "stop_seq=%llu stop=%s "
+          "retry=%u pending=%u pose_wait=%u view_wait=%u waits=%llu ready=%u/%u outputs=%u/%u output_waits=%u inspection=%s/%s "
+          "entries=%llu/%llu suspended=%u "
+          "rate=%u saved_rate=%u useful_rate=%u rate_limit=%s parked=%u speed_knots=%.2f "
+          "gates=%u/%u tail=%s "
+          "draws=%llu unknown_lists=%llu invalid_recordings=%llu scoped_invalidations=%llu ignored_recordings=%llu "
+          "pass_no_rts=%llu pass_unresolved_rts=%llu invalid_draws=%llu "
+          "lease_failures=%llu global_aliases=%llu overflows=%llu reasons=0x%x capture_stalled=%u "
+          "wipes=%llu last_wipe=%s retired_recordings=%llu unordered_consumers=%llu retirements=%llu "
+          "barrier_max=%llu barrier_truncated=%llu probe_ms=%.3f queries=%llu query_ms=%.3f read_ms=%.3f "
+          "allocation_queries=%llu page_queries=%llu region_queries=%llu aa_ms=%.3f "
+          "inspections=%llu updates=%llu clear_states=%llu | %.256s",
+          applied_profile, aircraft_matches, connected, requested, static_cast<unsigned long long>(control.busy_reads()), buttons.valid,
+          desired.held, desired.timed_out, output.output, static_cast<unsigned long long>(scene.stop_sequence),
+          native_camera::scene_stop_reason_name(scene.stop_reason), scene.recovery_attempts, scene.recovery_pending, scene.pose_waiting,
+          scene.view_waiting, static_cast<unsigned long long>(scene.view_wait_count), scene.ready[0], scene.ready[1], scene.output_ready[0],
+          scene.output_ready[1], scene.output_waits, scene.inspection_status[0], scene.inspection_status[1],
+          static_cast<unsigned long long>(scene.pair.owned_ids[0]), static_cast<unsigned long long>(scene.pair.owned_ids[1]),
+          demand.suspend, status.effective_rate, settings.camera_rate, status.useful_rate, camera_rate_limit_name(status.rate_limits),
+          status.parked, speed.valid ? speed.knots : -1.0, scene.gates[0], scene.gates[1], output.capture.tail_status,
+          static_cast<unsigned long long>(output.capture.source_draws),
+          static_cast<unsigned long long>(output.capture.unknown_submitted_lists),
+          static_cast<unsigned long long>(output.capture.invalid_source_recordings),
+          static_cast<unsigned long long>(output.capture.scoped_source_invalidations),
+          static_cast<unsigned long long>(output.capture.ignored_source_recordings),
+          static_cast<unsigned long long>(graphics.pass_no_targets), static_cast<unsigned long long>(graphics.pass_unresolved_targets),
+          static_cast<unsigned long long>(output.capture.invalid_draws),
+          static_cast<unsigned long long>(output.capture.source_lease_failures),
+          static_cast<unsigned long long>(output.capture.global_aliases),
+          static_cast<unsigned long long>(output.capture.recording_overflows), output.capture.last_invalidation_reasons, progress.stalled(),
+          static_cast<unsigned long long>(output.capture.wipes), SceneCaptureManager::wipe_site_name(output.capture.last_wipe_site),
+          static_cast<unsigned long long>(output.capture.retired_source_recordings),
+          static_cast<unsigned long long>(output.capture.unordered_consumers),
+          static_cast<unsigned long long>(output.capture.source_retirements),
+          static_cast<unsigned long long>(boundaries.maximum_legacy_batch),
+          static_cast<unsigned long long>(boundaries.metadata_truncated_calls), scene.observer_last_ms,
+          static_cast<unsigned long long>(scene.performance.query_calls), scene.performance.query_ms, scene.performance.read_ms,
+          static_cast<unsigned long long>(scene.performance.query_allocation_calls),
+          static_cast<unsigned long long>(scene.performance.query_page_calls),
+          static_cast<unsigned long long>(scene.performance.query_fallback_calls),
+          scene.performance.stage_ms[static_cast<std::size_t>(native_camera::ProbeStage::aa)],
+          static_cast<unsigned long long>(scene.inspection_count), static_cast<unsigned long long>(scene.updates),
+          static_cast<unsigned long long>(graphics.clear_states),
+          scene.stop_reason != native_camera::SceneStopReason::none ? scene.stop_detail.c_str()
+          : !scene.pair.owned_ids[0] && !scene.pair.owned_ids[1]    ? scene.message.c_str()
+                                                                    : "");
       log_status(status, detail);
       char selection_detail[256];
       std::snprintf(selection_detail, sizeof(selection_detail),
@@ -830,7 +1109,8 @@ DWORD run_impl() {
           retention_detail, sizeof(retention_detail),
           "Camera retention: created_total=%llu snapshot_bytes=%llu quarantined=%llu prewarm=%s patch_requests=%u patch_draws=%llu "
           "retirement_deferrals=%llu retirement_waiting=%u retirement_status=%s retirement_queues=%u/%u "
-          "flags=%llx:%llx/%llx:%llx aa_restores=%llu aa_restore_failures=%llu aa_cleared_pending=%u",
+          "flags=%llx:%llx/%llx:%llx aa_restores=%llu aa_restore_failures=%llu aa_cleared_pending=%u rt=%03x/%03x rt_refusals=%u "
+          "rt_holds=%llu",
           static_cast<unsigned long long>(scene.created_total), static_cast<unsigned long long>(output.capture.bytes),
           static_cast<unsigned long long>(output.capture.quarantined), prewarm.name(), output.patch_requests,
           static_cast<unsigned long long>(output.patch_draws), static_cast<unsigned long long>(scene.retirement_deferrals),
@@ -838,7 +1118,8 @@ DWORD run_impl() {
           static_cast<unsigned long long>(scene.flags[0][0]), static_cast<unsigned long long>(scene.flags[0][1]),
           static_cast<unsigned long long>(scene.flags[1][0]), static_cast<unsigned long long>(scene.flags[1][1]),
           static_cast<unsigned long long>(scene.aa_restores), static_cast<unsigned long long>(scene.aa_restore_failures),
-          scene.aa_cleared_pending);
+          scene.aa_cleared_pending, scene.output_slots[0], scene.output_slots[1], scene.rt_record_refusals,
+          static_cast<unsigned long long>(scene.rt_record_holds));
       log_status(status, retention_detail);
       if (graphics_diagnostics) {
         char graphics_detail[512];
@@ -866,17 +1147,23 @@ DWORD run_impl() {
         log_gpu_span("output_copy", output.output_copy_gpu);
         log_gpu_span("patches", output.patch_gpu);
       }
-      char copy_detail[512];
+      char copy_detail[640];
       std::snprintf(copy_detail, sizeof(copy_detail),
-                    "PFD boundary copy: attempts=%llu copies=%llu no_proof=%llu reason=%s | "
+                    "PFD boundary copy: attempts=%llu copies=%llu no_proof=%llu reason=%s carried_covers=%llu settlement_skips=%llu "
+                    "settlement_replays=%llu settlement_stale=%llu carried_refused_stale=%llu | "
                     "dynamic_bias_calls=%llu dynamic_strip_calls=%llu sample_position_calls=%llu",
                     static_cast<unsigned long long>(graphics.preferred_copy_attempts),
                     static_cast<unsigned long long>(graphics.preferred_copy_stamps),
                     static_cast<unsigned long long>(graphics.preferred_copy_no_proof), graphics.preferred_copy_reason,
+                    static_cast<unsigned long long>(graphics.carried_covers), static_cast<unsigned long long>(graphics.settlement_skips),
+                    static_cast<unsigned long long>(graphics.settlement_replays),
+                    static_cast<unsigned long long>(graphics.settlement_stale_events),
+                    static_cast<unsigned long long>(graphics.carried_refused_stale),
                     static_cast<unsigned long long>(graphics.dynamic_depth_bias_calls),
                     static_cast<unsigned long long>(graphics.dynamic_strip_cut_calls),
                     static_cast<unsigned long long>(graphics.sample_position_calls));
       log_status(status, copy_detail);
+      log_contention(status, graphics, output);
       if (!logged || status.active_profile != last_logged.active_profile || std::strcmp(status.aircraft_type, last_logged.aircraft_type) ||
           std::strcmp(status.aircraft_path, last_logged.aircraft_path)) {
         char identity_detail[640];
@@ -887,6 +1174,7 @@ DWORD run_impl() {
       last_logged = status;
       last_connected = connected;
       last_requested = requested;
+      last_degraded = degraded;
       last_stop_sequence = scene.stop_sequence;
       last_output = output.output;
       last_view_wait_count = scene.view_wait_count;
