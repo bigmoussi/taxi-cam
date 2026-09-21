@@ -49,8 +49,10 @@ class PfdStampD3D12 {
   ~PfdStampD3D12() { release(); }
   // Exact typed RTV and optional DSV formats, single sample. Initialize outside
   // draw callbacks; creates root/PSO and compiles once. RGBA/BGRA8 UNORM/sRGB;
-  // DSV may be UNKNOWN (absent), D16, D24S8, D32 or D32S8. Depth/stencil testing
-  // and writes remain disabled; the bound DSV is never changed by the stamp.
+  // sRGB PSOs linearize display-referred compositor codes before the HW encode
+  // so stored bytes match the UNORM path. DSV may be UNKNOWN (absent), D16,
+  // D24S8, D32 or D32S8. Depth/stencil testing and writes remain disabled; the
+  // bound DSV is never changed by the stamp.
   HRESULT initialize(ID3D12Device*, DXGI_FORMAT target_format, DXGI_FORMAT depth_format = DXGI_FORMAT_UNKNOWN) noexcept;
   // PRIVATE command list only. Caller binds our owned patch RTV, no DSV. This
   // overwrites graphics state without replaying any application bindings.

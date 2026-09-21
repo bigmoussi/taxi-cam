@@ -663,6 +663,9 @@ float sd_round_rect(float2 p, float2 bmin, float2 bmax, float4 radii) {
   return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - r;
 }
 float4 split_bottom_t() {
+  // Display-referred sRGB codes for the UNORM compositor target (same space as
+  // hdr_channel's final encode). Do not sRGB-to-linear here — the stamp path
+  // preserves these bytes on UNORM and linearizes only when the PFD RTV is sRGB.
   return float4(28.0 / 255.0, 27.0 / 255.0, 34.0 / 255.0, 1);
 }
 float4 ps_main(float4 position : SV_Position) : SV_Target {

@@ -1,4 +1,5 @@
 #include "pfd_stamp_d3d12.hpp"
+#include <cstring>
 #include <d3dcompiler.h>
 #include "../hooks/pfd_state_observer.hpp"
 #include "native_device_identity.hpp"
@@ -92,7 +93,39 @@ void PfdStampFrame::abandon() noexcept {
 HRESULT PfdStampD3D12::initialize(ID3D12Device* device, DXGI_FORMAT format, DXGI_FORMAT depth_format) noexcept {
   if (!device || device_ || !format_supported(format) || !depth_format_supported(depth_format))
     return E_INVALIDARG;
-  constexpr char shader[] = R"(
+  // Compositor output is display-referred sRGB codes in R8G8B8A8_UNORM (HDR feeds
+  // are explicitly sRGB-encoded there; solids are authored hex/255). Writing those
+  // floats to an *_UNORM_SRGB RTV would make the hardware encode again and change
+  // the stored codes (e.g. #1C1B22 → ~#5D5C66). Convert to linear first so the
+  // HW encode restores the same display-referred bytes the compositor produced.
+  const bool srgb_target = format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB || format == DXGI_FORMAT_B8G8R8A8_UNORM_SRGB;
+  const char* shader = srgb_target ? R"(
+ByteAddressBuffer Pixels : register(t0);
+cbuffer Parameters : register(b0) {
+  uint TargetWidth; uint TargetHeight; uint OriginX; uint OriginY;
+  uint InsetLeft; uint InsetTop; uint InsetRight; uint InsetBottom;
+};
+float srgb_to_linear(float value) {
+  return value <= 0.04045 ? value / 12.92 : pow((value + 0.055) / 1.055, 2.4);
+}
+float4 vs_main(uint id : SV_VertexID) : SV_Position {
+  float2 uv = float2((id << 1) & 2, id & 2);
+  return float4(uv.x * 2 - 1, 1 - uv.y * 2, 0, 1);
+}
+float4 ps_main(float4 position : SV_Position) : SV_Target {
+  float2 local = position.xy - float2(OriginX, OriginY);
+  uint2 contentEnd = uint2(TargetWidth - InsetRight, TargetHeight - InsetBottom);
+  if (local.x < InsetLeft || local.y < InsetTop || local.x >= contentEnd.x || local.y >= contentEnd.y)
+    return float4(0, 0, 0, 1);
+  uint2 contentSize = contentEnd - uint2(InsetLeft, InsetTop);
+  uint x = min((uint)((local.x - InsetLeft) * 768 / contentSize.x), 767);
+  uint y = min((uint)((local.y - InsetTop) * 763 / contentSize.y), 762);
+  uint rgba = Pixels.Load(y * 3072 + x * 4);
+  float3 srgb = float3(rgba & 255, (rgba >> 8) & 255, (rgba >> 16) & 255) / 255.0;
+  return float4(srgb_to_linear(srgb.r), srgb_to_linear(srgb.g), srgb_to_linear(srgb.b), 1);
+}
+)"
+                                     : R"(
 ByteAddressBuffer Pixels : register(t0);
 cbuffer Parameters : register(b0) {
   uint TargetWidth; uint TargetHeight; uint OriginX; uint OriginY;
@@ -127,11 +160,12 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
   HRESULT hr = D3D12SerializeRootSignature(&desc, D3D_ROOT_SIGNATURE_VERSION_1, &serialized, nullptr);
   if (SUCCEEDED(hr))
     hr = device->CreateRootSignature(0, serialized->GetBufferPointer(), serialized->GetBufferSize(), IID_PPV_ARGS(&root_));
+  const SIZE_T shader_bytes = std::strlen(shader);
   if (SUCCEEDED(hr))
-    hr = D3DCompile(shader, sizeof(shader) - 1, "pfd_stamp", nullptr, nullptr, "vs_main", "vs_5_0",
+    hr = D3DCompile(shader, shader_bytes, "pfd_stamp", nullptr, nullptr, "vs_main", "vs_5_0",
                     D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &vs, nullptr);
   if (SUCCEEDED(hr))
-    hr = D3DCompile(shader, sizeof(shader) - 1, "pfd_stamp", nullptr, nullptr, "ps_main", "ps_5_0",
+    hr = D3DCompile(shader, shader_bytes, "pfd_stamp", nullptr, nullptr, "ps_main", "ps_5_0",
                     D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &ps, nullptr);
   if (SUCCEEDED(hr)) {
     D3D12_GRAPHICS_PIPELINE_STATE_DESC p{};
