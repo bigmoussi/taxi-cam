@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include "../camera/body_pose_provider.hpp"
 #include "../camera/mount_config.hpp"
@@ -93,21 +94,28 @@ void log_contention(const win::Status& status, const win::GraphicsStatus& graphi
   auto used = static_cast<std::size_t>(std::snprintf(
       detail, sizeof(detail),
       "Render-thread contention: armed=%u pulse=%llu queue_calls=%llu queue_contended=%llu manager_evidence=%llu "
-      "manager_lifecycle=%llu manager_submit=%llu unordered=%llu gated=%llu deferred_retirements=%llu deferred_lifecycle=%llu "
+      "manager_lifecycle=%llu manager_submit=%llu unordered=%llu gated=%llu deferred_retirements=%llu deferred_evidence=%llu "
+      "deferred_overflows=%llu deferred_lifecycle=%llu "
       "runtime_writes=%llu watchdog_trips=%u last_stall_ms=%llu notifications=%u/%llu hook_failures=%llu "
-      "failure_rate_peak=%llu admission_halted=%u",
+      "failure_rate_peak=%llu admission_halted=%u wipes=%llu last_wipe=%s unordered_consumers=%llu contended_invalidations=%llu "
+      "unobserved_admissions=%llu",
       graphics.armed, static_cast<unsigned long long>(graphics.frame_pulse), static_cast<unsigned long long>(graphics.queue_calls),
       static_cast<unsigned long long>(graphics.queue_contended), static_cast<unsigned long long>(output.capture.contended_evidence),
       static_cast<unsigned long long>(output.capture.contended_lifecycle),
       static_cast<unsigned long long>(output.capture.contended_submissions),
       static_cast<unsigned long long>(output.capture.unordered_submissions),
       static_cast<unsigned long long>(output.capture.gated_submissions),
-      static_cast<unsigned long long>(output.capture.deferred_retirements), static_cast<unsigned long long>(graphics.deferred_lifecycle),
-      static_cast<unsigned long long>(output.contended_writes), watchdog_trips.load(std::memory_order_relaxed),
+      static_cast<unsigned long long>(output.capture.deferred_retirements),
+      static_cast<unsigned long long>(output.capture.deferred_evidence), static_cast<unsigned long long>(output.capture.deferred_overflows),
+      static_cast<unsigned long long>(graphics.deferred_lifecycle), static_cast<unsigned long long>(output.contended_writes),
+      watchdog_trips.load(std::memory_order_relaxed),
       static_cast<unsigned long long>(watchdog_last_stall_ms.load(std::memory_order_relaxed)),
       notifications_enabled.load(std::memory_order_relaxed), static_cast<unsigned long long>(notification_log.published()),
       static_cast<unsigned long long>(graphics.hook_failures), static_cast<unsigned long long>(graphics.failure_rate_peak),
-      graphics.admission_halted));
+      graphics.admission_halted, static_cast<unsigned long long>(output.capture.wipes),
+      SceneCaptureManager::wipe_site_name(output.capture.last_wipe_site),
+      static_cast<unsigned long long>(output.capture.unordered_consumers),
+      static_cast<unsigned long long>(graphics.contended_invalidations), static_cast<unsigned long long>(graphics.unobserved_admissions)));
   for (unsigned i = 0; i < graphics.contention.size() && used < sizeof(detail); ++i) {
     const auto written =
         std::snprintf(detail + used, sizeof(detail) - used, " %s=%llu", win::contention_site_name(static_cast<win::ContentionSite>(i)),
@@ -258,6 +266,54 @@ DWORD run_impl() {
   };
   std::uint64_t last_stop_sequence{};
   std::array<std::array<double, 6>, 2> applied_mounts{};
+  // Diagnostics: counters at the previous loop tick, so a wipe line can show
+  // which writer moved with it.
+  struct WipeTrace {
+    std::uint64_t wipes{}, evidence{}, lifecycle{}, submit{}, unordered{}, unordered_consumers{}, deferred_retirements{};
+    std::uint64_t deferred_evidence{}, unknown_lists{}, invalid_recordings{}, retired_recordings{}, registry_recording{};
+    std::uint64_t contended_invalidations{};
+  } wipe_trace;
+  const auto log_wipe = [&](const win::Status& at, const scene_runtime::Snapshot& output, const win::GraphicsStatus& graphics) {
+    const auto& capture = output.capture;
+    const auto registry_recording = graphics.contention[static_cast<unsigned>(win::ContentionSite::registry_recording)];
+    char detail[768];
+    std::snprintf(
+        detail, sizeof(detail),
+        "Source-state wipe: n=%llu site=%s origins=0x%x tail=%s unknown_lists=+%llu invalid_recordings=+%llu "
+        "retired_recordings=+%llu deferred_retirements=+%llu deferred_evidence=+%llu manager_evidence=+%llu manager_lifecycle=+%llu "
+        "manager_submit=+%llu unordered=+%llu unordered_consumers=+%llu registry_recording=+%llu contended_invalidations=+%llu",
+        static_cast<unsigned long long>(capture.wipes), SceneCaptureManager::wipe_site_name(capture.last_wipe_site),
+        capture.last_wipe_origins, capture.tail_status,
+        static_cast<unsigned long long>(capture.unknown_submitted_lists - wipe_trace.unknown_lists),
+        static_cast<unsigned long long>(capture.invalid_source_recordings - wipe_trace.invalid_recordings),
+        static_cast<unsigned long long>(capture.retired_source_recordings - wipe_trace.retired_recordings),
+        static_cast<unsigned long long>(capture.deferred_retirements - wipe_trace.deferred_retirements),
+        static_cast<unsigned long long>(capture.deferred_evidence - wipe_trace.deferred_evidence),
+        static_cast<unsigned long long>(capture.contended_evidence - wipe_trace.evidence),
+        static_cast<unsigned long long>(capture.contended_lifecycle - wipe_trace.lifecycle),
+        static_cast<unsigned long long>(capture.contended_submissions - wipe_trace.submit),
+        static_cast<unsigned long long>(capture.unordered_submissions - wipe_trace.unordered),
+        static_cast<unsigned long long>(capture.unordered_consumers - wipe_trace.unordered_consumers),
+        static_cast<unsigned long long>(registry_recording - wipe_trace.registry_recording),
+        static_cast<unsigned long long>(graphics.contended_invalidations - wipe_trace.contended_invalidations));
+    log_status(at, detail);
+  };
+  const auto remember_wipe_trace = [&](const scene_runtime::Snapshot& output, const win::GraphicsStatus& graphics) {
+    const auto& capture = output.capture;
+    wipe_trace = {capture.wipes,
+                  capture.contended_evidence,
+                  capture.contended_lifecycle,
+                  capture.contended_submissions,
+                  capture.unordered_submissions,
+                  capture.unordered_consumers,
+                  capture.deferred_retirements,
+                  capture.deferred_evidence,
+                  capture.unknown_submitted_lists,
+                  capture.invalid_source_recordings,
+                  capture.retired_source_recordings,
+                  graphics.contention[static_cast<unsigned>(win::ContentionSite::registry_recording)],
+                  graphics.contended_invalidations};
+  };
   for (;;) {
     control.refresh(mailbox);
     const auto now = GetTickCount64();
@@ -689,11 +745,25 @@ DWORD run_impl() {
       // wipe source-state without new RT barriers; rearm retained RT models
       // so later draws can capture again. Never erase/recreate cameras here.
       if (progress.observe(now, eligible, output.frames, output.capture.source_draws,
-                           std::strcmp(output.capture.tail_status, "unknown_source_state") == 0))
-        scene_runtime::manager().rearm_source_states();
+                           std::strcmp(output.capture.tail_status, "unknown_source_state") == 0)) {
+        const auto restored = scene_runtime::manager().rearm_source_states();
+        if (graphics_diagnostics) {
+          const auto now_us = static_cast<std::uint64_t>(
+              std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+          const auto since_wipe_ms =
+              output.capture.last_wipe_us && now_us >= output.capture.last_wipe_us ? (now_us - output.capture.last_wipe_us) / 1000 : 0;
+          char rearm_detail[160];
+          std::snprintf(rearm_detail, sizeof(rearm_detail), "Source-state rearm: restored=%u since_wipe_ms=%llu last_wipe=%s", restored,
+                        static_cast<unsigned long long>(since_wipe_ms), SceneCaptureManager::wipe_site_name(output.capture.last_wipe_site));
+          log_status(status, rearm_detail);  // Previous tick's status: this tick's is composed below.
+        }
+      }
       next_recovery = now + 250;
     }
     const auto graphics = win::graphics_status();
+    if (graphics_diagnostics && output.capture.wipes != wipe_trace.wipes)
+      log_wipe(status, output, graphics);
+    remember_wipe_trace(output, graphics);
     status = {};
     status.heartbeat = now;
     status.active_profile = applied_profile;
@@ -869,6 +939,7 @@ DWORD run_impl() {
           "draws=%llu unknown_lists=%llu invalid_recordings=%llu scoped_invalidations=%llu ignored_recordings=%llu "
           "pass_no_rts=%llu pass_unresolved_rts=%llu invalid_draws=%llu "
           "lease_failures=%llu global_aliases=%llu overflows=%llu reasons=0x%x capture_stalled=%u "
+          "wipes=%llu last_wipe=%s retired_recordings=%llu unordered_consumers=%llu "
           "barrier_max=%llu barrier_truncated=%llu probe_ms=%.3f queries=%llu query_ms=%.3f read_ms=%.3f "
           "allocation_queries=%llu page_queries=%llu region_queries=%llu aa_ms=%.3f "
           "inspections=%llu updates=%llu clear_states=%llu | %.256s",
@@ -890,6 +961,9 @@ DWORD run_impl() {
           static_cast<unsigned long long>(output.capture.source_lease_failures),
           static_cast<unsigned long long>(output.capture.global_aliases),
           static_cast<unsigned long long>(output.capture.recording_overflows), output.capture.last_invalidation_reasons, progress.stalled(),
+          static_cast<unsigned long long>(output.capture.wipes), SceneCaptureManager::wipe_site_name(output.capture.last_wipe_site),
+          static_cast<unsigned long long>(output.capture.retired_source_recordings),
+          static_cast<unsigned long long>(output.capture.unordered_consumers),
           static_cast<unsigned long long>(boundaries.maximum_legacy_batch),
           static_cast<unsigned long long>(boundaries.metadata_truncated_calls), scene.observer_last_ms,
           static_cast<unsigned long long>(scene.performance.query_calls), scene.performance.query_ms, scene.performance.read_ms,

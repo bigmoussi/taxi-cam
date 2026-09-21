@@ -145,6 +145,10 @@ struct GraphicsStatus {
   // PassBegin reports the bridge could not scope to tracked render targets and
   // therefore forwarded as global: the pass bound no RTV, or RTVs unresolved.
   std::uint64_t pass_no_targets{}, pass_unresolved_targets{};
+  // Recordings invalidated on the hit after a contended find_list miss (each
+  // becomes a PassState report on that recording), and lists admitted
+  // mid-recording that wipe the source model until their observed Reset.
+  std::uint64_t contended_invalidations{}, unobserved_admissions{};
   bool armed{};
   std::uint64_t frame_pulse{};
   std::uint64_t queue_calls{}, queue_contended{};

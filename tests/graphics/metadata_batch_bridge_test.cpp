@@ -794,6 +794,7 @@ void contended_admission_checks() {
   const auto lists_before = r.lists.size();
   const auto failures_before = r.failures.load();
   const auto contended_before = r.contention[static_cast<unsigned>(win::ContentionSite::registry_recording)].load();
+  const auto invalidations_before = r.contended_invalidations.load();
   std::atomic<bool> release{false}, held{false};
   std::thread owner([&] {
     const std::lock_guard guard(r.mutex);
@@ -816,9 +817,13 @@ void contended_admission_checks() {
   require(r.lists.size() == lists_before && r.lists[native] == item && item->alive,
           "Contended admission replaced or duplicated a live list");
   require(r.failures == failures_before && !r.admission_halted, "Contended admission counted a hook failure");
+  require(r.contended_invalidations == invalidations_before, "A contended miss was counted as an invalidation before its next hit");
   // With the registry free, the same lookup succeeds and the missed observation
   // invalidates only that recording.
   require(win::find_list(native) == item && !win::lookup_contended, "Uncontended lookup did not recover the live list");
+  require(
+      r.contended_invalidations == invalidations_before + 1 && win::graphics_status().contended_invalidations == invalidations_before + 1,
+      "The next hit after a contended miss did not count its recording invalidation");
   require(win::ensure_list(native) == item && r.lists.size() == lists_before && r.failures == failures_before,
           "ensure_list did not return the live list once the lookup succeeded");
 

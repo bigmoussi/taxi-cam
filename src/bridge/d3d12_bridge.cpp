@@ -188,6 +188,9 @@ struct Registry {
   // PassBegin reports that reached the manager's global path: the pass bound
   // no RTV, or bound RTVs the bridge could not resolve to tracked resources.
   std::atomic<std::uint64_t> pass_no_targets{}, pass_unresolved_targets{};
+  // Recordings invalidated on the next hit after a contended find_list miss,
+  // and lists admitted mid-recording (unobserved, awaiting their Reset).
+  std::atomic<std::uint64_t> contended_invalidations{}, unobserved_admissions{};
   std::atomic<const char*> error{"not_started"};
   std::unordered_map<ID3D12Resource*, std::shared_ptr<Resource>> resources;
   std::unordered_map<ID3D12RootSignature*, std::shared_ptr<Root>> roots;
@@ -921,6 +924,7 @@ thread_local ContendedLists contended_lists;
 // nothing about whether the list is known. Admission must not act on it.
 thread_local bool lookup_contended = false;
 void invalidate_contended_recording(List& list) noexcept {
+  registry().contended_invalidations.fetch_add(1, std::memory_order_relaxed);
   list.graphics.invalidate("registry_contended");
   list.copy_proof.invalidate();
   list.submission_proof.invalidate(PfdSubmissionProof::Refusal::contended);
@@ -1694,10 +1698,12 @@ std::shared_ptr<List> ensure_list(ID3D12GraphicsCommandList* native, bool observ
     error("native_list_registration_failed");
     return {};
   }
-  if (observed)
+  if (observed) {
     boundary::successful_reset(native, item->id);
-  else
+  } else {
+    r.unobserved_admissions.fetch_add(1, std::memory_order_relaxed);
     boundary::reset_failed(native, item->id);
+  }
   return item;
 }
 void unknown_list(void*, ID3D12GraphicsCommandList* list, std::uint64_t) noexcept {
@@ -3023,6 +3029,8 @@ GraphicsStatus graphics_status() noexcept {
   result.failure_rate_peak = r.failure_rate_peak.load(std::memory_order_relaxed);
   result.pass_no_targets = r.pass_no_targets.load(std::memory_order_relaxed);
   result.pass_unresolved_targets = r.pass_unresolved_targets.load(std::memory_order_relaxed);
+  result.contended_invalidations = r.contended_invalidations.load(std::memory_order_relaxed);
+  result.unobserved_admissions = r.unobserved_admissions.load(std::memory_order_relaxed);
   result.armed = r.armed.load(std::memory_order_acquire);
   result.frame_pulse = frame_pulse();
   const auto queues = queue_hook::total_statistics();
