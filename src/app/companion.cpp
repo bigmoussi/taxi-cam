@@ -1265,8 +1265,11 @@ DWORD WINAPI connection_worker(void*) {
         std::array<SimEvent, 8> events{};
         const auto count = notification_reader.take(sample.notifications, GetTickCount64(), events.data(), events.size());
         // The bridge stops publishing once it reads the setting; this covers the poll in between.
+        // The toast policy is applied here as well so routine events never reach the desktop.
         if (current.notifications && pending_notifications.size() + count <= 32)
-          pending_notifications.insert(pending_notifications.end(), events.begin(), events.begin() + static_cast<std::ptrdiff_t>(count));
+          for (std::size_t i = 0; i < count; ++i)
+            if (sim_event_toasts(events[i]))
+              pending_notifications.push_back(events[i]);
         if (!connection_disconnected.load(std::memory_order_acquire)) {
           status = sample;
           if (!win::heartbeat_confirms_bridge(sample.heartbeat, ignore_heartbeat_through))

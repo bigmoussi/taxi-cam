@@ -33,10 +33,12 @@ std::atomic<std::uint64_t> watchdog_last_stall_ms{};
 std::atomic<bool> notifications_enabled{};
 // Admitted events for the companion's tray notifications; the worker copies
 // the log into every IPC status it publishes. Nothing is shown from here.
+// Only sim_event_toasts() events are published; the rest are tracked for the
+// status line and the log.
 SimEventLog notification_log;
 constexpr std::uint64_t WorkerAliveMs = 10000;  // Contract scans have taken 4 s per iteration.
 void announce(SimEvent event, SimMessageLimiter& limiter, std::uint64_t now) noexcept {
-  if (!notifications_enabled.load(std::memory_order_acquire) || !limiter.admit(event, now))
+  if (!notifications_enabled.load(std::memory_order_acquire) || !admit_toast(limiter, event, now))
     return;
   notification_log.publish(event, now);
 }

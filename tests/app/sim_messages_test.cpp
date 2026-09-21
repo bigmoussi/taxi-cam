@@ -41,6 +41,55 @@ void mapping() {
           "Degraded notice does not say what happened");
 }
 
+// Which events reach the desktop. One row per SimEvent so a new event has to be
+// classified here; anything a pilot does not have to act on stays off the tray.
+void toast_policy() {
+  struct Row {
+    SimEvent event;
+    bool toasts;
+  };
+  constexpr Row rows[]{
+      {SimEvent::bridge_connected, false},     {SimEvent::cameras_ready, false},       {SimEvent::connection_stopped, false},
+      {SimEvent::simulator_unsupported, true}, {SimEvent::presentation_stalled, true}, {SimEvent::cameras_disarmed, false},
+      {SimEvent::presentation_resumed, false}, {SimEvent::speed_cutoff, false},        {SimEvent::aircraft_mismatch, false},
+      {SimEvent::camera_startup_failed, true}, {SimEvent::capture_paused, false},      {SimEvent::hook_storm, true},
+  };
+  static_assert(sizeof(rows) / sizeof(rows[0]) == static_cast<unsigned>(SimEvent::count), "Classify every SimEvent in the toast table");
+  unsigned toasting = 0;
+  for (unsigned i = 0; i < static_cast<unsigned>(SimEvent::count); ++i) {
+    require(static_cast<unsigned>(rows[i].event) == i, "Toast table out of order");
+    require(taxi_camera::sim_event_toasts(rows[i].event) == rows[i].toasts, taxi_camera::sim_event_name(rows[i].event));
+    if (rows[i].toasts) {
+      ++toasting;
+      require(taxi_camera::sim_message_for(rows[i].event).alert, "A toasting event is not a warning");
+    }
+  }
+  require(toasting == 4, "Toast count changed; update the docs and this table");
+  require(!taxi_camera::sim_event_toasts(SimEvent::count), "Invalid event toasts");
+  // The worker's echo of a disarm never toasts on its own: the watchdog posts
+  // presentation_stalled and the storm posts hook_storm, one notice each.
+  require(!taxi_camera::sim_event_toasts(SimEvent::cameras_disarmed) && !taxi_camera::sim_event_toasts(SimEvent::presentation_resumed),
+          "Watchdog echo toasts");
+  // Bridge admission: routine events are refused before the limiter and do not
+  // spend the window budget; toast events still go through the repeat limiter.
+  SimMessageLimiter limit;
+  for (unsigned second = 0; second < 30; ++second) {
+    require(!taxi_camera::admit_toast(limit, SimEvent::bridge_connected, 1000 + second * 1000), "Routine event admitted");
+    require(!taxi_camera::admit_toast(limit, SimEvent::capture_paused, 1000 + second * 1000), "Routine event admitted");
+    require(!taxi_camera::admit_toast(limit, SimEvent::cameras_ready, 1000 + second * 1000), "Routine event admitted");
+  }
+  require(limit.admitted() == 0 && limit.suppressed() == 0, "Routine events touched the limiter");
+  require(taxi_camera::admit_toast(limit, SimEvent::hook_storm, 40000), "Toast event refused after routine traffic");
+  require(!taxi_camera::admit_toast(limit, SimEvent::hook_storm, 41000), "Toast event repeated inside its interval");
+  require(taxi_camera::admit_toast(limit, SimEvent::presentation_stalled, 41000) &&
+              taxi_camera::admit_toast(limit, SimEvent::camera_startup_failed, 41000) &&
+              taxi_camera::admit_toast(limit, SimEvent::simulator_unsupported, 41000),
+          "Distinct toast events blocked");
+  require(!taxi_camera::admit_toast(limit, SimEvent::presentation_stalled,
+                                    41000 + SimMessageLimiter::interval_ms(SimEvent::presentation_stalled)),
+          "Window budget not applied to toast events");
+}
+
 void limiter() {
   SimMessageLimiter limit;
   std::uint64_t now = 5000;
@@ -225,6 +274,7 @@ void notifications() {
 int main() {
   try {
     mapping();
+    toast_policy();
     limiter();
     tracker();
     notifications();

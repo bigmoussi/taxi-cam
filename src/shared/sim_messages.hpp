@@ -6,10 +6,12 @@
 
 namespace taxi_camera {
 
-// Events a pilot should learn about while flying. The bridge publishes them
-// through the IPC status (never from a render thread) and the companion shows
-// them as Windows tray notifications when its "Show notifications" setting is
-// on. SimConnect_Text is deprecated in MSFS 2020/2024 and renders nothing.
+// Bridge state changes the worker tracks for the pilot. Only the ones that
+// pass sim_event_toasts() are published through the IPC status (never from a
+// render thread) and shown by the companion as Windows tray notifications when
+// its "Show notifications" setting is on; the rest stay in the status line,
+// tray tooltip and log. SimConnect_Text is deprecated in MSFS 2020/2024 and
+// renders nothing.
 enum class SimEvent : unsigned {
   bridge_connected,
   cameras_ready,
@@ -60,6 +62,24 @@ inline constexpr SimMessage sim_message_for(SimEvent event) noexcept {
       return {"Taxi Cam: native hook failures exceeded the safe rate; cameras disarmed for this session.", 12.0f, true};
     default:
       return {};
+  }
+}
+
+// Toast policy: a desktop notification only for what the pilot must act on or
+// would otherwise not notice while the simulator is full-screen, i.e. cameras
+// off for the rest of the session or until they change something. Routine
+// transitions (connect/disconnect, cameras up, speed cutoff, aircraft/profile
+// mismatch, transient capture pauses, watchdog recovery) and the worker's
+// echo of a watchdog or storm disarm never toast.
+inline constexpr bool sim_event_toasts(SimEvent event) noexcept {
+  switch (event) {
+    case SimEvent::simulator_unsupported:  // Cameras stay off; no recovery without a build change.
+    case SimEvent::presentation_stalled:   // Watchdog tripped; hooks released.
+    case SimEvent::camera_startup_failed:  // Cameras stopped and will not retry.
+    case SimEvent::hook_storm:             // Disarmed for the process; needs a simulator restart.
+      return true;
+    default:
+      return false;
   }
 }
 
@@ -121,6 +141,13 @@ class SimMessageLimiter {
   unsigned window_count_ = 0;
   std::uint64_t admitted_ = 0, suppressed_ = 0;
 };
+
+// Bridge-side admission for one tracked event: the toast policy first, so a
+// routine event neither reaches the desktop nor spends the budget meant for
+// the notices that matter, then the repeat limiter.
+inline bool admit_toast(SimMessageLimiter& limiter, SimEvent event, std::uint64_t now_ms) noexcept {
+  return sim_event_toasts(event) && limiter.admit(event, now_ms);
+}
 
 // Edge detection from bridge state to events. Level inputs only raise their
 // event when they become true; a new connection resets the per-connection ones.
