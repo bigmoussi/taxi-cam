@@ -117,7 +117,7 @@ struct Fixture {
         require(slot.free != slot.association_valid && slot.association != ViewAssociation::unobserved,
                 "Successful pool result contains ambiguous association status");
     } else {
-      require(result.free_count == 0 && result.first_free_indices == std::array<std::int32_t, 2>{-1, -1},
+      require(result.free_count == 0 && result.first_free_indices == std::array<std::int32_t, 3>{-1, -1, -1},
               "Partial or changed pool published actionable capacity");
     }
     return result;
@@ -128,7 +128,7 @@ void availability_and_exact_layout() {
   Fixture test;
   auto result = test.run();
   require(result.valid && result.array_address == kArray && result.read_bytes == 592 && result.free_count == 0 &&
-              result.first_free_indices == std::array<std::int32_t, 2>{-1, -1},
+              result.first_free_indices == std::array<std::int32_t, 3>{-1, -1, -1},
           "A full eight-view pool was misclassified");
   for (std::uint32_t index = 0; index < 8; ++index)
     require(result.slots[index].view_address == view(index) && result.slots[index].association_valid &&
@@ -140,7 +140,7 @@ void availability_and_exact_layout() {
     for (std::uint32_t index = 0; index < 8; ++index)
       test.association(index, state);
     result = test.run();
-    require(result.valid && result.free_count == 8 && result.first_free_indices == std::array<std::int32_t, 2>{0, 1},
+    require(result.valid && result.free_count == 8 && result.first_free_indices == std::array<std::int32_t, 3>{0, 1, 2},
             "A native free-handle condition was not recognized");
     const auto expected_bytes = state == ViewAssociation::null_control ? 400u : state == ViewAssociation::stale_generation ? 464u : 592u;
     require(result.read_bytes == expected_bytes, "A free association caused unnecessary generation/payload reads");
@@ -160,12 +160,12 @@ void availability_and_exact_layout() {
   test.association(5, ViewAssociation::null_control);
   result = test.run();
   require(
-      result.valid && result.read_bytes == 528 && result.free_count == 4 && result.first_free_indices == std::array<std::int32_t, 2>{1, 2},
-      "Mixed pool did not identify the first two distinct free indices in order");
+      result.valid && result.read_bytes == 528 && result.free_count == 4 && result.first_free_indices == std::array<std::int32_t, 3>{1, 2, 3},
+      "Mixed pool did not identify the first three distinct free indices in order");
   test = Fixture{};
   test.association(7, ViewAssociation::null_control);
   result = test.run();
-  require(result.valid && result.free_count == 1 && result.first_free_indices == std::array<std::int32_t, 2>{7, -1},
+  require(result.valid && result.free_count == 1 && result.first_free_indices == std::array<std::int32_t, 3>{7, -1, -1},
           "The last native slot was skipped or a second free slot was invented");
 }
 
@@ -293,7 +293,7 @@ void failures_and_mutations() {
   test.reader.fail_call = test.reader.reads.size();
   const auto incomplete = test.run();
   require(!incomplete.valid && incomplete.slots_examined == 8 && incomplete.free_count == 0 &&
-              incomplete.first_free_indices == std::array<std::int32_t, 2>{-1, -1},
+              incomplete.first_free_indices == std::array<std::int32_t, 3>{-1, -1, -1},
           "Eight initially free slots bypassed the required final consistency check");
 }
 
@@ -301,7 +301,7 @@ void exhaustive_free_masks() {
   for (std::uint32_t mask = 0; mask < 256; ++mask) {
     Fixture test;
     std::uint32_t expected_count = 0;
-    std::array<std::int32_t, 2> expected_first{-1, -1};
+    std::array<std::int32_t, 3> expected_first{-1, -1, -1};
     for (std::uint32_t index = 0; index < 8; ++index) {
       if ((mask & (1u << index)) == 0)
         continue;
@@ -342,24 +342,36 @@ void deferred_renderer_retirement() {
                   std::equal(f.reader.reads.begin(), f.reader.reads.begin() + half, f.reader.reads.begin() + half),
               "Creation inspection did not recheck the entire combined pool/marker/queue trace");
     } else {
-      require(!result.creation_available(1) && !result.creation_available(2), "Incomplete creation evidence published permission");
+      require(!result.creation_available(1) && !result.creation_available(2) && !result.creation_available(3),
+              "Incomplete creation evidence published permission");
     }
     return result;
   };
   auto f = prepared();
-  require(run(f).creation_available(2), "Clean first native-free slots were refused");
+  auto result = run(f);
+  require(result.creation_available(2) && result.creation_available(3) && !result.creation_available(4),
+          "Clean first native-free slots were refused or admitted past three feeds");
   f.reader.word(view(2) + 23688, 1, 1);
   require(f.run().free_count == 6, "Regression fixture must remain native-free under the old association-only predicate");
-  auto result = run(f);
-  require(result.valid && result.free_count == 6 && !result.creation_available(1) && !result.creation_available(2),
+  result = run(f);
+  require(result.valid && result.free_count == 6 && !result.creation_available(1) && !result.creation_available(2) &&
+              !result.creation_available(3),
           "Pending first native-free slot was skipped in favor of later clean slots");
   f.reader.word(view(2) + 23688, 0, 1);
   f.reader.word(view(3) + 23688, 255, 1);
   result = run(f);
-  require(result.creation_available(1) && !result.creation_available(2), "Pair admission ignored a pending second allocation slot");
+  require(result.creation_available(1) && !result.creation_available(2) && !result.creation_available(3),
+          "Pair admission ignored a pending second allocation slot");
   f.reader.word(view(3) + 23688, 0, 1);
+  f.reader.word(view(4) + 23688, 1, 1);
+  result = run(f);
+  require(result.creation_available(2) && !result.creation_available(3),
+          "Three-feed admission ignored a pending third allocation slot");
+  f.reader.word(view(4) + 23688, 0, 1);
   f.reader.word(view(7) + 23688, 1, 1);
-  require(run(f).creation_available(2), "An unselected later slot blocked clean native allocation order");
+  result = run(f);
+  require(result.creation_available(2) && result.creation_available(3),
+          "An unselected later slot blocked clean native allocation order");
 
   for (auto offset : {2768u, 2784u}) {
     f = prepared();
@@ -372,6 +384,8 @@ void deferred_renderer_retirement() {
             "A marker cleared before consumed-queue removal authorized premature reuse");
     RetiredViewPool retired;
     require(retired.retain(kRenderer, view(2)), "Old verified view identity was not retained");
+    require(retired.retain(kRenderer, view(3)) && retired.retain(kRenderer, view(4)) && !retired.retain(kRenderer, view(5)),
+            "Three-feed retirement ledger overflowed or refused a fourth identity");
     require(!retired.observe(kRenderer, result) && retired.pending(), "ID disappearance was mistaken for renderer retirement");
     require(!retired.observe(kRenderer + 8, result), "A different renderer discarded old pending lifetime evidence");
     f.reader.word(kRenderer + offset, 128, 4);
