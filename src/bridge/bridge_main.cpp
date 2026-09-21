@@ -1147,13 +1147,18 @@ DWORD run_impl() {
         log_gpu_span("output_copy", output.output_copy_gpu);
         log_gpu_span("patches", output.patch_gpu);
       }
-      char copy_detail[512];
+      char copy_detail[640];
       std::snprintf(copy_detail, sizeof(copy_detail),
-                    "PFD boundary copy: attempts=%llu copies=%llu no_proof=%llu reason=%s | "
+                    "PFD boundary copy: attempts=%llu copies=%llu no_proof=%llu reason=%s carried_covers=%llu settlement_skips=%llu "
+                    "settlement_replays=%llu settlement_stale=%llu carried_refused_stale=%llu | "
                     "dynamic_bias_calls=%llu dynamic_strip_calls=%llu sample_position_calls=%llu",
                     static_cast<unsigned long long>(graphics.preferred_copy_attempts),
                     static_cast<unsigned long long>(graphics.preferred_copy_stamps),
                     static_cast<unsigned long long>(graphics.preferred_copy_no_proof), graphics.preferred_copy_reason,
+                    static_cast<unsigned long long>(graphics.carried_covers), static_cast<unsigned long long>(graphics.settlement_skips),
+                    static_cast<unsigned long long>(graphics.settlement_replays),
+                    static_cast<unsigned long long>(graphics.settlement_stale_events),
+                    static_cast<unsigned long long>(graphics.carried_refused_stale),
                     static_cast<unsigned long long>(graphics.dynamic_depth_bias_calls),
                     static_cast<unsigned long long>(graphics.dynamic_strip_cut_calls),
                     static_cast<unsigned long long>(graphics.sample_position_calls));

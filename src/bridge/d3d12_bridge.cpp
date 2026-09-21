@@ -148,6 +148,11 @@ struct DeferredSourceCandidate {
 struct DeferredHandoffRetirement {
   std::uint64_t key{}, handle{};
 };
+// A display settlement whose Close could not take the registry lock in budget.
+// Replayed in Close order by the next lock holder before any cover is planned.
+struct DeferredSettlement {
+  PfdSubmissionProof::Settlement row{};
+};
 struct Registry {
   std::recursive_mutex mutex;
   // Only demand transitions and publication of a real Reset/new-list proof
@@ -168,9 +173,18 @@ struct Registry {
   // resource the descriptor no longer references. No PFD write may trust the
   // view maps until discover_pfds clears them and live backfill relearns.
   std::atomic<bool> views_stale{};
-  // A Close skipped recording a display's settled state; carried covers must
-  // not trust settled_state until discover_pfds resets every settlement.
+  // Settlements a Close could not record within budget. The rows are replayed
+  // in push order by the next registry lock holder (a later Close, the next
+  // plan_display_submission, or the worker), so settled_state always reflects
+  // the last closed list by the time an Execute plans a carried cover, and a
+  // skip alone never refuses the PR 68 arm-to-first-stamp cover. Only ring
+  // overflow (rows lost) sets settlement_stale; discover_pfds then forgets
+  // every settled state without advancing covered_serial, so the next
+  // observed Close re-arms the cover instead of waiting for a new write.
+  DeferredRing<DeferredSettlement, 64> deferred_settlements;
   std::atomic<bool> settlement_stale{};
+  std::atomic<std::uint64_t> settlement_skips{}, settlement_replays{}, settlement_stale_events{};
+  std::atomic<std::uint64_t> carried_covers{}, carried_refused_stale{};
   // Registration/observation failures are rare and self-limiting; a sustained
   // rate means a hook is retrying the same failure on every command. Halt
   // admission and disarm for the rest of the process instead of spinning.
@@ -1710,6 +1724,32 @@ void unknown_list(void*, ID3D12GraphicsCommandList* list, std::uint64_t) noexcep
   const OwnedWork guard;
   observe_safely([&] { ensure_list(list); });
 }
+// Registry lock held. Records the state a closed display list left and bumps
+// the content serial when it wrote, in the order the lists closed.
+void apply_settlement(Registry& r, const PfdSubmissionProof::Settlement& row) noexcept {
+  auto* native = reinterpret_cast<ID3D12Resource*>(row.key.resource);
+  const auto found = r.resources.find(native);
+  if (found == r.resources.end() || !found->second || !found->second->alive || found->second->id != row.key.generation ||
+      !display_item(r, *found->second))
+    return;
+  found->second->settled_state.store(row.restorable ? static_cast<UINT>(row.after) : Resource::kSettledStateUnknown,
+                                     std::memory_order_release);
+  if (row.wrote)
+    found->second->content_serial.fetch_add(1, std::memory_order_release);
+}
+// Registry lock held. Every lock holder that reads or writes settled_state
+// replays the Closes that could not record theirs first.
+void drain_deferred_settlements(Registry& r) noexcept {
+  if (r.deferred_settlements.take_overflow()) {
+    r.settlement_stale.store(true, std::memory_order_release);
+    r.settlement_stale_events.fetch_add(1, std::memory_order_relaxed);
+  }
+  DeferredSettlement deferred;
+  while (r.deferred_settlements.pop(deferred)) {
+    apply_settlement(r, deferred.row);
+    r.settlement_replays.fetch_add(1, std::memory_order_relaxed);
+  }
+}
 // Called before manager/runtime submission serialization. The patch snapshot
 // is nonblocking, and the registry is only try-locked: missing metadata must
 // never make ExecuteCommandLists wait for discovery or composition.
@@ -1748,6 +1788,7 @@ void plan_display_submission(void*,
     outcome(DisplaySubmissionOutcome::generation_changed);
     return;
   }
+  drain_deferred_settlements(r);  // A skipped Close of a list in this batch precedes this Execute.
   std::array<PfdSubmissionProof::Recording, PfdSubmissionProof::maximum_batch> batch{};
   const auto session_floor = r.session_recording_floor.load(std::memory_order_acquire);
   for (UINT i = 0; i < count; ++i) {
@@ -1783,6 +1824,7 @@ void plan_display_submission(void*,
   std::array<UINT, 2> positions{no_position, no_position};
   std::array<PfdSubmissionProof::Candidate, 2> selected{};
   std::array<std::uint64_t, 2> cover_serial{};
+  std::array<bool, 2> carried{};
   unsigned candidates = 0;
   for (UINT i = 0; i < count; ++i) {
     for (std::size_t slot = 0; slot < PfdSubmissionProof::maximum_resources; ++slot) {
@@ -1826,11 +1868,14 @@ void plan_display_submission(void*,
     // write. Copy after this batch only when nothing here touches the display,
     // and only until that content has been covered. A same-batch write still
     // uses the suffix/prefix site above; crossing it would flash the instrument.
-    if (!overlay && !r.settlement_stale.load(std::memory_order_acquire) &&
-        target->content_serial.load(std::memory_order_acquire) != target->covered_serial.load(std::memory_order_acquire)) {
-      const auto state_bits = target->settled_state.load(std::memory_order_acquire);
-      if (state_bits != Resource::kSettledStateUnknown)
+    if (!overlay && target->content_serial.load(std::memory_order_acquire) != target->covered_serial.load(std::memory_order_acquire)) {
+      if (r.settlement_stale.load(std::memory_order_acquire)) {
+        r.carried_refused_stale.fetch_add(1, std::memory_order_relaxed);  // Rows were lost; wait for a fresh Close.
+      } else if (const auto state_bits = target->settled_state.load(std::memory_order_acquire);
+                 state_bits != Resource::kSettledStateUnknown) {
         overlay = PfdSubmissionProof::carried_overlay(batch.data(), count, key, static_cast<D3D12_RESOURCE_STATES>(state_bits));
+        carried[side] = static_cast<bool>(overlay);
+      }
     }
     if (overlay) {
       positions[side] = static_cast<UINT>(overlay.list * 2 + (overlay.before ? 0u : 1u));
@@ -1879,6 +1924,8 @@ void plan_display_submission(void*,
     item.copy.source->AddRef();
     if (cover_serial[side])
       target->covered_serial.store(cover_serial[side], std::memory_order_release);
+    if (carried[side])
+      r.carried_covers.fetch_add(1, std::memory_order_relaxed);
   }
   if (plan.count)
     r.queue_patch_plans.fetch_add(1, std::memory_order_relaxed);
@@ -2181,24 +2228,19 @@ void remember_display_settlement(List& item) noexcept {
     return;
   auto& r = registry();
   // Close-time bookkeeping on a simulator thread: bounded like the rest of the
-  // Close path. A skipped settlement could leave a stale settled state, so the
-  // carried cover is refused until discover_pfds resets every settlement.
+  // Close path. A skipped settlement is not lost and invalidates nothing: the
+  // rows go into the ring and the next lock holder replays them in Close
+  // order, before any Execute can plan a carried cover from settled_state.
   const RegistryLock lock(r, wait_budget::close_us, ContentionSite::registry_close);
   if (!lock) {
-    r.settlement_stale.store(true, std::memory_order_release);
+    r.settlement_skips.fetch_add(1, std::memory_order_relaxed);
+    for (UINT i = 0; i < count; ++i)
+      r.deferred_settlements.push({rows[i]});  // Overflow is remembered by the ring and handled at the drain.
     return;
   }
-  for (UINT i = 0; i < count; ++i) {
-    auto* native = reinterpret_cast<ID3D12Resource*>(rows[i].key.resource);
-    const auto found = r.resources.find(native);
-    if (found == r.resources.end() || !found->second || !found->second->alive || found->second->id != rows[i].key.generation ||
-        !display_item(r, *found->second))
-      continue;
-    found->second->settled_state.store(rows[i].restorable ? static_cast<UINT>(rows[i].after) : Resource::kSettledStateUnknown,
-                                       std::memory_order_release);
-    if (rows[i].wrote)
-      found->second->content_serial.fetch_add(1, std::memory_order_release);
-  }
+  drain_deferred_settlements(r);
+  for (UINT i = 0; i < count; ++i)
+    apply_settlement(r, rows[i]);
 }
 HRESULT STDMETHODCALLTYPE close(ID3D12GraphicsCommandList* native) noexcept {
   using F = HRESULT(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*);
@@ -2999,6 +3041,11 @@ GraphicsStatus graphics_status() noexcept {
   result.preferred_copy_stamps = r.preferred_copy_stamps.load();
   result.preferred_copy_no_proof = r.preferred_copy_no_proof.load();
   result.preferred_copy_reason = r.preferred_copy_reason.load();
+  result.carried_covers = r.carried_covers.load(std::memory_order_relaxed);
+  result.settlement_skips = r.settlement_skips.load(std::memory_order_relaxed);
+  result.settlement_replays = r.settlement_replays.load(std::memory_order_relaxed);
+  result.settlement_stale_events = r.settlement_stale_events.load(std::memory_order_relaxed);
+  result.carried_refused_stale = r.carried_refused_stale.load(std::memory_order_relaxed);
   result.sample_position_calls = r.sample_position_calls.load();
   result.recording_end_draws = r.recording_end_draws.load();
   result.shader_deferred = r.shader_deferred.load();
@@ -3248,13 +3295,15 @@ void drain_deferred_lifecycle(Registry& r) {
     r.dsvs.clear();
     rearm_live_backfill(r);
   }
+  drain_deferred_settlements(r);
   if (r.settlement_stale.exchange(false, std::memory_order_acq_rel)) {
-    // Forget every settled display state; the next observed Close records it
-    // again and a later write re-arms the quiet-Execute cover.
+    // Rows were lost: forget every settled display state. covered_serial is
+    // left behind content_serial on purpose, so the next observed Close that
+    // records a restorable state re-arms the quiet-Execute cover at once
+    // instead of leaving the armed instrument uncovered until a new write.
     for (const auto& [native, item] : r.resources) {
       (void)native;
       item->settled_state.store(Resource::kSettledStateUnknown, std::memory_order_release);
-      item->covered_serial.store(item->content_serial.load(std::memory_order_acquire), std::memory_order_release);
     }
   }
 }

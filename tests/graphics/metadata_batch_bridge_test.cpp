@@ -774,6 +774,101 @@ void unbound_clear_suffix_checks() {
   r.selected_native[0].store(old_native);
   r.ready = old_ready;
 }
+// Part 10: a Close that cannot record its display settlement within budget
+// defers the rows instead of refusing every carried cover; the next lock holder
+// replays them in Close order. Only ring overflow marks settlements stale, and
+// the stale reset no longer advances covered_serial.
+void deferred_settlement_checks() {
+  namespace win = taxi_camera::standalone;
+  auto& r = win::registry();
+  const auto old_ready = r.ready.load();
+  const auto* old_profile = r.profile;
+  auto item = std::make_shared<win::List>();
+  item->native = reinterpret_cast<ID3D12GraphicsCommandList*>(0x7a0000);
+  item->id = 7100;
+  auto target = std::make_shared<win::Resource>();
+  target->native = reinterpret_cast<ID3D12Resource*>(0x8a0000);
+  target->id = 8100;
+  target->desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+  target->desc.Width = 768;
+  target->desc.Height = 1024;
+  target->desc.DepthOrArraySize = 1;
+  target->desc.MipLevels = 5;
+  target->desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+  target->desc.SampleDesc.Count = 1;
+  target->desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+  r.profile = &taxi_camera::profiles::A380;
+  r.ready = true;
+  r.lists[item->native] = item;
+  r.resources[target->native] = target;
+  const win::PfdSubmissionProof::Key key{reinterpret_cast<std::uint64_t>(target->native), target->id};
+  // A carried RT write: restorable settlement in RENDER_TARGET that wrote the display.
+  const auto write = [&] {
+    const auto generation = ++item->recording;
+    item->submission_proof.reset(generation, true);
+    item->submission_proof.note_render_target_write(key, 12);
+    item->submission_proof.close(generation, true);
+  };
+  const auto hold_registry = [&](auto&& body) {
+    std::atomic<bool> release{false}, held{false};
+    std::thread owner([&] {
+      const std::lock_guard guard(r.mutex);
+      held.store(true, std::memory_order_release);
+      while (!release.load(std::memory_order_acquire))
+        SwitchToThread();
+    });
+    while (!held.load(std::memory_order_acquire))
+      SwitchToThread();
+    body();
+    release.store(true, std::memory_order_release);
+    owner.join();
+  };
+  require(!r.settlement_stale.load(), "Fixture starts with fresh settlements");
+  const auto skips_before = r.settlement_skips.load(), replays_before = r.settlement_replays.load();
+  const auto stale_before = r.settlement_stale_events.load();
+  const auto serial_before = target->content_serial.load();
+  write();
+  hold_registry([&] { win::remember_display_settlement(*item); });
+  require(r.settlement_skips == skips_before + 1 && !r.settlement_stale.load() && !r.deferred_settlements.empty(),
+          "A skipped settlement did not defer its rows without marking every display stale");
+  require(target->settled_state.load() == win::Resource::kSettledStateUnknown && target->content_serial.load() == serial_before,
+          "A skipped settlement wrote state without the registry lock");
+  // The next Close that takes the lock replays the skipped rows before its own.
+  write();
+  win::remember_display_settlement(*item);
+  require(r.settlement_replays == replays_before + 1 && r.deferred_settlements.empty(),
+          "The next lock holder did not replay the deferred settlement");
+  require(target->settled_state.load() == static_cast<UINT>(D3D12_RESOURCE_STATE_RENDER_TARGET) &&
+              target->content_serial.load() == serial_before + 2,
+          "Replayed and current settlements did not both record the RT state and the writes");
+  require(r.settlement_stale_events == stale_before && !r.settlement_stale.load(), "In-budget replay marked settlements stale");
+  // Overflow: more skipped rows than the ring holds. The lost rows mark the
+  // settlements stale; the worker forgets the states but keeps covered_serial
+  // behind content_serial so the next Close re-arms the cover.
+  const auto covered_before = target->covered_serial.load();
+  hold_registry([&] {
+    for (unsigned i = 0; i < 70; ++i) {
+      write();
+      win::remember_display_settlement(*item);
+    }
+  });
+  {
+    const std::lock_guard guard(r.mutex);
+    win::drain_deferred_lifecycle(r);
+  }
+  require(r.settlement_stale_events == stale_before + 1 && !r.settlement_stale.load(),
+          "Ring overflow did not mark settlements stale once and clear it on the worker pass");
+  require(target->settled_state.load() == win::Resource::kSettledStateUnknown, "The stale reset kept a possibly lost settled state");
+  require(target->covered_serial.load() == covered_before && target->content_serial.load() > target->covered_serial.load(),
+          "The stale reset advanced covered_serial and suppressed the carried cover until a new write");
+  require(win::graphics_status().settlement_skips == r.settlement_skips.load() &&
+              win::graphics_status().settlement_stale_events == r.settlement_stale_events.load(),
+          "Settlement counters are not published in the graphics status");
+  r.lists.erase(item->native);
+  r.resources.erase(target->native);
+  r.profile = old_profile;
+  r.ready = old_ready;
+}
 }  // namespace
 // Regression for the 0.9.34 rollup: a find_list whose registry lookup expired
 // must not let ensure_list admit a duplicate of a live list, and a sustained
@@ -859,6 +954,7 @@ int main() {
     submission_profile_filter_checks();
     submission_gpu_classification_checks();
     unbound_clear_suffix_checks();
+    deferred_settlement_checks();
     known_list_and_idle_checks();
     display_session_reset_checks();
     inventory_checks();

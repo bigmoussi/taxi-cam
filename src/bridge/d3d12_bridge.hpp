@@ -119,6 +119,10 @@ struct GraphicsStatus {
   std::uint64_t fallback_attempts{}, fallback_stamps{}, fallback_query_refused{}, fallback_state_refused{};
   std::uint64_t preferred_copy_attempts{}, preferred_copy_stamps{}, preferred_copy_no_proof{};
   const char* preferred_copy_reason = "not_attempted";
+  // Arm-to-first-stamp cover: carried covers planned on a quiet Execute; Close
+  // settlements skipped within budget and replayed later; ring overflows that
+  // set settlement_stale; carried covers refused while it was set.
+  std::uint64_t carried_covers{}, settlement_skips{}, settlement_replays{}, settlement_stale_events{}, carried_refused_stale{};
   std::uint64_t dynamic_depth_bias_calls{}, dynamic_strip_cut_calls{}, sample_position_calls{};
   std::uint64_t recording_end_draws{}, shader_deferred{}, close_forward_refused{};
   const char* target_detection = "warming_up";
