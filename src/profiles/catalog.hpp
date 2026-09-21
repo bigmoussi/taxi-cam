@@ -235,7 +235,7 @@ inline constexpr Composition Pmdg777Composition = [] {
 // the fuselage looking at that wing (own Right offset and yaw; not a mirrored
 // single tail capture). Published defaults from Robert's live 777 calibration.
 inline constexpr std::array<std::array<double, 6>, 3> Pmdg777Mounts{
-    {{0, -2, 16, -18, 0, 1}, {-4, 1.5, -25, 0, -15, 0.8}, {4, 1.5, -25, 0, 15, 0.8}}};
+    {{0, -2, 16, -18, 0, 1}, {-6, 1.5, -28, -5, -12, 0.6}, {6, 1.5, -28, -5, 12, 0.6}}};
 // Nose matches the 280 px picture; each bottom feed is a square half-pane.
 inline constexpr CameraPanes Pmdg777Panes{
     {{736, static_cast<std::int32_t>((Pmdg777NosePictureHeight * 736 + 384) / 768)},

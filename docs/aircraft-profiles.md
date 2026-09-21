@@ -79,7 +79,7 @@ The picture is the navigation display, not a flight PFD. A live scan of the open
 
 Taxi Cam does not copy a camera page the simulator already drew. It keeps **three** viewpoints — nose looking forward over the nose gear, and separate left- and right-wing mounts looking aft at each wing — and composes them into the shared 768 x 763 working image (`split_bottom`), then stamps that image into each inboard gauge rectangle on `DUS`. Layout in that working image:
 
-- nose picture **280** px tall from y = 0 (full width), with a **10** px black bottom edge before the T;
+- nose picture **280** px tall from y = 0 (full width), with a **10** px black frame on the left, right and bottom edges before the T;
 - T divider from y **280** to **318** (**38** px, ~4/5 of the **48** px gap) in colour **`#1B1C23`**, including the vertical gap between the bottom panes;
 - equal **360 x 360** square bottom panes from y **318** to **678** (camera feeds 360 x 360) with **10** px black borders and **24** px rounded corners on the black frame; rows below the squares stay black.
 
@@ -87,7 +87,7 @@ An **85** px top inset (`camera_padding` top; bottom inset 0; L/R 0) moves the s
 
 Ground speed is **off** for this profile only: the live path skips the GS overlay entirely (no readout and no black GS box). The GS font fixture still enables the panel on every catalog profile, including 777, and keeps the default panel origin so padding checks stay strict. Reference guides stay off; the companion disables that settings page for 777. Daytime exposure stays the shared default of **-11.5 EV**. Settings are stored in `pmdg-777.ini`. PFD refresh is not measured (`pfd_refresh_hz` 0).
 
-Published mount defaults from live calibration: nose **0 / -2 / 16 m, pitch/yaw -18 / 0 degrees, lens 1 rad**; left wing **-4 / 1.5 / -25 m, 0 / -15 degrees, 0.8 rad**; right wing **4 / 1.5 / -25 m, 0 / 15 degrees, 0.8 rad**. They are not a metric clearance calibration. Live framing and lighting still need an in-simulator check.
+Published mount defaults from live calibration: nose **0 / -2 / 16 m, pitch/yaw -18 / 0 degrees, lens 1 rad**; left wing **-6 / 1.5 / -28 m, -5 / -12 degrees, 0.6 rad**; right wing **6 / 1.5 / -28 m, -5 / 12 degrees, 0.6 rad**. They are not a metric clearance calibration. Live framing and lighting still need an in-simulator check.
 
 The display list only offers GPU resources that match the selected profile's size. Until this profile is selected, the bridge keeps the previous profile's filter. The default is the FBW A380 at 768 x 1024, five mips, format 28. A 2048 x 2048 `DUS` texture is not a candidate for that filter, so the list stays empty and detection reports `no_candidates`. The log does not print gauge names. After this profile is selected, a 2048 x 2048 resource with any non-zero format and 1–12 mips is a candidate. Mip count and DXGI format were not in the scan. The texture list and the display-routing dropdown use resource-id order, not draw count. When more than one candidate matches, automatic selection takes the last entry, which is the highest resource id, and assigns that one texture to both inboard rectangles. It does not take the first entry, and it does not use a texture name. Display routing can still assign a texture by hand. GPU targeting cannot read gauge or material names; `DU_LeftInboard` and `DU_RightInboard` are the rectangles above on the shared `DUS` texture.
 

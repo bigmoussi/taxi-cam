@@ -709,11 +709,17 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
   }
   if (ReferenceGuides != 0 && reference_guide(position.xy, position.y < NoseHeight)) return float4(GuideRed, GuideGreen, GuideBlue, 1);
   if (position.y < NoseHeight) {
-    // Visible black edge under the nose picture before the T (2 px was lost on-ND).
+    // Split-bottom nose frame: bottom edge always; left/right only when GS is
+    // hidden so the font fixture's padded-panel surroundings stay camera pixels.
     const float nose_border = 10;
+    const bool side_borders = SplitBottom != 0 && GroundSpeedValid == 2;
     if (SplitBottom != 0 && position.y >= NoseHeight - nose_border) return float4(0, 0, 0, 1);
+    if (side_borders && (position.x < nose_border || position.x >= 768.0 - nose_border))
+      return float4(0, 0, 0, 1);
+    float left = side_borders ? nose_border : 0;
+    float right = side_borders ? 768.0 - nose_border : 768.0;
     float nose_h = SplitBottom != 0 ? max(NoseHeight - nose_border, 1) : NoseHeight;
-    float2 uv = float2(position.x / 768, position.y / nose_h);
+    float2 uv = float2((position.x - left) / max(right - left, 1), position.y / nose_h);
     return float4(display_rgb(Nose.SampleLevel(LinearClamp, uv, 0).rgb, 0), 1);
   }
   if (position.y < TailTop) return float4(0, 0, 0, 1);
