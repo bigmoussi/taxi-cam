@@ -226,9 +226,9 @@ inline constexpr Composition Pmdg777Composition = [] {
 }();
 // Nose: forward/down over the nose gear. Bottom-left/right: outside each side of
 // the fuselage looking at that wing (own Right offset and yaw; not a mirrored
-// single tail capture).
+// single tail capture). Published defaults from Robert's live 777 calibration.
 inline constexpr std::array<std::array<double, 6>, 3> Pmdg777Mounts{
-    {{0, -1.5, 18, -15, 0, 1.0}, {-5, 2, -6, -8, -100, 1.2}, {5, 2, -6, -8, 100, 1.2}}};
+    {{0, -2, 16, -18, 0, 1}, {-4, 1.5, -25, 0, -15, 0.8}, {4, 1.5, -25, 0, 15, 0.8}}};
 // Nose matches the shorter top band; each bottom feed matches one half-pane.
 inline constexpr CameraPanes Pmdg777Panes{
     {{736, static_cast<std::int32_t>((Pmdg777NoseHeight * 736 + 384) / 768)},
@@ -259,6 +259,9 @@ inline constexpr AircraftProfile Pmdg777 = [] {
   p.display_texture = Pmdg777Texture;
   p.reference_guides = false;
   p.ground_speed = false;
+  // Keep the GS panel origin off the working image so the compositor never
+  // draws the label, even for an invalid-speed dash readout.
+  p.composition.speed_panel_origin = {-1000.f, -1000.f};
   // Symmetrical top/bottom frame around the camera block; L/R stay 0.
   p.camera_padding = {0, 40, 0, 40};
   return p;

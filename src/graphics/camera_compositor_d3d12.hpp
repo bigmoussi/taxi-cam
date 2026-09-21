@@ -650,6 +650,17 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
   if (SplitBottom != 0 && position.y >= TailTop) {
     float pane = (768 - BottomGap) * 0.5;
     if (position.x >= pane && position.x < pane + BottomGap) return float4(0, 0, 0, 1);
+    // Inner top corners only (~18 px): left pane's top-right, right pane's top-left.
+    const float radius = 18;
+    if (position.y < TailTop + radius) {
+      if (position.x < pane) {
+        float2 centre = float2(pane - radius, TailTop + radius);
+        if (position.x > centre.x && distance(position.xy, centre) > radius) return float4(0, 0, 0, 1);
+      } else {
+        float2 centre = float2(pane + BottomGap + radius, TailTop + radius);
+        if (position.x < centre.x && distance(position.xy, centre) > radius) return float4(0, 0, 0, 1);
+      }
+    }
   }
   if (ReferenceGuides != 0 && reference_guide(position.xy, position.y < NoseHeight)) return float4(GuideRed, GuideGreen, GuideBlue, 1);
   if (position.y < NoseHeight) {

@@ -680,6 +680,8 @@ void build_controls() {
   const wchar_t* names[]{L"Overview", L"Camera views", L"Display", L"PFD routing", L"Diagnostics", L"Reference guides"};
   for (int i = 0; i < 6; ++i)
     navigation.push_back(button(names[i], 100 + i, 20, 156 + i * 49, 166, 40));
+  const auto* nav_profile = profiles::find(s.profile);
+  EnableWindow(GetDlgItem(window, 105), !nav_profile || nav_profile->reference_guides);
   const auto donate_button = button(L"Donate", 513, 24, 590, 110, 40);
   const auto report_button = button(L"Report a bug", 512, 24, 638, 40, 40);
   const auto version_link = button(L"v" TAXI_CAM_VERSION_WIDE, 514, 24, 692, 155, 22);
@@ -1641,6 +1643,11 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       }
       if (id >= 100 && id < 106) {
         auto s = draft();
+        if (id == 105) {
+          const auto* guide_profile = profiles::find(s.profile);
+          if (guide_profile && !guide_profile->reference_guides)
+            return 0;
+        }
         const wchar_t* field_error{};
         if (!read_fields(s, &field_error)) {
           notice = field_error ? field_error : L"Finish the current values before changing pages.";

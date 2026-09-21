@@ -388,8 +388,13 @@ int main() {
       assert(profile->composition.divider_top == 280.f && profile->composition.divider_bottom == 318.f);
       assert(profile->camera_padding.left == 0 && profile->camera_padding.top == 40 && profile->camera_padding.right == 0 &&
              profile->camera_padding.bottom == 40);
-      assert(profile->mounts[0][4] == 0 && profile->mounts[1][4] == -100 && profile->mounts[2][4] == 100);
-      assert(profile->mounts[1][0] == -5 && profile->mounts[2][0] == 5);
+      assert(profile->mounts[0][0] == 0 && profile->mounts[0][1] == -2 && profile->mounts[0][2] == 16);
+      assert(profile->mounts[0][3] == -18 && profile->mounts[0][4] == 0 && profile->mounts[0][5] == 1);
+      assert(profile->mounts[1][0] == -4 && profile->mounts[1][1] == 1.5 && profile->mounts[1][2] == -25);
+      assert(profile->mounts[1][3] == 0 && profile->mounts[1][4] == -15 && profile->mounts[1][5] == 0.8);
+      assert(profile->mounts[2][0] == 4 && profile->mounts[2][1] == 1.5 && profile->mounts[2][2] == -25);
+      assert(profile->mounts[2][3] == 0 && profile->mounts[2][4] == 15 && profile->mounts[2][5] == 0.8);
+      assert(profile->composition.speed_panel_origin[0] < 0 && profile->composition.speed_panel_origin[1] < 0);
       assert(profile->formats[0] == 0);
       assert(profiles::matches_display(*profile, profile->width, profile->height, 1, 28));
       assert(profiles::matches_display(*profile, profile->width, profile->height, 12, 87));
