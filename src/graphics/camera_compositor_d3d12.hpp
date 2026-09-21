@@ -138,8 +138,11 @@ class CameraCompositorD3D12 {
   // Nose, bottom-left (or full-width tail), and bottom-right. Non-split layouts
   // may pass the same resource for both bottom inputs; split_bottom requires three
   // distinct captures so each wing has its own mount.
-  // descriptor_writes counts CreateShaderResourceView calls: exactly two when the
-  // bottoms alias (t2 is CopyDescriptors from t1), exactly three when distinct.
+  // descriptor_writes counts feed bindings: exactly two when the bottoms alias
+  // (t2 still gets CreateShaderResourceView for the same tail so the three-SRV
+  // root table stays valid; that fill is not a third feed), exactly three when
+  // the bottoms are distinct. Never CopyDescriptorsSimple from this shader-visible
+  // heap — it is CPU-write-only as a copy source.
   HRESULT set_inputs(ID3D12Resource* nose, DXGI_FORMAT nose_format, ID3D12Resource* tail_left, DXGI_FORMAT left_format,
                      ID3D12Resource* tail_right, DXGI_FORMAT right_format) noexcept {
     if (!output_.get())
@@ -165,30 +168,19 @@ class CameraCompositorD3D12 {
     const std::array<DXGI_FORMAT, 3> formats{nose_format, left_format, right_format};
     auto handle = srv_heap_->GetCPUDescriptorHandleForHeapStart();
     const UINT stride = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-    std::array<D3D12_CPU_DESCRIPTOR_HANDLE, 3> slots{};
-    for (std::size_t index = 0; index < slots.size(); ++index)
-      slots[index].ptr = handle.ptr + index * stride;
-    const auto write_srv = [&](std::size_t index) noexcept {
+    for (std::size_t index = 0; index < resources.size(); ++index) {
       D3D12_SHADER_RESOURCE_VIEW_DESC view{};
       view.Format = formats[index];
       view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
       view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
       view.Texture2D.MipLevels = 1;
-      device_->CreateShaderResourceView(resources[index], &view, slots[index]);
+      device_->CreateShaderResourceView(resources[index], &view, handle);
       inputs_[index].retain(resources[index]);
-    };
-    write_srv(0);
-    write_srv(1);
-    if (shared_bottom) {
-      device_->CopyDescriptorsSimple(1, slots[2], slots[1], D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-      inputs_[2].retain(tail_left);
-      statistics_.descriptor_writes += 2;
-    } else {
-      write_srv(2);
-      statistics_.descriptor_writes += 3;
+      handle.ptr += stride;
     }
     formats_ = formats;
     input_descriptions_ = descriptions;
+    statistics_.descriptor_writes += shared_bottom ? 2u : 3u;
     ++statistics_.input_changes;
     error_[0] = '\0';
     return S_OK;
