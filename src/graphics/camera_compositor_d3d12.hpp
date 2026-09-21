@@ -138,6 +138,8 @@ class CameraCompositorD3D12 {
   // Nose, bottom-left (or full-width tail), and bottom-right. Non-split layouts
   // may pass the same resource for both bottom inputs; split_bottom requires three
   // distinct captures so each wing has its own mount.
+  // descriptor_writes counts CreateShaderResourceView calls: exactly two when the
+  // bottoms alias (t2 is CopyDescriptors from t1), exactly three when distinct.
   HRESULT set_inputs(ID3D12Resource* nose, DXGI_FORMAT nose_format, ID3D12Resource* tail_left, DXGI_FORMAT left_format,
                      ID3D12Resource* tail_right, DXGI_FORMAT right_format) noexcept {
     if (!output_.get())
@@ -145,8 +147,11 @@ class CameraCompositorD3D12 {
     if (!nose || !tail_left || !tail_right || same_object(nose, tail_left) || same_object(nose, tail_right) ||
         same_object(nose, output_.get()) || same_object(tail_left, output_.get()) || same_object(tail_right, output_.get()))
       return fail(E_INVALIDARG, "Nose and bottom inputs must be non-null and must not alias the compositor output.");
-    if (composition_.split_bottom != 0 && same_object(tail_left, tail_right))
+    const bool shared_bottom = same_object(tail_left, tail_right);
+    if (composition_.split_bottom != 0 && shared_bottom)
       return fail(E_INVALIDARG, "Split-bottom layouts need distinct left and right bottom captures.");
+    if (shared_bottom && left_format != right_format)
+      return fail(E_INVALIDARG, "Aliased bottom inputs must share the same typed SRV format.");
     if (same_object(nose, inputs_[0].get()) && same_object(tail_left, inputs_[1].get()) && same_object(tail_right, inputs_[2].get()) &&
         nose_format == formats_[0] && left_format == formats_[1] && right_format == formats_[2]) {
       error_[0] = '\0';
@@ -160,19 +165,30 @@ class CameraCompositorD3D12 {
     const std::array<DXGI_FORMAT, 3> formats{nose_format, left_format, right_format};
     auto handle = srv_heap_->GetCPUDescriptorHandleForHeapStart();
     const UINT stride = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-    for (std::size_t index = 0; index < resources.size(); ++index) {
+    std::array<D3D12_CPU_DESCRIPTOR_HANDLE, 3> slots{};
+    for (std::size_t index = 0; index < slots.size(); ++index)
+      slots[index].ptr = handle.ptr + index * stride;
+    const auto write_srv = [&](std::size_t index) noexcept {
       D3D12_SHADER_RESOURCE_VIEW_DESC view{};
       view.Format = formats[index];
       view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
       view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
       view.Texture2D.MipLevels = 1;
-      device_->CreateShaderResourceView(resources[index], &view, handle);
+      device_->CreateShaderResourceView(resources[index], &view, slots[index]);
       inputs_[index].retain(resources[index]);
-      handle.ptr += stride;
+    };
+    write_srv(0);
+    write_srv(1);
+    if (shared_bottom) {
+      device_->CopyDescriptorsSimple(1, slots[2], slots[1], D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+      inputs_[2].retain(tail_left);
+      statistics_.descriptor_writes += 2;
+    } else {
+      write_srv(2);
+      statistics_.descriptor_writes += 3;
     }
     formats_ = formats;
     input_descriptions_ = descriptions;
-    statistics_.descriptor_writes += 3;
     ++statistics_.input_changes;
     error_[0] = '\0';
     return S_OK;
