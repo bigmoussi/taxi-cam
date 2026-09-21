@@ -79,7 +79,8 @@ class CameraCompositorD3D12 {
     ground_speed_valid_ = display.valid;
     ground_speed_ = display.knots;
   }
-  // Keep the default GS panel as a solid black slot with no label or dashes.
+  // Keep the default GS panel geometry for font fixtures. When hidden, the
+  // overlay is skipped entirely so no black rectangle appears on the ND.
   void hide_ground_speed() noexcept {
     ground_speed_hidden_ = true;
     ground_speed_valid_ = false;
@@ -588,15 +589,13 @@ float glyph_coverage(float2 position, float2 origin, uint glyph) {
   return saturate(1.4 - distance);
 }
 uint ground_speed_digits() {
-  // Mode 1 is a live reading. 0 (unavailable) and 2 (hidden black slot) keep
-  // the two-digit panel width so padding geometry stays stable.
+  // Mode 1 is a live reading. Unavailable (0) keeps the two-digit panel width.
   return GroundSpeedValid == 1 && GroundSpeed < 10 ? 1 : 2;
 }
 float2 ground_speed_extent() {
   return float2(max(SpeedMinimumWidth, SpeedPaddingX * 2 + 64 + 16 * ground_speed_digits()), max(SpeedMinimumHeight, SpeedPaddingY * 2 + 20));
 }
 float4 ground_speed_pixel(float2 position) {
-  if (GroundSpeedValid == 2) return float4(0, 0, 0, 1);
   position -= float2(SpeedPaddingX, SpeedPaddingY);
   float label = max(glyph_coverage(position, float2(0, 0), 10), glyph_coverage(position, float2(16, 0), 11));
   float speed = 0;
@@ -654,34 +653,62 @@ float4 vs_main(uint id : SV_VertexID) : SV_Position {
   return float4(uv.x * 2 - 1, 1 - uv.y * 2, 0, 1);
 }
 float4 ps_main(float4 position : SV_Position) : SV_Target {
-  float2 speed_position = position.xy - float2(SpeedLeft, SpeedTop);
-  if (all(speed_position >= 0) && all(speed_position < ground_speed_extent())) return ground_speed_pixel(speed_position);
-  if (position.y >= DividerTop && position.y < DividerBottom) return float4(0, 0, 0, 1);
+  // Mode 2 hides the overlay entirely (no glyphs, no black panel). Modes 0/1
+  // keep the existing GS panel so font fixtures stay unchanged.
+  if (GroundSpeedValid != 2) {
+    float2 speed_position = position.xy - float2(SpeedLeft, SpeedTop);
+    if (all(speed_position >= 0) && all(speed_position < ground_speed_extent())) return ground_speed_pixel(speed_position);
+  }
+  if (position.y >= DividerTop && position.y < DividerBottom) {
+    // Split-bottom (777) T uses the reference grey; other aircraft keep black.
+    if (SplitBottom != 0) return float4(75.0 / 255.0, 75.0 / 255.0, 99.0 / 255.0, 1);
+    return float4(0, 0, 0, 1);
+  }
   if (SplitBottom != 0 && position.y >= TailTop) {
     float pane = (768 - BottomGap) * 0.5;
-    if (position.x >= pane && position.x < pane + BottomGap) return float4(0, 0, 0, 1);
-    // Inner top corners only (~18 px): left pane's top-right, right pane's top-left.
+    if (position.x >= pane && position.x < pane + BottomGap)
+      return float4(75.0 / 255.0, 75.0 / 255.0, 99.0 / 255.0, 1);
+    // Picture borders measured from the reference ND: thin black frame around
+    // each bottom feed. Inner top corners stay 18 px on the picture edge.
+    const float pane_border = 3;
     const float radius = 18;
-    if (position.y < TailTop + radius) {
+    float local_x = position.x < pane ? position.x : position.x - pane - BottomGap;
+    float local_y = position.y - TailTop;
+    float pane_h = 763 - TailTop;
+    float2 content_min = float2(pane_border, pane_border);
+    float2 content_max = float2(pane - pane_border, pane_h - pane_border);
+    float2 local = float2(local_x, local_y);
+    if (any(local < content_min) || any(local >= content_max)) return float4(0, 0, 0, 1);
+    // Inner top corners of the picture (left pane top-right, right pane top-left).
+    if (local_y < content_min.y + radius) {
       if (position.x < pane) {
-        float2 centre = float2(pane - radius, TailTop + radius);
-        if (position.x > centre.x && distance(position.xy, centre) > radius) return float4(0, 0, 0, 1);
+        float2 centre = float2(content_max.x - radius, content_min.y + radius);
+        if (local.x > centre.x && distance(local, centre) > radius) return float4(0, 0, 0, 1);
       } else {
-        float2 centre = float2(pane + BottomGap + radius, TailTop + radius);
-        if (position.x < centre.x && distance(position.xy, centre) > radius) return float4(0, 0, 0, 1);
+        float2 centre = float2(content_min.x + radius, content_min.y + radius);
+        if (local.x < centre.x && distance(local, centre) > radius) return float4(0, 0, 0, 1);
       }
     }
   }
   if (ReferenceGuides != 0 && reference_guide(position.xy, position.y < NoseHeight)) return float4(GuideRed, GuideGreen, GuideBlue, 1);
   if (position.y < NoseHeight) {
-    float2 uv = float2(position.x / 768, position.y / NoseHeight);
+    // Thin black edge along the bottom of the nose picture, before the T.
+    if (SplitBottom != 0 && position.y >= NoseHeight - 2) return float4(0, 0, 0, 1);
+    float nose_h = SplitBottom != 0 ? max(NoseHeight - 2, 1) : NoseHeight;
+    float2 uv = float2(position.x / 768, position.y / nose_h);
     return float4(display_rgb(Nose.SampleLevel(LinearClamp, uv, 0).rgb, 0), 1);
   }
   if (position.y < TailTop) return float4(0, 0, 0, 1);
   if (SplitBottom != 0) {
     float pane = (768 - BottomGap) * 0.5;
+    const float pane_border = 3;
     float local_x = position.x < pane ? position.x : position.x - pane - BottomGap;
-    float2 uv = float2(local_x / pane, (position.y - TailTop) / (763 - TailTop));
+    float local_y = position.y - TailTop;
+    float pane_h = 763 - TailTop;
+    float2 content_min = float2(pane_border, pane_border);
+    float2 content_max = float2(pane - pane_border, pane_h - pane_border);
+    float2 uv = float2((local_x - content_min.x) / (content_max.x - content_min.x),
+                       (local_y - content_min.y) / (content_max.y - content_min.y));
     if (position.x < pane)
       return float4(display_rgb(TailLeft.SampleLevel(LinearClamp, uv, 0).rgb, 1), 1);
     return float4(display_rgb(TailRight.SampleLevel(LinearClamp, uv, 0).rgb, 2), 1);
