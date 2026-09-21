@@ -60,7 +60,7 @@ struct ProbeSnapshot {
   bool profile_transition_ready = false;
   bool profile_transition_failed = false;
   MountPair mounts = default_mounts();
-  std::array<MountedPose, 2> mounted_poses{};
+  std::array<MountedPose, kMaxCameraFeeds> mounted_poses{};
   std::uint64_t updates = 0;
   // Serviced callbacks only: skipped/throttled callbacks are not timed. Includes
   // diagnostic reads and private calls, but not the original update or GPU work.
@@ -73,8 +73,8 @@ struct ProbeSnapshot {
   std::uint32_t requested_rate = kDefaultCameraRate;
   std::uint32_t requested_feeds = 2;
   // Last native activation requests, not a measured rendered-frame rate.
-  std::array<bool, 2> gates{};
-  std::array<std::uint64_t, 2> activation_counts{};
+  std::array<bool, kMaxCameraFeeds> gates{};
+  std::array<std::uint64_t, kMaxCameraFeeds> activation_counts{};
   std::uint32_t thread_id = 0;
   std::uint32_t free_views = 0;
   std::uint64_t retirement_deferrals = 0;
@@ -90,20 +90,20 @@ struct ProbeSnapshot {
   // render-target record (inspection=rt_record_absent).
   unsigned rt_record_refusals = 0;
   std::uint64_t rt_record_holds = 0;
-  std::array<bool, 2> ready{};
-  std::array<const char*, 2> inspection_status{"not_inspected", "not_inspected"};
-  std::array<bool, 2> resource_present{};
+  std::array<bool, kMaxCameraFeeds> ready{};
+  std::array<const char*, kMaxCameraFeeds> inspection_status{"not_inspected", "not_inspected", "not_inspected"};
+  std::array<bool, kMaxCameraFeeds> resource_present{};
   // Output admission per view: mode2, resource present, all size pairs and the
   // Bitmap at the requested pane. Gates open only for views with this true.
-  std::array<bool, 2> output_ready{};
+  std::array<bool, kMaxCameraFeeds> output_ready{};
   // Observer updates spent waiting for the initial pane output after resizing.
   unsigned output_waits = 0;
   // Per view, three hex digits (diffuse, add-diffuse, depth-stencil): 1 Bitmap,
   // 2 texture, 4 render-target record, as the captured replay resolves them.
-  std::array<std::uint32_t, 2> output_slots{};
+  std::array<std::uint32_t, kMaxCameraFeeds> output_slots{};
   bool outputs_matched = false;
-  std::array<std::array<std::array<std::int32_t, 2>, 3>, 2> dimensions{};
-  std::array<std::array<std::uint64_t, 2>, 2> flags{};
+  std::array<std::array<std::array<std::int32_t, 2>, 3>, kMaxCameraFeeds> dimensions{};
+  std::array<std::array<std::uint64_t, 2>, kMaxCameraFeeds> flags{};
   engine_camera::Snapshot pair{};
   bool pose_waiting = false;
   bool view_waiting = false;

@@ -79,6 +79,7 @@ Settings customized(const profiles::AircraftProfile& profile) {
   value.tail_inner = {0.4375f, 0.25f};
   value.mounts[0] = {1.25, 2.5, 3.75, -12.5, 4.25, 0.75};
   value.mounts[1] = {-2.25, 5.5, -7.75, -25.5, 1.75, 0.875};
+  value.mounts[2] = value.mounts[1];
   require(valid_settings(value), "Custom fixture preferences are valid");
   return value;
 }

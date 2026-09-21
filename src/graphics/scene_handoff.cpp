@@ -25,10 +25,10 @@ bool SceneHandoff::lifecycle_event(std::uint64_t changed_handle) {
   // two already registered resources. Still invalidate every open inspection
   // ticket so an address freed/reused while its graph is being read is refused.
   if (!changed_handle || observed_feed(changed_handle) >= 0) {
-    candidate_handles_[0].store(0, std::memory_order_release);
-    candidate_handles_[1].store(0, std::memory_order_release);
-    observed_handles_[0].store(0, std::memory_order_release);
-    observed_handles_[1].store(0, std::memory_order_release);
+    for (auto& handle : candidate_handles_)
+      handle.store(0, std::memory_order_release);
+    for (auto& handle : observed_handles_)
+      handle.store(0, std::memory_order_release);
     publication_ = {};
     ++diagnostics_.target_invalidations;
   } else {
@@ -126,10 +126,10 @@ bool SceneHandoff::try_unregister_resource(std::uint64_t key, std::uint64_t hand
 
 std::uint64_t SceneHandoff::begin_scene() {
   const std::lock_guard lock(mutex_);
-  candidate_handles_[0].store(0, std::memory_order_release);
-  candidate_handles_[1].store(0, std::memory_order_release);
-  observed_handles_[0].store(0, std::memory_order_release);
-  observed_handles_[1].store(0, std::memory_order_release);
+  for (auto& handle : candidate_handles_)
+    handle.store(0, std::memory_order_release);
+  for (auto& handle : observed_handles_)
+    handle.store(0, std::memory_order_release);
   publication_ = {};
   owner_bound_ = false;
   owner_ = {};
@@ -140,10 +140,10 @@ std::uint64_t SceneHandoff::begin_scene() {
 
 void SceneHandoff::stop_scene() {
   const std::lock_guard lock(mutex_);
-  candidate_handles_[0].store(0, std::memory_order_release);
-  candidate_handles_[1].store(0, std::memory_order_release);
-  observed_handles_[0].store(0, std::memory_order_release);
-  observed_handles_[1].store(0, std::memory_order_release);
+  for (auto& handle : candidate_handles_)
+    handle.store(0, std::memory_order_release);
+  for (auto& handle : observed_handles_)
+    handle.store(0, std::memory_order_release);
   active_ = false;
   owner_bound_ = false;
   publication_ = {};
@@ -161,8 +161,8 @@ SceneCaptureTicket SceneHandoff::begin_capture() {
 
 bool SceneHandoff::publish(SceneCaptureTicket ticket,
                            SceneManagerIdentity manager,
-                           const std::array<std::uint64_t, 2>& ids,
-                           const std::array<std::uint64_t, 2>& handles) {
+                           const std::array<std::uint64_t, 3>& ids,
+                           const std::array<std::uint64_t, 3>& handles) {
   const std::lock_guard lock(mutex_);
   // An old concurrent completion may not revoke or replace a newer capture.
   if (active_ && ticket.scene_epoch == scene_epoch_ && ticket.sequence == capture_sequence_ && ticket.lifecycle_epoch != lifecycle_epoch_)
@@ -172,12 +172,16 @@ bool SceneHandoff::publish(SceneCaptureTicket ticket,
     return false;
   const auto refuse_latest = [&] {
     publication_ = {};
-    candidate_handles_[0].store(0, std::memory_order_release);
-    candidate_handles_[1].store(0, std::memory_order_release);
+    for (auto& handle : candidate_handles_)
+      handle.store(0, std::memory_order_release);
     return false;
   };
   if (manager.identity == 0 || manager.generation == 0 || ids[0] == 0 || ids[1] == 0 || ids[0] == ids[1] || handles[0] == 0 ||
       handles[1] == 0 || handles[0] == handles[1])
+    return refuse_latest();
+  if ((ids[2] == 0) != (handles[2] == 0))
+    return refuse_latest();
+  if (ids[2] && (ids[2] == ids[0] || ids[2] == ids[1] || handles[2] == 0 || handles[2] == handles[0] || handles[2] == handles[1]))
     return refuse_latest();
   if (owner_bound_ && (owner_ != manager || owned_ids_ != ids)) {
     // A new manager/pair requires a new authorized scene epoch.
@@ -196,6 +200,8 @@ bool SceneHandoff::publish(SceneCaptureTicket ticket,
   pending.entry_ids = ids;
   pending.handles = handles;
   for (std::size_t feed = 0; feed < handles.size(); ++feed) {
+    if (!handles[feed])
+      continue;
     const Device* found_device = nullptr;
     Resource found;
     for (const auto& item : devices_) {
@@ -218,10 +224,10 @@ bool SceneHandoff::publish(SceneCaptureTicket ticket,
   owned_ids_ = ids;
   pending.valid = true;
   publication_ = pending;
-  candidate_handles_[0].store(handles[0], std::memory_order_release);
-  candidate_handles_[1].store(handles[1], std::memory_order_release);
-  observed_handles_[0].store(handles[0], std::memory_order_release);
-  observed_handles_[1].store(handles[1], std::memory_order_release);
+  for (std::size_t i = 0; i < handles.size(); ++i) {
+    candidate_handles_[i].store(handles[i], std::memory_order_release);
+    observed_handles_[i].store(handles[i], std::memory_order_release);
+  }
   ++diagnostics_.publications;
   return true;
 }
@@ -237,16 +243,20 @@ SceneCopyMatch SceneHandoff::match(std::uint64_t key, std::uint64_t handle) cons
   if (resource == item->resources.end())
     return {};
   const SceneResourceIdentity identity{item->epoch, resource->second.id, resource->second.generation};
-  for (std::uint32_t feed = 0; feed < 2; ++feed)
-    if (publication_.handles[feed] == handle && publication_.resources[feed] == identity)
+  for (std::uint32_t feed = 0; feed < publication_.handles.size(); ++feed)
+    if (publication_.handles[feed] && publication_.handles[feed] == handle && publication_.resources[feed] == identity)
       return {true, feed, scene_epoch_, publication_.sequence, publication_.manager, publication_.entry_ids[feed], identity};
   return {};
 }
 
 SceneCopyObservation SceneHandoff::observe_copy(std::uint64_t key, std::uint64_t source, std::uint64_t destination) const {
-  const auto first = candidate_handles_[0].load(std::memory_order_acquire);
-  const auto second = candidate_handles_[1].load(std::memory_order_acquire);
-  if ((first == 0 || (first != source && first != destination)) && (second == 0 || (second != source && second != destination)))
+  bool candidate = false;
+  for (const auto& slot : candidate_handles_) {
+    const auto handle = slot.load(std::memory_order_acquire);
+    if (handle && (handle == source || handle == destination))
+      candidate = true;
+  }
+  if (!candidate)
     return {};
   const std::lock_guard lock(mutex_);
   return {match(key, source), match(key, destination)};
@@ -255,12 +265,15 @@ SceneCopyObservation SceneHandoff::observe_copy(std::uint64_t key, std::uint64_t
 bool SceneHandoff::may_match_resource(std::uint64_t handle) const noexcept {
   if (!handle)
     return false;
-  return candidate_handles_[0].load(std::memory_order_acquire) == handle || candidate_handles_[1].load(std::memory_order_acquire) == handle;
+  for (const auto& slot : candidate_handles_)
+    if (slot.load(std::memory_order_acquire) == handle)
+      return true;
+  return false;
 }
 
 bool SceneHandoff::is_current(const SceneCopyMatch& value) const {
   const std::lock_guard lock(mutex_);
-  if (!value.matched || value.feed >= 2 || !publication_.valid)
+  if (!value.matched || value.feed >= publication_.handles.size() || !publication_.valid || !publication_.handles[value.feed])
     return false;
   const auto current = match(publication_.device_key, publication_.handles[value.feed]);
   return current.matched && value.scene_epoch == current.scene_epoch && value.manager == current.manager &&
@@ -271,7 +284,7 @@ bool SceneHandoff::is_current(const SceneCopyMatch& value) const {
 int SceneHandoff::observed_feed(std::uint64_t handle) const noexcept {
   if (!handle)
     return -1;
-  for (int i = 0; i < 2; ++i)
+  for (int i = 0; i < static_cast<int>(observed_handles_.size()); ++i)
     if (observed_handles_[i].load(std::memory_order_acquire) == handle)
       return i;
   return -1;

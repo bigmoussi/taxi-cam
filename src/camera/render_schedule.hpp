@@ -4,6 +4,7 @@
 #include <array>
 #include <cstdint>
 #include "../shared/camera_rate.hpp"
+#include "aircraft_mounts.hpp"
 
 namespace taxi_camera::native_camera {
 
@@ -14,7 +15,7 @@ class RenderSchedule {
  public:
   void configure(unsigned rate, unsigned feeds = 2) noexcept {
     rate_ = std::clamp(rate, kMinimumCameraRate, kMaximumCameraRate);
-    feeds_ = std::clamp(feeds, 1u, 2u);
+    feeds_ = std::clamp(feeds, 1u, kMaxCameraFeeds);
     if (next_feed_ >= feeds_)
       next_feed_ = 0;
   }
@@ -31,13 +32,16 @@ class RenderSchedule {
     next_feed_ = 0;
   }
 
-  std::array<bool, 2> tick(std::uint64_t now_ms, bool suspended = false) noexcept {
-    const bool was_active = active_[0] || active_[1];
+  std::array<bool, kMaxCameraFeeds> tick(std::uint64_t now_ms, bool suspended = false) noexcept {
+    bool was_active = false;
+    for (bool on : active_)
+      was_active = was_active || on;
     active_ = {};
     if (have_time_ && now_ms < previous_time_) {
       // A clock reversal closes both gates and restarts the cooldown without
       // erasing whether either feed has already received an opportunity.
-      last_ = {now_ms, now_ms};
+      for (unsigned i = 0; i < feeds_; ++i)
+        last_[i] = now_ms;
       last_any_ = now_ms;
       previous_time_ = now_ms;
       return active_;
@@ -51,7 +55,10 @@ class RenderSchedule {
     const auto per_feed_ms = (1000u + rate_ - 1) / rate_;
     const auto total_rate = rate_ * feeds_;
     const auto between_ms = (1000u + total_rate - 1) / total_rate;
-    if (((seen_[0] || seen_[1]) && now_ms - last_any_ < between_ms) || (seen_[next_feed_] && now_ms - last_[next_feed_] < per_feed_ms))
+    bool any_seen = false;
+    for (unsigned i = 0; i < feeds_; ++i)
+      any_seen = any_seen || seen_[i];
+    if ((any_seen && now_ms - last_any_ < between_ms) || (seen_[next_feed_] && now_ms - last_[next_feed_] < per_feed_ms))
       return active_;
     active_[next_feed_] = true;
     seen_[next_feed_] = true;
@@ -71,9 +78,9 @@ class RenderSchedule {
   bool have_time_ = false;
   std::uint64_t previous_time_ = 0;
   std::uint64_t last_any_ = 0;
-  std::array<bool, 2> active_{};
-  std::array<bool, 2> seen_{};
-  std::array<std::uint64_t, 2> last_{};
+  std::array<bool, kMaxCameraFeeds> active_{};
+  std::array<bool, kMaxCameraFeeds> seen_{};
+  std::array<std::uint64_t, kMaxCameraFeeds> last_{};
 };
 
 }  // namespace taxi_camera::native_camera

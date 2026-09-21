@@ -281,7 +281,7 @@ DWORD run_impl() {
       announce(events[i], sim_limiter, at);
   };
   std::uint64_t last_stop_sequence{};
-  std::array<std::array<double, 6>, 2> applied_mounts{};
+  std::array<std::array<double, 6>, 3> applied_mounts{};
   // Diagnostics: counters at the previous loop tick, so a wipe line can show
   // which writer moved with it.
   struct WipeTrace {
@@ -639,15 +639,17 @@ DWORD run_impl() {
     const auto* rate_profile = profiles::find(applied_profile ? applied_profile : settings.profile);
     effective_rate =
         effective_camera_rate(settings.camera_rate, rate_profile ? rate_profile->pfd_refresh_hz : 0, parked, settings.parked_rate);
-    if (connected && (rate != effective_rate.rate || feeds != (settings.single_camera ? 1u : 2u))) {
+    const unsigned desired_feeds =
+        settings.single_camera ? 1u : (rate_profile && rate_profile->composition.split_bottom != 0 ? 3u : 2u);
+    if (connected && (rate != effective_rate.rate || feeds != desired_feeds)) {
       rate = effective_rate.rate;
-      feeds = settings.single_camera ? 1u : 2u;
+      feeds = desired_feeds;
       native_camera::request_scene_rate(rate, feeds);
       scene_runtime::manager().set_source_rate(rate);
     }
     if (connected && applied_mounts != settings.mounts) {
       native_camera::MountPair mounts;
-      for (unsigned i = 0; i < 2; ++i) {
+      for (unsigned i = 0; i < mounts.size(); ++i) {
         const auto& m = settings.mounts[i];
         mounts[i] = {{m[0], m[1], m[2]}, m[3], m[4], static_cast<float>(m[5])};
       }
@@ -770,7 +772,7 @@ DWORD run_impl() {
     }
     if (now >= next_recovery) {
       const bool eligible = (mask || test_scene) && !failed && !output.failed && scene.pair.state == engine_camera::State::active &&
-                            scene.requested_feeds == 2 && !scene.pose_waiting && !scene.view_waiting &&
+                            scene.requested_feeds >= 2 && !scene.pose_waiting && !scene.view_waiting &&
                             native_camera::sample_body_pose(now).valid;
       if (eligible && output.frames != last_frames)
         native_camera::note_scene_capture_progress(now);

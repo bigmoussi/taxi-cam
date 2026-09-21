@@ -8,17 +8,17 @@ namespace taxi_camera::native_camera {
 class RetainedProfileTransition {
  public:
   using Pair = engine_camera::Snapshot;
-  using Views = std::array<engine_camera::OwnedViewSnapshot, 2>;
-  using Dimensions = std::array<decltype(engine_camera::OwnedViewSnapshot::dimensions), 2>;
+  using Views = std::array<engine_camera::OwnedViewSnapshot, 3>;
+  using Dimensions = std::array<decltype(engine_camera::OwnedViewSnapshot::dimensions), 3>;
   struct AllocationEvidence {
     engine_camera::ManagerToken owner{};
-    std::array<engine_camera::EntryId, 2> ids{};
+    std::array<engine_camera::EntryId, 3> ids{};
     Dimensions dimensions{};
     bool matches(const Pair& pair) const noexcept { return owner == pair.owner && ids == pair.owned_ids; }
   };
   enum class Decision { wait, close, ready, refused };
   static bool session_changed(const Pair& pair, std::uint64_t started, std::uint64_t current) noexcept {
-    return (pair.owned_ids[0] || pair.owned_ids[1]) && started != current;
+    return (pair.owned_ids[0] || pair.owned_ids[1] || pair.owned_ids[2]) && started != current;
   }
   void begin(std::uint32_t id, const Pair& pair, const Dimensions& dimensions) noexcept {
     awaiting_pair_ = false;
@@ -29,7 +29,7 @@ class RetainedProfileTransition {
     state_ = Decision::wait;
     if (!id || pair.request_pending || pair.creation_pending)
       state_ = Decision::refused;
-    else if (!ids_[0] && !ids_[1])
+    else if (!ids_[0] && !ids_[1] && !ids_[2])
       state_ = Decision::ready;
     else if (!valid_pair(pair))
       state_ = Decision::refused;
@@ -61,7 +61,8 @@ class RetainedProfileTransition {
     if (!matches(pair) || manager != owner_)
       return state_ = Decision::refused;
     bool open = false;
-    for (unsigned i = 0; i < 2; ++i) {
+    const unsigned feeds = ids_[2] ? 3u : 2u;
+    for (unsigned i = 0; i < feeds; ++i) {
       const auto& view = views[i];
       if (!view.complete || !view.ready || view.status == engine_camera::OwnedViewStatus::pending)
         return state_ = Decision::wait;
@@ -71,9 +72,11 @@ class RetainedProfileTransition {
         return state_ = Decision::refused;
       open |= (view.flags[0] & 1u) == 0;
     }
-    if (views[0].view_address == views[1].view_address || views[0].view_index == views[1].view_index ||
-        views[0].resource_address == views[1].resource_address)
-      return state_ = Decision::refused;
+    for (unsigned i = 0; i < feeds; ++i)
+      for (unsigned j = i + 1; j < feeds; ++j)
+        if (views[i].view_address == views[j].view_address || views[i].view_index == views[j].view_index ||
+            views[i].resource_address == views[j].resource_address)
+          return state_ = Decision::refused;
     return state_ = open ? Decision::close : Decision::ready;
   }
   bool matches(const Pair& pair) const noexcept { return valid_pair(pair) && pair.owner == owner_ && pair.owned_ids == ids_; }
@@ -95,13 +98,17 @@ class RetainedProfileTransition {
 
  private:
   static bool valid_pair(const Pair& pair) noexcept {
-    return pair.state == engine_camera::State::active && pair.owner.valid() && pair.owned_ids[0] && pair.owned_ids[1] &&
-           pair.owned_ids[0] != pair.owned_ids[1] && !pair.request_pending && !pair.creation_pending &&
-           pair.failure == engine_camera::Failure::none && pair.blocked == engine_camera::Blocked::none;
+    if (pair.state != engine_camera::State::active || !pair.owner.valid() || !pair.owned_ids[0] || !pair.owned_ids[1] ||
+        pair.owned_ids[0] == pair.owned_ids[1] || pair.request_pending || pair.creation_pending ||
+        pair.failure != engine_camera::Failure::none || pair.blocked != engine_camera::Blocked::none)
+      return false;
+    if (pair.owned_ids[2] && (pair.owned_ids[2] == pair.owned_ids[0] || pair.owned_ids[2] == pair.owned_ids[1]))
+      return false;
+    return true;
   }
   std::uint32_t id_{};
   engine_camera::ManagerToken owner_{};
-  std::array<engine_camera::EntryId, 2> ids_{};
+  std::array<engine_camera::EntryId, 3> ids_{};
   Dimensions dimensions_{};
   bool awaiting_pair_ = false;
   Decision state_ = Decision::wait;

@@ -23,9 +23,10 @@ struct Device {
   QueuePatchSnapshot queue_snapshot;
   std::array<PfdStampD3D12, Formats.size() * DepthFormats.size()> stamps;
   std::array<bool, Formats.size() * DepthFormats.size()> stamp_ready{};
-  std::array<SceneCaptureManager::Frame, 2> pending;
-  std::array<SceneCopyMatch, 2> committed;
-  std::array<SceneCaptureManager::FrameOrder, 2> newest;
+  std::array<SceneCaptureManager::Frame, 3> pending;
+  std::array<SceneCopyMatch, 3> committed;
+  std::array<SceneCaptureManager::FrameOrder, 3> newest;
+  profiles::Composition composition{};
   Snapshot status;
   std::uint32_t patch_profile = 1;
 };
@@ -63,8 +64,12 @@ void discard(Device& item) {
   }
 }
 bool current_output(const Device& item) {
-  return item.status.session_active && item.status.output && scene_handoff().is_current(item.committed[0]) &&
-         scene_handoff().is_current(item.committed[1]);
+  if (!item.status.session_active || !item.status.output || !scene_handoff().is_current(item.committed[0]) ||
+      !scene_handoff().is_current(item.committed[1]))
+    return false;
+  if (item.composition.split_bottom != 0 && !scene_handoff().is_current(item.committed[2]))
+    return false;
+  return true;
 }
 
 D3D12_RECT native_rect(const profiles::DisplayRect& rect) {
@@ -363,8 +368,10 @@ bool copy_patch(ID3D12GraphicsCommandList* list,
 }
 void set_composition(std::uint64_t key, const profiles::Composition& layout) {
   const std::lock_guard lock(runtime().mutex);
-  if (auto* item = find(key))
+  if (auto* item = find(key)) {
+    item->composition = layout;
     item->output.set_composition(layout);
+  }
 }
 void set_reference_guides(std::uint64_t key, bool enabled) {
   const std::lock_guard lock(runtime().mutex);
@@ -444,7 +451,7 @@ void service() {
     auto& frame = incoming[i];
     auto* item = find(frame.device_key);
     if (!item || !item->status.session_active || frame.session_generation != item->status.session_generation || !item->status.initialized ||
-        item->status.failed || frame.match.feed >= 2 || !scene_handoff().is_current(frame.match)) {
+        item->status.failed || frame.match.feed >= item->pending.size() || !scene_handoff().is_current(frame.match)) {
       manager().discard_frame(frame.token);
       continue;
     }
@@ -510,15 +517,20 @@ void service() {
     }
     auto& first = item.pending[0];
     auto& second = item.pending[1];
-    if (!first.token || !second.token)
+    auto& third = item.pending[2];
+    const bool split = item.composition.split_bottom != 0;
+    if (!first.token || !second.token || (split && !third.token))
       continue;
-    if (first.match.scene_epoch != second.match.scene_epoch || first.match.manager != second.match.manager) {
+    if (first.match.scene_epoch != second.match.scene_epoch || first.match.manager != second.match.manager ||
+        (split && (third.match.scene_epoch != first.match.scene_epoch || third.match.manager != first.match.manager))) {
       discard(item);
       continue;
     }
+    ID3D12Resource* right = split ? third.resource : second.resource;
     if (!item.output.set_display_exposure(item.status.display_exposure_ev) ||
         !item.output.set_ground_speed(item.status.ground_speed_knots, item.status.ground_speed_valid) ||
-        !item.output.prepare(first.resource, scene_format(first.resource), second.resource, scene_format(second.resource))) {
+        !item.output.prepare(first.resource, scene_format(first.resource), second.resource, scene_format(second.resource), right,
+                             scene_format(right))) {
       item.status.failed = true;
       item.status.message = item.output.error();
       // A failed recording may already reference these resources. Retain leases.
@@ -546,9 +558,11 @@ void service() {
       item.status.message = "Camera composition submission failed; snapshot leases retained.";
       continue;
     }
-    item.committed = {first.match, second.match};
+    item.committed = {first.match, second.match, split ? third.match : SceneCopyMatch{}};
     manager().finish_consumption(first.token, submission.fence, submission.value);
     manager().finish_consumption(second.token, submission.fence, submission.value);
+    if (split)
+      manager().finish_consumption(third.token, submission.fence, submission.value);
     item.pending = {};
     item.status.output = true;
     ++item.status.frames;

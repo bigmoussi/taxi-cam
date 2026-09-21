@@ -100,11 +100,11 @@ class CameraCompositorD3D12 {
 
     D3D12_DESCRIPTOR_HEAP_DESC heap{};
     heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    heap.NumDescriptors = 2;
+    heap.NumDescriptors = 3;
     heap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     status = device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(srv_heap_.put()));
     if (FAILED(status))
-      return initialization_failed(status, "Creating the two-source SRV heap failed.");
+      return initialization_failed(status, "Creating the three-source SRV heap failed.");
     heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
     heap.NumDescriptors = 1;
     heap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
@@ -135,25 +135,29 @@ class CameraCompositorD3D12 {
     return S_OK;
   }
 
-  // Only single-layer, non-MSAA default-heap 2D textures are supported. Mip zero
-  // is sampled; other mips are not transitioned. Typed RGBA/BGRA UNORM, sRGB or
-  // RGBA16_FLOAT views must match a typed resource or its typeless family.
-  // R11G11B10_FLOAT requires an exact typed resource and view.
-  HRESULT set_inputs(ID3D12Resource* nose, DXGI_FORMAT nose_format, ID3D12Resource* tail, DXGI_FORMAT tail_format) noexcept {
+  // Nose, bottom-left (or full-width tail), and bottom-right. Non-split layouts
+  // may pass the same resource for both bottom inputs; split_bottom requires three
+  // distinct captures so each wing has its own mount.
+  HRESULT set_inputs(ID3D12Resource* nose, DXGI_FORMAT nose_format, ID3D12Resource* tail_left, DXGI_FORMAT left_format,
+                     ID3D12Resource* tail_right, DXGI_FORMAT right_format) noexcept {
     if (!output_.get())
       return fail(E_UNEXPECTED, "Initialize the compositor before binding inputs.");
-    if (!nose || !tail || same_object(nose, tail) || same_object(nose, output_.get()) || same_object(tail, output_.get()))
-      return fail(E_INVALIDARG, "Two distinct non-null inputs must not alias the compositor output.");
-    if (same_object(nose, inputs_[0].get()) && same_object(tail, inputs_[1].get()) && nose_format == formats_[0] &&
-        tail_format == formats_[1]) {
+    if (!nose || !tail_left || !tail_right || same_object(nose, tail_left) || same_object(nose, tail_right) ||
+        same_object(nose, output_.get()) || same_object(tail_left, output_.get()) || same_object(tail_right, output_.get()))
+      return fail(E_INVALIDARG, "Nose and bottom inputs must be non-null and must not alias the compositor output.");
+    if (composition_.split_bottom != 0 && same_object(tail_left, tail_right))
+      return fail(E_INVALIDARG, "Split-bottom layouts need distinct left and right bottom captures.");
+    if (same_object(nose, inputs_[0].get()) && same_object(tail_left, inputs_[1].get()) && same_object(tail_right, inputs_[2].get()) &&
+        nose_format == formats_[0] && left_format == formats_[1] && right_format == formats_[2]) {
       error_[0] = '\0';
       return S_FALSE;
     }
-    std::array<D3D12_RESOURCE_DESC, 2> descriptions{};
-    if (!validate_input(nose, nose_format, descriptions[0]) || !validate_input(tail, tail_format, descriptions[1]))
+    std::array<D3D12_RESOURCE_DESC, 3> descriptions{};
+    if (!validate_input(nose, nose_format, descriptions[0]) || !validate_input(tail_left, left_format, descriptions[1]) ||
+        !validate_input(tail_right, right_format, descriptions[2]))
       return fail(E_INVALIDARG, "An input has an unsupported device, texture description, heap or typed SRV format.");
-    const std::array<ID3D12Resource*, 2> resources{nose, tail};
-    const std::array<DXGI_FORMAT, 2> formats{nose_format, tail_format};
+    const std::array<ID3D12Resource*, 3> resources{nose, tail_left, tail_right};
+    const std::array<DXGI_FORMAT, 3> formats{nose_format, left_format, right_format};
     auto handle = srv_heap_->GetCPUDescriptorHandleForHeapStart();
     const UINT stride = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     for (std::size_t index = 0; index < resources.size(); ++index) {
@@ -168,21 +172,28 @@ class CameraCompositorD3D12 {
     }
     formats_ = formats;
     input_descriptions_ = descriptions;
-    statistics_.descriptor_writes += 2;
+    statistics_.descriptor_writes += 3;
     ++statistics_.input_changes;
     error_[0] = '\0';
     return S_OK;
   }
 
+  // Convenience for full-width two-feed profiles: both bottom SRVs sample the same tail.
+  HRESULT set_inputs(ID3D12Resource* nose, DXGI_FORMAT nose_format, ID3D12Resource* tail, DXGI_FORMAT tail_format) noexcept {
+    return set_inputs(nose, nose_format, tail, tail_format, tail, tail_format);
+  }
+
   // Supported exact before states: COMMON, RENDER_TARGET, UNORDERED_ACCESS,
   // COPY_DEST, or any nonempty combination of PIXEL_SHADER_RESOURCE,
   // NON_PIXEL_SHADER_RESOURCE and COPY_SOURCE. Other state sets are refused.
-  HRESULT record(ID3D12GraphicsCommandList* private_list, D3D12_RESOURCE_STATES nose_before, D3D12_RESOURCE_STATES tail_before) noexcept {
-    if (!output_.get() || !inputs_[0].get() || !inputs_[1].get() || !private_list ||
+  HRESULT record(ID3D12GraphicsCommandList* private_list, D3D12_RESOURCE_STATES nose_before, D3D12_RESOURCE_STATES left_before,
+                 D3D12_RESOURCE_STATES right_before) noexcept {
+    if (!output_.get() || !inputs_[0].get() || !inputs_[1].get() || !inputs_[2].get() || !private_list ||
         private_list->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT || !same_device(private_list) ||
-        !valid_state(nose_before, input_descriptions_[0]) || !valid_state(tail_before, input_descriptions_[1]))
+        !valid_state(nose_before, input_descriptions_[0]) || !valid_state(left_before, input_descriptions_[1]) ||
+        !valid_state(right_before, input_descriptions_[2]))
       return fail(E_INVALIDARG, "A private direct list, bound inputs and supported exact mip-zero states are required.");
-    const std::array<D3D12_RESOURCE_STATES, 2> states{nose_before, tail_before};
+    const std::array<D3D12_RESOURCE_STATES, 3> states{nose_before, left_before, right_before};
     for (std::size_t index = 0; index < inputs_.size(); ++index)
       transition(private_list, inputs_[index].get(), states[index], D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     transition(private_list, output_.get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -192,6 +203,8 @@ class CameraCompositorD3D12 {
     ID3D12DescriptorHeap* heaps[]{srv_heap_.get()};
     private_list->SetDescriptorHeaps(1, heaps);
     private_list->SetGraphicsRootDescriptorTable(0, srv_heap_->GetGPUDescriptorHandleForHeapStart());
+    UINT hdr = (formats_[0] == DXGI_FORMAT_R11G11B10_FLOAT ? 1u : 0u) | (formats_[1] == DXGI_FORMAT_R11G11B10_FLOAT ? 2u : 0u) |
+               (formats_[2] == DXGI_FORMAT_R11G11B10_FLOAT ? 4u : 0u);
     const struct {
       UINT hdr_mask;
       float exposure;
@@ -199,7 +212,7 @@ class CameraCompositorD3D12 {
       UINT ground_speed;
       UINT ground_speed_valid;
       profiles::Composition composition;
-    } display{(formats_[0] == DXGI_FORMAT_R11G11B10_FLOAT ? 1u : 0u) | (formats_[1] == DXGI_FORMAT_R11G11B10_FLOAT ? 2u : 0u),
+    } display{hdr,
               std::exp2(exposure_ev_),
               reference_guides_ ? 1u : 0u,
               ground_speed_,
@@ -221,6 +234,10 @@ class CameraCompositorD3D12 {
     ++statistics_.recordings;
     error_[0] = '\0';
     return S_OK;
+  }
+
+  HRESULT record(ID3D12GraphicsCommandList* private_list, D3D12_RESOURCE_STATES nose_before, D3D12_RESOURCE_STATES tail_before) noexcept {
+    return record(private_list, nose_before, tail_before, tail_before);
   }
 
   // Call only after checked GPU completion, including downstream output copies.
@@ -399,7 +416,7 @@ class CameraCompositorD3D12 {
   HRESULT initialize_pipeline() noexcept {
     D3D12_DESCRIPTOR_RANGE range{};
     range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    range.NumDescriptors = 2;
+    range.NumDescriptors = 3;
     range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
     std::array<D3D12_ROOT_PARAMETER, 2> parameters{};
     parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
@@ -467,7 +484,8 @@ class CameraCompositorD3D12 {
 
   static constexpr char Shader[] = R"(
 Texture2D<float4> Nose : register(t0);
-Texture2D<float4> Tail : register(t1);
+Texture2D<float4> TailLeft : register(t1);
+Texture2D<float4> TailRight : register(t2);
 SamplerState LinearClamp : register(s0);
 cbuffer Display : register(b0) { uint HdrMask; float Exposure; uint ReferenceGuides; uint GroundSpeed; uint GroundSpeedValid;
  float NoseHeight; float TailTop; float DividerTop; float DividerBottom;
@@ -620,14 +638,16 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
     return float4(display_rgb(Nose.SampleLevel(LinearClamp, uv, 0).rgb, 0), 1);
   }
   if (position.y < TailTop) return float4(0, 0, 0, 1);
-  float u = position.x / 768;
   if (SplitBottom != 0) {
     float pane = (768 - BottomGap) * 0.5;
     float local_x = position.x < pane ? position.x : position.x - pane - BottomGap;
-    u = (local_x / pane) * 0.5 + (position.x < pane ? 0.0 : 0.5);
+    float2 uv = float2(local_x / pane, (position.y - TailTop) / (763 - TailTop));
+    if (position.x < pane)
+      return float4(display_rgb(TailLeft.SampleLevel(LinearClamp, uv, 0).rgb, 1), 1);
+    return float4(display_rgb(TailRight.SampleLevel(LinearClamp, uv, 0).rgb, 2), 1);
   }
-  float2 uv = float2(u, (position.y - TailTop) / (763 - TailTop));
-  return float4(display_rgb(Tail.SampleLevel(LinearClamp, uv, 0).rgb, 1), 1);
+  float2 uv = float2(position.x / 768, (position.y - TailTop) / (763 - TailTop));
+  return float4(display_rgb(TailLeft.SampleLevel(LinearClamp, uv, 0).rgb, 1), 1);
 }
 )";
 
@@ -637,9 +657,9 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
   Reference<ID3D12DescriptorHeap> srv_heap_;
   Reference<ID3D12DescriptorHeap> rtv_heap_;
   Reference<ID3D12Resource> output_;
-  std::array<Reference<ID3D12Resource>, 2> inputs_;
-  std::array<DXGI_FORMAT, 2> formats_{};
-  std::array<D3D12_RESOURCE_DESC, 2> input_descriptions_{};
+  std::array<Reference<ID3D12Resource>, 3> inputs_;
+  std::array<DXGI_FORMAT, 3> formats_{};
+  std::array<D3D12_RESOURCE_DESC, 3> input_descriptions_{};
   D3D12_CPU_DESCRIPTOR_HANDLE rtv_{};
   Statistics statistics_;
   float exposure_ev_ = DefaultExposureEv;

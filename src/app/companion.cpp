@@ -319,7 +319,7 @@ bool read_fields(win::Settings& settings, const wchar_t** error = nullptr) {
     settings.calibration_budget = static_cast<UINT>(budget);
   settings.exposure = static_cast<float>(number(201, settings.exposure, ok));
   settings.night_boost = static_cast<float>(number(202, settings.night_boost, ok));
-  for (unsigned i = 0; i < 2; ++i)
+  for (unsigned i = 0; i < 3; ++i)
     for (unsigned j = 0; j < 6; ++j)
       settings.mounts[i][j] = number(300 + static_cast<int>(i * 10 + j), settings.mounts[i][j], ok);
   std::array<float, 2>* guides[]{&settings.nose_dot, &settings.tail_upper, &settings.tail_corner, &settings.tail_inner};
@@ -718,16 +718,19 @@ void build_controls() {
     button(L"Keyboard shortcuts…", 645, 580, 412, 205);
     edit(s.camera_rate, 200, 855, 528, 100);
   } else if (page == 1) {
-    for (int i = 0; i < 2; ++i) {
-      const int x = 260 + i * 375;
+    const auto* profile = profiles::find(s.profile);
+    const int feed_count = profile && profile->composition.split_bottom != 0 ? 3 : 2;
+    for (int i = 0; i < feed_count; ++i) {
+      const int x = feed_count == 3 ? (244 + i * 252) : (260 + i * 375);
       for (int j = 0; j < 6; ++j)
-        edit(s.mounts[i][j], 300 + i * 10 + j, x + (j % 3) * 106, 245 + (j / 3) * 108, 88);
-      button(L"Lower 0.25 m", 330 + i * 10, x, 439, 146);
-      button(L"Raise 0.25 m", 331 + i * 10, x + 160, 439, 146);
-      button(L"Aft 1 m", 332 + i * 10, x, 488, 146);
-      button(L"Forward 1 m", 333 + i * 10, x + 160, 488, 146);
+        edit(s.mounts[i][j], 300 + i * 10 + j, x + (j % 3) * (feed_count == 3 ? 72 : 106), 245 + (j / 3) * 108,
+             feed_count == 3 ? 64 : 88);
+      button(L"Lower 0.25 m", 330 + i * 10, x, 439, feed_count == 3 ? 110 : 146);
+      button(L"Raise 0.25 m", 331 + i * 10, x + (feed_count == 3 ? 120 : 160), 439, feed_count == 3 ? 110 : 146);
+      button(L"Aft 1 m", 332 + i * 10, x, 488, feed_count == 3 ? 110 : 146);
+      button(L"Forward 1 m", 333 + i * 10, x + (feed_count == 3 ? 120 : 160), 488, feed_count == 3 ? 110 : 146);
     }
-    button(L"Reset camera mounts", 350, 260, 594, 240);
+    button(L"Reset camera mounts", 359, 260, 594, 240);
   } else if (page == 2) {
     edit(s.exposure, 201, 840, 210, 120);
     toggle(L"Auto exposure", 222, s.automatic_exposure, 785, 318, 190);
@@ -930,18 +933,23 @@ void draw_page(HDC dc) {
     text(dc, L"Cameras and TAXI buttons turn off above 60 knots.", 250, 630, 730, 24, small, Muted);
   } else if (page == 1) {
     constexpr const wchar_t* labels[]{L"Right (m)", L"Up (m)", L"Forward (m)", L"Pitch (deg)", L"Yaw (deg)", L"Lens (rad)"};
-    for (int i = 0; i < 2; ++i) {
-      const int x = 244 + i * 375;
-      panel(dc, x, 138, 354, 424);
-      text(dc, i ? L"Tail camera" : L"Nose-wheel camera", x + 16, 154, 324, 30, heading);
-      const auto* profile = profiles::find(draft().profile);
+    const auto* profile = profiles::find(draft().profile);
+    const bool split = profile && profile->composition.split_bottom != 0;
+    const int feed_count = split ? 3 : 2;
+    const wchar_t* titles[]{L"Nose-wheel camera", split ? L"Left wing camera" : L"Tail camera", L"Right wing camera"};
+    const wchar_t* views[]{L"UPPER VIEW", split ? L"LOWER LEFT" : L"LOWER VIEW", L"LOWER RIGHT"};
+    for (int i = 0; i < feed_count; ++i) {
+      const int x = split ? (244 + i * 252) : (244 + i * 375);
+      const int width = split ? 240 : 354;
+      panel(dc, x, 138, width, 424);
+      text(dc, titles[i], x + 12, 154, width - 24, 30, heading);
       const auto& dimensions = (profile ? *profile : profiles::A380).camera_panes[i];
       wchar_t view_label[96];
-      std::swprintf(view_label, 96, L"%ls · %d × %d", i ? L"LOWER VIEW" : L"UPPER VIEW", dimensions[0], dimensions[1]);
-      text(dc, view_label, x + 16, 190, 324, 22, small, Muted);
+      std::swprintf(view_label, 96, L"%ls · %d × %d", views[i], dimensions[0], dimensions[1]);
+      text(dc, view_label, x + 12, 190, width - 24, 22, small, Muted);
       for (int j = 0; j < 6; ++j)
-        text(dc, labels[j], x + 16 + (j % 3) * 106, 215 + (j / 3) * 108, 98, 24, small, Muted);
-      text(dc, L"Position relative to the aircraft datum", x + 16, 397, 324, 22, small, Muted);
+        text(dc, labels[j], x + 12 + (j % 3) * (split ? 72 : 106), 215 + (j / 3) * 108, split ? 68 : 98, 24, small, Muted);
+      text(dc, L"Position relative to the aircraft datum", x + 12, 397, width - 24, 22, small, Muted);
     }
     text(dc, L"Positive pitch looks up. Positive yaw looks right.", 530, 594, 462, 45, small, Muted, DT_LEFT | DT_WORDBREAK);
   } else if (page == 2) {
@@ -1762,11 +1770,11 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         build_controls();
         return 0;
       }
-      if ((id >= 330 && id <= 333) || (id >= 340 && id <= 343)) {
+      if ((id >= 330 && id <= 333) || (id >= 340 && id <= 343) || (id >= 350 && id <= 353)) {
         if (!apply(false))
           return 0;
         auto s = draft();
-        const unsigned side = id >= 340 ? 1u : 0u;
+        const unsigned side = static_cast<unsigned>((id - 330) / 10);
         const int action = (id - 330) % 10;
         if (action == 0)
           s.mounts[side][1] -= 0.25;
@@ -1783,7 +1791,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         }
         return 0;
       }
-      if (id == 350) {
+      if (id == 359) {
         auto s = draft();
         s.mounts = profiles::find(s.profile)->mounts;
         publish(s);

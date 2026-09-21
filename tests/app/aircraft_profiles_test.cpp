@@ -378,14 +378,16 @@ int main() {
                content.bottom == outer.bottom);
         assert(outer.right - outer.left == 958 && outer.bottom - outer.top == 971);
       }
-      assert(profile->camera_panes[0][0] == 736 && profile->camera_panes[0][1] == 409);
+      assert(profile->camera_panes[0][0] == 736 && profile->camera_panes[0][1] == 292);
       assert(profile->camera_panes[1][0] == 736 && profile->camera_panes[1][1] == 307);
+      assert(profile->camera_panes[2][0] == 736 && profile->camera_panes[2][1] == 307);
       assert(profile->composition.split_bottom == 1.f && profile->composition.bottom_gap == 48.f);
-      assert(profile->composition.nose_height == 427.f && profile->composition.tail_top == 443.f);
-      assert(profile->composition.divider_top == 427.f && profile->composition.divider_bottom == 443.f);
+      assert(profile->composition.nose_height == 305.f && profile->composition.tail_top == 321.f);
+      assert(profile->composition.divider_top == 305.f && profile->composition.divider_bottom == 321.f);
       assert(profile->camera_padding.left == 0 && profile->camera_padding.top == 0 && profile->camera_padding.right == 0 &&
              profile->camera_padding.bottom == 0);
-      assert(profile->mounts[0][4] == 0 && profile->mounts[1][4] == 180);
+      assert(profile->mounts[0][4] == 0 && profile->mounts[1][4] == -100 && profile->mounts[2][4] == 100);
+      assert(profile->mounts[1][0] == -5 && profile->mounts[2][0] == 5);
       assert(profile->formats[0] == 0);
       assert(profiles::matches_display(*profile, profile->width, profile->height, 1, 28));
       assert(profiles::matches_display(*profile, profile->width, profile->height, 12, 87));
@@ -398,7 +400,7 @@ int main() {
       assert(std::strcmp(profile->pfd_labels[0], "DU_LeftInboard") == 0);
       assert(std::strcmp(profile->pfd_labels[1], "DU_RightInboard") == 0);
       assert(!profile->reference_guides);
-      for (unsigned side = 0; side < 2; ++side) {
+      for (unsigned side = 0; side < 3; ++side) {
         native_camera::ViewDimensions desired, original{{{3413, 913}, {3413, 913}, {3413, 913}}};
         assert(native_camera::plan_view_resize(original, side, desired, profile->camera_panes));
         assert(desired[0] == profile->camera_panes[side] && desired[1] == desired[0] && desired[2] == desired[0]);
@@ -462,8 +464,8 @@ int main() {
 
   for (const auto* profile : profiles::Catalog) {
     if (profile->pfd_detection == profiles::PfdDetectionPolicy::single_display) {
-      assert(profile->composition.divider_top == 427 && profile->composition.divider_bottom == 443);
-      assert(profile->composition.nose_height == 427 && profile->composition.tail_top == 443);
+      assert(profile->composition.divider_top == 305 && profile->composition.divider_bottom == 321);
+      assert(profile->composition.nose_height == 305 && profile->composition.tail_top == 321);
       continue;
     }
     assert(profile->composition.divider_top == 251 && profile->composition.divider_bottom == 263);

@@ -260,7 +260,7 @@ void retained_dimension_restore() {
   // size, but each owned Bitmap retains its original A350 pane allocation.
   for (unsigned feed = 0; feed < 2; ++feed) {
     Fixture f(0, feed);
-    const taxi_camera::profiles::CameraPanes panes{{{774, 251}, {774, 496}}};
+    const taxi_camera::profiles::CameraPanes panes{{{774, 251}, {774, 496}, {774, 496}}};
     f.desired.fill(panes[feed]);
     f.view.mode = 2;
     f.view.resource_present = true;

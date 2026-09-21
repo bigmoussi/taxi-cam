@@ -9,7 +9,9 @@ struct DisplayRect {
 struct DisplayInsets {
   unsigned left, top, right, bottom;
 };
-using CameraPanes = std::array<std::array<std::int32_t, 2>, 2>;
+// Index 0 nose, 1 tail / bottom-left, 2 bottom-right (split_bottom profiles).
+// Non-split profiles leave [2] equal to [1]; only the first two feeds are used.
+using CameraPanes = std::array<std::array<std::int32_t, 2>, 3>;
 struct Composition {
   float nose_height = 255, tail_top = 259, divider_top = 251, divider_bottom = 263;
   std::array<float, 2> nose_dot{0.14f, 0.48f};
@@ -21,8 +23,8 @@ struct Composition {
   std::array<float, 2> speed_panel_min_size{0, 0};
   // Float 0/1 is passed directly in the compositor's GPU constants.
   float square_nose_markers = 1;
-  // 0 keeps the full-width tail. 1 draws that same tail image as left and right
-  // panes with bottom_gap working-image pixels of black between them.
+  // 0 keeps the full-width second feed. 1 places distinct left and right bottom
+  // feeds with bottom_gap working-image pixels of black between them.
   float split_bottom = 0;
   float bottom_gap = 0;
 };
@@ -52,12 +54,13 @@ struct AircraftProfile {
   std::array<const char*, 2> taxi_events;
   std::array<const char*, 2> pfd_labels;
   // right/up/forward metres, pitch/yaw degrees, lens radians.
-  std::array<std::array<double, 6>, 2> mounts;
+  // [0] nose, [1] tail or bottom-left, [2] bottom-right when split_bottom != 0.
+  std::array<std::array<double, 6>, 3> mounts;
   unsigned width, height, mips;
   TaxiControl taxi_control = TaxiControl::push_event;
   std::array<std::string_view, 3> aircraft_types{"A388"};
   std::array<DisplayRect, 2> display_regions{{{0, 0, 768, 763}, {0, 0, 768, 763}}};
-  CameraPanes camera_panes{{{736, 251}, {736, 496}}};
+  CameraPanes camera_panes{{{736, 251}, {736, 496}, {736, 496}}};
   bool higher_id_left = true;
   double speed_cutoff_knots = 60;
   Composition composition{};
@@ -82,7 +85,9 @@ inline constexpr AircraftProfile A380{1,
                                       {"L:A32NX_FCU_EFIS_L_TAXI_LIGHT_ON", "L:A32NX_FCU_EFIS_R_TAXI_LIGHT_ON"},
                                       {"A32NX.FCU_EFIS_L_TAXI_PUSH", "A32NX.FCU_EFIS_R_TAXI_PUSH"},
                                       {"SCREEN_DU_PFDL", "SCREEN_DU_PFDR"},
-                                      {{{0, -1.75, 26.950668984, -17.5, 0, 1.24}, {0, 18, -25, -32, 0, 1.02}}},
+                                      {{{0, -1.75, 26.950668984, -17.5, 0, 1.24},
+                                        {0, 18, -25, -32, 0, 1.02},
+                                        {0, 18, -25, -32, 0, 1.02}}},
                                       768,
                                       1024,
                                       5};
@@ -103,14 +108,14 @@ inline constexpr AircraftProfile A359 = [] {
                     {"L:INI_TAXI_LEFT", "L:INI_TAXI_RIGHT"},
                     {"", ""},
                     {"$EFIS_LEFT", "$EFIS_RIGHT"},
-                    {{{0, -2, 16, -15, 0, 0.55}, {0, 10, -33.0, -15, 0, 0.62}}},
+                    {{{0, -2, 16, -15, 0, 0.55}, {0, 10, -33.0, -15, 0, 0.62}, {0, 10, -33.0, -15, 0, 0.62}}},
                     1644,
                     1024,
                     0,
                     TaxiControl::lvar_off,
                     {"A359", "A359 ULR"},
                     {{{0, 0, 806, 763}, {838, 0, 1644, 763}}},
-                    {{{774, 251}, {774, 496}}},
+                    {{{774, 251}, {774, 496}, {774, 496}}},
                     true,
                     60,
                     A350Etacs,
@@ -126,14 +131,14 @@ inline constexpr AircraftProfile A35K = [] {
                     {"L:INI_TAXI_LEFT", "L:INI_TAXI_RIGHT"},
                     {"", ""},
                     {"$EFIS_LEFT", "$EFIS_RIGHT"},
-                    {{{0, -2, 19.81, -15, 0, 0.55}, {0, 10, -36.17, -15, 0, 0.62}}},
+                    {{{0, -2, 19.81, -15, 0, 0.55}, {0, 10, -36.17, -15, 0, 0.62}, {0, 10, -36.17, -15, 0, 0.62}}},
                     1644,
                     1024,
                     0,
                     TaxiControl::lvar_off,
                     {"A35K"},
                     {{{0, 0, 806, 763}, {838, 0, 1644, 763}}},
-                    {{{774, 251}, {774, 496}}},
+                    {{{774, 251}, {774, 496}, {774, 496}}},
                     true,
                     60,
                     A350EtacsA35K,
@@ -157,7 +162,7 @@ inline constexpr AircraftProfile IniA380 = [] {
   p.taxi_control = TaxiControl::manual_only;
   p.aircraft_types = {"Airbus", "A388"};
   p.package_markers = {"simobjects/airplanes/inibuilds-a380", "fs24-inibuilds-aircraft-a380"};
-  p.mounts = {{{0, 2.2, 16, -17.5, 0, 1}, {0, 18, -34, -32, 0, 1}}};
+  p.mounts = {{{0, 2.2, 16, -17.5, 0, 1}, {0, 18, -34, -32, 0, 1}, {0, 18, -34, -32, 0, 1}}};
   p.composition.tail_upper = {0.34f, 0.52f};
   p.composition.tail_corner = {0.305f, 0.65f};
   p.composition.tail_inner = {0.355f, 0.65f};
@@ -194,14 +199,14 @@ inline constexpr std::array<unsigned, 6> Pmdg777Formats{};
 // cockpit. AircraftLoaded selects the airplane folder. ATC TYPE is the Boeing
 // brand string and is not required.
 // Both navigation displays are rectangles on one destination texture. Taxi Cam
-// still owns the nose and aft viewpoints and splits the aft image across the
-// bottom panes. Pixels outside the two inboard gauges stay untouched.
+// owns three viewpoints: nose on top, and independent left/right wing cameras
+// on the split bottom. Pixels outside the two inboard gauges stay untouched.
 // Working-image layout matched to the reference ND photo on a nearly square
-// 958x971 gauge: tall full-width top (~56%), short split bottom (~42%), with a
-// thicker T divider and gap. Camera panes keep those pane aspects so feeds are
-// not stretched. Padding is zero so the page fills the gauge.
-inline constexpr unsigned Pmdg777NoseHeight = 427;
-inline constexpr unsigned Pmdg777DividerBottom = 443;
+// 958x971 gauge: shorter full-width top (~40%), taller split bottom (~60%), with
+// a T divider and gap. Camera panes keep modest bottom capture sizes. Padding
+// is zero so the page fills the gauge.
+inline constexpr unsigned Pmdg777NoseHeight = 305;
+inline constexpr unsigned Pmdg777DividerBottom = 321;
 inline constexpr unsigned Pmdg777BottomGap = 48;
 inline constexpr Composition Pmdg777Composition = [] {
   Composition c;
@@ -213,11 +218,13 @@ inline constexpr Composition Pmdg777Composition = [] {
   c.bottom_gap = static_cast<float>(Pmdg777BottomGap);
   return c;
 }();
-// Nose: forward/down over the nose gear and tarmac. Bottom: above the forward
-// fuselage looking aft (yaw 180) so the left/right halves are the wing/engines.
-inline constexpr std::array<std::array<double, 6>, 2> Pmdg777Mounts{{{0, -1.5, 16, -22, 0, 1.1}, {0, 7, 8, -20, 180, 1.15}}};
-// Pane aspects match the working-image regions (768x427 and 768x320).
-inline constexpr CameraPanes Pmdg777Panes{{{736, 409}, {736, 307}}};
+// Nose: forward/down over the nose gear. Bottom-left/right: outside each side of
+// the fuselage looking at that wing (own Right offset and yaw; not a mirrored
+// single tail capture).
+inline constexpr std::array<std::array<double, 6>, 3> Pmdg777Mounts{
+    {{0, -1.5, 18, -15, 0, 1.0}, {-5, 2, -6, -8, -100, 1.2}, {5, 2, -6, -8, 100, 1.2}}};
+// Top pane aspect matches the shorter nose band; bottom captures stay modest.
+inline constexpr CameraPanes Pmdg777Panes{{{736, 292}, {736, 307}, {736, 307}}};
 inline constexpr AircraftProfile Pmdg777 = [] {
   AircraftProfile p{5,
                     "pmdg-777",

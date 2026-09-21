@@ -30,8 +30,37 @@ bool plan_view_resize(const ViewDimensions& inherited,
 class ViewResizeWarmup {
  public:
   static constexpr unsigned MaximumOutputWaits = 12;
-  bool begin(const std::array<std::uint64_t, 2>& ids, std::uint64_t iteration) noexcept {
-    if (!ids[0] || !ids[1] || ids[0] == ids[1] || !iteration)
+  using Ids = std::array<std::uint64_t, 3>;
+  static unsigned feed_count(const Ids& ids) noexcept {
+    unsigned n = 0;
+    for (auto id : ids)
+      if (id)
+        ++n;
+    return n;
+  }
+  static bool distinct_nonzero(const Ids& ids) noexcept {
+    const unsigned n = feed_count(ids);
+    if (n < 2)
+      return false;
+    for (unsigned i = 0; i < ids.size(); ++i) {
+      if (!ids[i])
+        continue;
+      for (unsigned j = i + 1; j < ids.size(); ++j)
+        if (ids[j] && ids[j] == ids[i])
+          return false;
+    }
+    // Trailing zeros only: once a zero appears, later slots must stay zero.
+    bool seen_zero = false;
+    for (auto id : ids) {
+      if (!id)
+        seen_zero = true;
+      else if (seen_zero)
+        return false;
+    }
+    return true;
+  }
+  bool begin(const Ids& ids, std::uint64_t iteration) noexcept {
+    if (!distinct_nonzero(ids) || !iteration)
       return false;
     ids_ = ids;
     iteration_ = iteration;
@@ -39,10 +68,10 @@ class ViewResizeWarmup {
     output_waits_ = 0;
     return true;
   }
-  bool may_resize(const std::array<std::uint64_t, 2>& ids, std::uint64_t iteration) const noexcept {
+  bool may_resize(const Ids& ids, std::uint64_t iteration) const noexcept {
     return pending_ && ids == ids_ && iteration > iteration_;
   }
-  bool finish(const std::array<std::uint64_t, 2>& ids, std::uint64_t iteration) noexcept {
+  bool finish(const Ids& ids, std::uint64_t iteration) noexcept {
     if (!may_resize(ids, iteration))
       return false;
     pending_ = false;
@@ -52,7 +81,7 @@ class ViewResizeWarmup {
   // Dimensions were applied but the output chain is not yet observed. Returns
   // false once the bounded wait is exhausted; the warmup then stays pending
   // only for the caller's failure handling, never for another gate decision.
-  bool await_output(const std::array<std::uint64_t, 2>& ids, std::uint64_t iteration) noexcept {
+  bool await_output(const Ids& ids, std::uint64_t iteration) noexcept {
     if (!may_resize(ids, iteration))
       return false;
     return ++output_waits_ <= MaximumOutputWaits;
@@ -62,7 +91,7 @@ class ViewResizeWarmup {
   void clear() noexcept { *this = {}; }
 
  private:
-  std::array<std::uint64_t, 2> ids_{};
+  Ids ids_{};
   std::uint64_t iteration_ = 0;
   unsigned output_waits_ = 0;
   bool pending_ = false;

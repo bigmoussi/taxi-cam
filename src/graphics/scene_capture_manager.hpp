@@ -541,7 +541,7 @@ class SceneCaptureManager {
   bool capture_enabled_ = true;
   bool gpu_timing_enabled_ = false;
   std::uint32_t source_rate_ = kDefaultCameraRate;
-  std::array<std::uint64_t, 2> last_tail_us_{};
+  std::array<std::uint64_t, 3> last_tail_us_{};
   Transaction transaction_;
   std::uint64_t next_token_ = 0, next_receipt_ = 0;
   Statistics stats_;

@@ -31,7 +31,7 @@ struct SceneCaptureTicket {
 
 struct SceneCopyMatch {
   bool matched = false;
-  std::uint32_t feed = 0;  // Entry order:0 nose,1 tail; no inference from pixels.
+  std::uint32_t feed = 0;  // Entry order:0 nose,1 left/tail,2 right; no inference from pixels.
   std::uint64_t scene_epoch = 0;
   std::uint64_t capture_sequence = 0;
   SceneManagerIdentity manager;
@@ -96,8 +96,8 @@ class SceneHandoff {
   SceneCaptureTicket begin_capture();
   bool publish(SceneCaptureTicket ticket,
                SceneManagerIdentity manager,
-               const std::array<std::uint64_t, 2>& entry_ids,
-               const std::array<std::uint64_t, 2>& resource_handles);
+               const std::array<std::uint64_t, 3>& entry_ids,
+               const std::array<std::uint64_t, 3>& resource_handles);
   SceneCopyObservation observe_copy(std::uint64_t device_key, std::uint64_t source_handle, std::uint64_t destination_handle) const;
   // Atomic rejection-only hint for high-frequency native RT boundaries. True
   // is never ownership proof: callers must still perform authoritative matching.
@@ -110,7 +110,7 @@ class SceneHandoff {
   struct Diagnostics {
     bool published = false;
     std::uint64_t publications = 0, unrelated_events = 0, target_invalidations = 0, ticket_invalidations = 0;
-    std::array<std::uint64_t, 2> resource_ids{};  // Registry IDs only; no pointer or capture authority.
+    std::array<std::uint64_t, 3> resource_ids{};  // Registry IDs only; no pointer or capture authority.
   };
   Diagnostics diagnostics() const;
   bool is_current(const SceneCopyMatch& match) const;
@@ -131,9 +131,9 @@ class SceneHandoff {
     std::uint64_t sequence = 0;
     std::uint64_t device_key = 0;
     SceneManagerIdentity manager;
-    std::array<std::uint64_t, 2> entry_ids{};
-    std::array<std::uint64_t, 2> handles{};
-    std::array<SceneResourceIdentity, 2> resources{};
+    std::array<std::uint64_t, 3> entry_ids{};
+    std::array<std::uint64_t, 3> handles{};
+    std::array<SceneResourceIdentity, 3> resources{};
   };
   bool advance(std::uint64_t& counter);
   bool lifecycle_event(std::uint64_t changed_handle = 0);
@@ -152,12 +152,12 @@ class SceneHandoff {
   bool active_ = false;
   bool owner_bound_ = false;
   SceneManagerIdentity owner_;
-  std::array<std::uint64_t, 2> owned_ids_{};
+  std::array<std::uint64_t, 3> owned_ids_{};
   Publication publication_;
   // Rejection-only hint for unrelated high-frequency copy callbacks. Every
   // possible match still takes the mutex and verifies the full publication.
-  std::array<std::atomic<std::uint64_t>, 2> candidate_handles_{};
-  std::array<std::atomic<std::uint64_t>, 2> observed_handles_{};
+  std::array<std::atomic<std::uint64_t>, 3> candidate_handles_{};
+  std::array<std::atomic<std::uint64_t>, 3> observed_handles_{};
   Diagnostics diagnostics_;
 };
 

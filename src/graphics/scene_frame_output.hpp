@@ -59,7 +59,11 @@ class SceneFrameOutput {
   // before every recorded copy. No allocation or CPU image access here.
   Patch patch(DXGI_FORMAT format, UINT width, UINT height, const D3D12_RECT& content) const noexcept;
   float display_exposure() const noexcept;
-  bool prepare(ID3D12Resource* nose, DXGI_FORMAT nose_format, ID3D12Resource* tail, DXGI_FORMAT tail_format) noexcept;
+  bool prepare(ID3D12Resource* nose, DXGI_FORMAT nose_format, ID3D12Resource* left, DXGI_FORMAT left_format,
+               ID3D12Resource* right, DXGI_FORMAT right_format) noexcept;
+  bool prepare(ID3D12Resource* nose, DXGI_FORMAT nose_format, ID3D12Resource* tail, DXGI_FORMAT tail_format) noexcept {
+    return prepare(nose, nose_format, tail, tail_format, tail, tail_format);
+  }
   // Separate retained output instance: no camera inputs or compositor shaders.
   // Uses the same private submission lifetime and manager timeline contract.
   bool prepare_calibration(std::uint64_t frame) noexcept;
