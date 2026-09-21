@@ -1770,9 +1770,11 @@ void observer(void* manager) noexcept {
           if (record_blocked) {
             ++runtime.rt_record_refusals;
             ++runtime.rt_record_holds;
-          } else if (desired[0] || desired[1])
+          } else if (desired[0] || desired[1] || desired[2])
             runtime.rt_record_refusals = 0;
-          const bool needs_pose = desired[0] || desired[1];
+          // Every scheduled feed needs the shared aircraft body pose. Omitting the
+          // third slot left the right-wing camera at a stale world transform.
+          const bool needs_pose = desired[0] || desired[1] || desired[2];
           const bool pose_ready = !needs_pose || timed(runtime, ProbeStage::pose, [&] { return capture_pose(runtime); });
           bool aa_ready = true;
           if (pose_ready && needs_pose) {

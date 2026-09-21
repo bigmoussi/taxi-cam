@@ -359,6 +359,7 @@ int main() {
     s.mounts = profile->mounts;
     assert(valid_settings(s));
     assert((profile->id == profiles::Pmdg777.id) != profile->reference_guides);
+    assert((profile->id == profiles::Pmdg777.id) != profile->ground_speed);
     assert((profile->id == profiles::Pmdg777.id) == (profile->display_texture[0] != '\0'));
     if (profile->pfd_detection == profiles::PfdDetectionPolicy::single_display) {
       const auto left = profiles::display_rect(*profile, 0);
@@ -374,18 +375,19 @@ int main() {
       for (unsigned side = 0; side < 2; ++side) {
         const auto outer = profiles::display_rect(*profile, side);
         const auto content = profiles::display_content_rect(*profile, side);
-        assert(content.left == outer.left && content.top == outer.top && content.right == outer.right &&
-               content.bottom == outer.bottom);
+        assert(content.left == outer.left && content.right == outer.right);
+        assert(content.top == outer.top + 40 && content.bottom + 40 == outer.bottom);
         assert(outer.right - outer.left == 958 && outer.bottom - outer.top == 971);
+        assert(content.bottom - content.top == 891);
       }
-      assert(profile->camera_panes[0][0] == 736 && profile->camera_panes[0][1] == 292);
-      assert(profile->camera_panes[1][0] == 736 && profile->camera_panes[1][1] == 307);
-      assert(profile->camera_panes[2][0] == 736 && profile->camera_panes[2][1] == 307);
+      assert(profile->camera_panes[0][0] == 736 && profile->camera_panes[0][1] == 268);
+      assert(profile->camera_panes[1][0] == 360 && profile->camera_panes[1][1] == 445);
+      assert(profile->camera_panes[2][0] == 360 && profile->camera_panes[2][1] == 445);
       assert(profile->composition.split_bottom == 1.f && profile->composition.bottom_gap == 48.f);
-      assert(profile->composition.nose_height == 305.f && profile->composition.tail_top == 321.f);
-      assert(profile->composition.divider_top == 305.f && profile->composition.divider_bottom == 321.f);
-      assert(profile->camera_padding.left == 0 && profile->camera_padding.top == 0 && profile->camera_padding.right == 0 &&
-             profile->camera_padding.bottom == 0);
+      assert(profile->composition.nose_height == 280.f && profile->composition.tail_top == 318.f);
+      assert(profile->composition.divider_top == 280.f && profile->composition.divider_bottom == 318.f);
+      assert(profile->camera_padding.left == 0 && profile->camera_padding.top == 40 && profile->camera_padding.right == 0 &&
+             profile->camera_padding.bottom == 40);
       assert(profile->mounts[0][4] == 0 && profile->mounts[1][4] == -100 && profile->mounts[2][4] == 100);
       assert(profile->mounts[1][0] == -5 && profile->mounts[2][0] == 5);
       assert(profile->formats[0] == 0);
@@ -400,6 +402,7 @@ int main() {
       assert(std::strcmp(profile->pfd_labels[0], "DU_LeftInboard") == 0);
       assert(std::strcmp(profile->pfd_labels[1], "DU_RightInboard") == 0);
       assert(!profile->reference_guides);
+      assert(!profile->ground_speed);
       for (unsigned side = 0; side < 3; ++side) {
         native_camera::ViewDimensions desired, original{{{3413, 913}, {3413, 913}, {3413, 913}}};
         assert(native_camera::plan_view_resize(original, side, desired, profile->camera_panes));
@@ -464,8 +467,8 @@ int main() {
 
   for (const auto* profile : profiles::Catalog) {
     if (profile->pfd_detection == profiles::PfdDetectionPolicy::single_display) {
-      assert(profile->composition.divider_top == 305 && profile->composition.divider_bottom == 321);
-      assert(profile->composition.nose_height == 305 && profile->composition.tail_top == 321);
+      assert(profile->composition.divider_top == 280 && profile->composition.divider_bottom == 318);
+      assert(profile->composition.nose_height == 280 && profile->composition.tail_top == 318);
       continue;
     }
     assert(profile->composition.divider_top == 251 && profile->composition.divider_bottom == 263);

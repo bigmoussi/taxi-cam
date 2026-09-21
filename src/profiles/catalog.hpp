@@ -78,6 +78,8 @@ struct AircraftProfile {
   const char* display_texture = "";
   // Existing compositor guide switch. False draws no alignment markers.
   bool reference_guides = true;
+  // False keeps ground speed out of the composed ND (PMDG 777).
+  bool ground_speed = true;
 };
 inline constexpr AircraftProfile A380{1,
                                       "fbw-a380x",
@@ -202,12 +204,16 @@ inline constexpr std::array<unsigned, 6> Pmdg777Formats{};
 // owns three viewpoints: nose on top, and independent left/right wing cameras
 // on the split bottom. Pixels outside the two inboard gauges stay untouched.
 // Working-image layout matched to the reference ND photo on a nearly square
-// 958x971 gauge: shorter full-width top (~40%), taller split bottom (~60%), with
-// a T divider and gap. Camera panes keep modest bottom capture sizes. Padding
-// is zero so the page fills the gauge.
-inline constexpr unsigned Pmdg777NoseHeight = 305;
-inline constexpr unsigned Pmdg777DividerBottom = 321;
+// 958x971 gauge: shorter full-width top, taller split bottom, with a T divider
+// whose bar is ~4/5 of the vertical gap. Bottom capture panes match each half
+// pane's portrait aspect so the compositor does not stretch. Top/bottom ND
+// padding frames the camera block; left/right stay zero so the split is unchanged.
+inline constexpr unsigned Pmdg777NoseHeight = 280;
 inline constexpr unsigned Pmdg777BottomGap = 48;
+inline constexpr unsigned Pmdg777DividerThickness = (Pmdg777BottomGap * 4 + 2) / 5;
+inline constexpr unsigned Pmdg777DividerBottom = Pmdg777NoseHeight + Pmdg777DividerThickness;
+inline constexpr unsigned Pmdg777BottomHeight = 763 - Pmdg777DividerBottom;
+inline constexpr unsigned Pmdg777BottomPaneWidth = (768 - Pmdg777BottomGap) / 2;
 inline constexpr Composition Pmdg777Composition = [] {
   Composition c;
   c.nose_height = static_cast<float>(Pmdg777NoseHeight);
@@ -223,8 +229,11 @@ inline constexpr Composition Pmdg777Composition = [] {
 // single tail capture).
 inline constexpr std::array<std::array<double, 6>, 3> Pmdg777Mounts{
     {{0, -1.5, 18, -15, 0, 1.0}, {-5, 2, -6, -8, -100, 1.2}, {5, 2, -6, -8, 100, 1.2}}};
-// Top pane aspect matches the shorter nose band; bottom captures stay modest.
-inline constexpr CameraPanes Pmdg777Panes{{{736, 292}, {736, 307}, {736, 307}}};
+// Nose matches the shorter top band; each bottom feed matches one half-pane.
+inline constexpr CameraPanes Pmdg777Panes{
+    {{736, static_cast<std::int32_t>((Pmdg777NoseHeight * 736 + 384) / 768)},
+     {static_cast<std::int32_t>(Pmdg777BottomPaneWidth), static_cast<std::int32_t>(Pmdg777BottomHeight)},
+     {static_cast<std::int32_t>(Pmdg777BottomPaneWidth), static_cast<std::int32_t>(Pmdg777BottomHeight)}}};
 inline constexpr AircraftProfile Pmdg777 = [] {
   AircraftProfile p{5,
                     "pmdg-777",
@@ -249,7 +258,9 @@ inline constexpr AircraftProfile Pmdg777 = [] {
   p.pfd_detection = PfdDetectionPolicy::single_display;
   p.display_texture = Pmdg777Texture;
   p.reference_guides = false;
-  p.camera_padding = {};
+  p.ground_speed = false;
+  // Symmetrical top/bottom frame around the camera block; L/R stay 0.
+  p.camera_padding = {0, 40, 0, 40};
   return p;
 }();
 inline constexpr std::array<const AircraftProfile*, 5> Catalog{&A380, &A359, &A35K, &IniA380, &Pmdg777};

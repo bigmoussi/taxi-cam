@@ -322,15 +322,18 @@ bool read_fields(win::Settings& settings, const wchar_t** error = nullptr) {
   for (unsigned i = 0; i < 3; ++i)
     for (unsigned j = 0; j < 6; ++j)
       settings.mounts[i][j] = number(300 + static_cast<int>(i * 10 + j), settings.mounts[i][j], ok);
-  std::array<float, 2>* guides[]{&settings.nose_dot, &settings.tail_upper, &settings.tail_corner, &settings.tail_inner};
-  for (unsigned i = 0; i < 4; ++i)
-    for (unsigned axis = 0; axis < 2; ++axis) {
-      const auto value = number(360 + static_cast<int>(i * 2 + axis), (*guides[i])[axis] * 100., ok);
-      if (value < 0 || value > (axis ? 100 : 50))
-        ok = false;
-      else
-        (*guides[i])[axis] = static_cast<float>(value / 100.);
-    }
+  const auto* guide_profile = profiles::find(settings.profile);
+  if (!guide_profile || guide_profile->reference_guides) {
+    std::array<float, 2>* guides[]{&settings.nose_dot, &settings.tail_upper, &settings.tail_corner, &settings.tail_inner};
+    for (unsigned i = 0; i < 4; ++i)
+      for (unsigned axis = 0; axis < 2; ++axis) {
+        const auto value = number(360 + static_cast<int>(i * 2 + axis), (*guides[i])[axis] * 100., ok);
+        if (value < 0 || value > (axis ? 100 : 50))
+          ok = false;
+        else
+          (*guides[i])[axis] = static_cast<float>(value / 100.);
+      }
+  }
   if (page == 3) {
     std::array<std::uint64_t, 2> selected_ids{settings.left_id, settings.right_id};
     for (unsigned i = 0; i < 2; ++i) {
@@ -737,6 +740,8 @@ void build_controls() {
     edit(s.night_boost, 202, 840, 430, 120);
     edit(s.camera_rate, 200, 840, 547, 120);
     button(L"Ground-speed colour", 231, 740, 630, 235);
+    const auto* display_profile = profiles::find(s.profile);
+    EnableWindow(GetDlgItem(window, 231), !display_profile || display_profile->ground_speed);
   } else if (page == 3) {
     toggle(L"Auto detect", 223, s.auto_detect, 795, 126, 180);
     target_combos(s);
@@ -753,15 +758,22 @@ void build_controls() {
     button(L"Open log folder", 510, 260, 591, 210);
     button(L"Stop camera tests", 511, 500, 591, 210);
   } else if (page == 5) {
+    const auto* guide_profile = profiles::find(s.profile);
+    const bool draw_guides = !guide_profile || guide_profile->reference_guides;
     const std::array<float, 2> guides[]{s.nose_dot, s.tail_upper, s.tail_corner, s.tail_inner};
     for (unsigned i = 0; i < 4; ++i) {
       const int y = i ? 338 + static_cast<int>(i - 1) * 64 : 204;
       edit(guides[i][0] * 100., 360 + static_cast<int>(i * 2), 505, y, 113);
       edit(guides[i][1] * 100., 361 + static_cast<int>(i * 2), 655, y, 113);
+      EnableWindow(GetDlgItem(window, 360 + static_cast<int>(i * 2)), draw_guides);
+      EnableWindow(GetDlgItem(window, 361 + static_cast<int>(i * 2)), draw_guides);
     }
     button(L"Apply live", 370, 260, 608, 185);
     button(L"Reset guides", 371, 467, 608, 250);
     button(L"Marking colour", 372, 740, 608, 235);
+    EnableWindow(GetDlgItem(window, 370), draw_guides);
+    EnableWindow(GetDlgItem(window, 371), draw_guides);
+    EnableWindow(GetDlgItem(window, 372), draw_guides);
   }
   refreshing = false;
   InvalidateRect(window, nullptr, TRUE);
@@ -1696,7 +1708,10 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         if (!apply(false))
           return 0;
         const auto s = draft();
+        const auto* color_profile = profiles::find(s.profile);
         const bool markings = id == 372;
+        if ((!markings && color_profile && !color_profile->ground_speed) || (markings && color_profile && !color_profile->reference_guides))
+          return 0;
         const auto& color = markings ? s.guide_color : s.speed_color;
         static COLORREF custom[16]{};
         CHOOSECOLORW choice{};
@@ -1800,6 +1815,9 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         return 0;
       }
       if (id == 370) {
+        const auto* guide_profile = profiles::find(draft().profile);
+        if (guide_profile && !guide_profile->reference_guides)
+          return 0;
         if (apply(false)) {
           dirty_notice();
           notice = L"Preview applied. Save changes to keep these guides.";
@@ -1809,6 +1827,8 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       if (id == 371) {
         auto s = draft();
         if (const auto* profile = profiles::find(s.profile)) {
+          if (!profile->reference_guides)
+            return 0;
           win::reset_guide_settings(s, *profile);
           publish(s);
           dirty_notice();

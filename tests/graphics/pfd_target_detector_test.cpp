@@ -678,7 +678,7 @@ int main() {
   static PfdTargetDetector inboard;
   inboard.configure(taxi_camera::profiles::Pmdg777);
   const auto& pmdg = taxi_camera::profiles::Pmdg777;
-  assert(pmdg.formats[0] == 0 && pmdg.mips == 0 && !pmdg.reference_guides);
+  assert(pmdg.formats[0] == 0 && pmdg.mips == 0 && !pmdg.reference_guides && !pmdg.ground_speed);
   const unsigned levels = pmdg.mips ? pmdg.mips : 1u;
   // 28 is an observation format, not a scanned PMDG DXGI format.
   PfdTargetObservation one{42, 10, pmdg.width, pmdg.height, levels, 28};

@@ -763,7 +763,10 @@ DWORD run_impl() {
     const auto display = exposure.update(now, settings.exposure, settings.automatic_exposure != 0, settings.night_boost, light.valid,
                                          light.ambient, light.sample_ms);
     scene_runtime::set_display_exposure(key, display.applied_ev);
-    scene_runtime::set_ground_speed(key, static_cast<float>(speed.knots), speed.valid);
+    if (drawing->ground_speed)
+      scene_runtime::set_ground_speed(key, static_cast<float>(speed.knots), speed.valid);
+    else
+      scene_runtime::set_ground_speed(key, 0.f, false);
     service_scene();
     const auto scene = native_camera::scene_snapshot();
     const auto output = scene_runtime::snapshot(key);
