@@ -385,7 +385,7 @@ void reset_feed(std::uint64_t key) {
     item->status.output = false;
     item->queue_snapshot = {};
     item->committed = {};
-    item->status.message = "Waiting for the first completed images from both camera views.";
+    item->status.message = "Waiting for the first completed camera images.";
   }
 }
 std::uint64_t reset_session(std::uint64_t key) {

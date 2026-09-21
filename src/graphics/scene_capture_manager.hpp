@@ -117,9 +117,9 @@ class SceneCaptureManager {
     std::uint64_t display_copies = 0;
     std::uint64_t completed = 0, skipped = 0, quarantined = 0, bytes = 0;
     std::uint64_t render_target_writes = 0, render_target_rewrites = 0;
-    std::array<RenderTargetDiagnostic, 2> render_targets{};
+    std::array<RenderTargetDiagnostic, 3> render_targets{};
     std::uint64_t copy_writes = 0, copy_rewrites = 0;
-    std::array<CopyDiagnostic, 2> copies{};
+    std::array<CopyDiagnostic, 3> copies{};
     std::uint64_t source_candidates = 0, source_draws = 0, tail_submissions = 0, tail_captures = 0;
     const char* tail_status = "not_started";
     std::uint64_t unknown_submitted_lists = 0, invalid_source_recordings = 0, scoped_source_invalidations = 0;

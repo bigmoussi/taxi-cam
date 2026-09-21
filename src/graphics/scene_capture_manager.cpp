@@ -1167,11 +1167,11 @@ bool SceneCaptureManager::record_copy(ID3D12GraphicsCommandList* native,
     return false;
   const auto matches =
       handoff_.observe_copy(item->device_key, reinterpret_cast<std::uint64_t>(source), reinterpret_cast<std::uint64_t>(destination));
-  // A copy between the two feeds is ambiguous and must never label one as both.
+  // A copy between distinct published feeds is ambiguous and must never label one as both.
   if (matches.source.matched && matches.destination.matched && matches.source.feed != matches.destination.feed)
     return false;
   const auto match = matches.source.matched ? matches.source : matches.destination;
-  if (!match.matched || match.feed > 1)
+  if (!match.matched || match.feed > 2)
     return false;
   const auto desc = source->GetDesc();
   auto& diagnostic = stats_.copies[match.feed];
@@ -1204,7 +1204,7 @@ bool SceneCaptureManager::record_render_target_before_transition(ID3D12GraphicsC
   if (!owner || !owner->active || owner->failed || item->object_generation != object_generation)
     return false;
   const auto match = handoff_.observe_copy(item->device_key, reinterpret_cast<std::uint64_t>(target), 0).source;
-  if (!match.matched || match.feed > 1)
+  if (!match.matched || match.feed > 2)
     return false;
   return capture_source(*item, *owner, match, target, true);
 }
@@ -1223,7 +1223,7 @@ bool SceneCaptureManager::record_render_target_before_enhanced_transition(ID3D12
   if (!owner || !owner->active || owner->failed || item->object_generation != object_generation)
     return false;
   const auto match = handoff_.observe_copy(item->device_key, reinterpret_cast<std::uint64_t>(target), 0).source;
-  if (!match.matched || match.feed > 1)
+  if (!match.matched || match.feed > 2)
     return false;
   return capture_source(*item, *owner, match, target, true, native);
 }
@@ -1441,7 +1441,7 @@ void SceneCaptureManager::record_queue_tail(Transaction& pending, TailBatch& tai
     if (!state.drawn || (state.model != source_state::Model::legacy_rt && state.model != source_state::Model::enhanced_rt))
       continue;
     const auto match = handoff_.observe_copy(owner.key, reinterpret_cast<std::uint64_t>(source.native), 0).source;
-    if (!match.matched || match.feed > 1) {
+    if (!match.matched || match.feed > 2) {
       if (observed_feed >= 0)
         stats_.tail_status = "waiting_for_publication";
       continue;

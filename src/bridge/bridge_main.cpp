@@ -601,7 +601,8 @@ DWORD run_impl() {
       const auto previous_warm_phase = prewarm.phase();
       background_warmup = prewarm.observe(
           now, warm_readiness().eligible(), mask || test_scene,
-          {requested && warm_scene.ready[0] && warm_scene.ready[1], warm_output.output, warm_output.frames, warm_output.completed_frames},
+          {requested && warm_scene.ready[0] && warm_scene.ready[1] && (!warm_scene.pair.owned_ids[2] || warm_scene.ready[2]),
+           warm_output.output, warm_output.frames, warm_output.completed_frames},
           failed || warm_output.failed || warm_scene.pair.state == engine_camera::State::failed ||
               warm_scene.pair.state == engine_camera::State::blocked);
       if (prewarm.phase() != previous_warm_phase) {
@@ -828,7 +829,7 @@ DWORD run_impl() {
     std::memcpy(status.aircraft_path, identity.path.data(), sizeof(status.aircraft_path));
     status.graphics_ready = graphics.ready;
     status.hook_failures = graphics.hook_failures;
-    status.scene_ready = scene.ready[0] && scene.ready[1];
+    status.scene_ready = scene.ready[0] && scene.ready[1] && (!scene.pair.owned_ids[2] || scene.ready[2]);
     status.taxi_mask = active;
     status.speed_inhibited = cutoff.inhibited;
     status.left_id = targets[0];
