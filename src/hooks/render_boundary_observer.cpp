@@ -91,13 +91,19 @@ struct Lock {
       ReleaseSRWLockShared(&lock);
   }
 };
+bool pointer(const void* address, void*& value) noexcept;
 // ReShade's command-list proxy and the native list are different pointers.
 // IID_UnwrappedObject returns the native object and AddRefs it. The test fake
 // returns the same pointer without AddRef, so that result is not released.
 // The pointer is a map key only; no method is called on it after Release.
+// Registry keys in the metadata fixture are not COM objects. Leave those
+// pointers unchanged instead of calling through them.
 ID3D12GraphicsCommandList* identity_key(ID3D12GraphicsCommandList* list) noexcept {
   if (!list)
     return nullptr;
+  void* table = nullptr;
+  if (!pointer(list, table) || !table)
+    return list;
   IUnknown* unwrapped = nullptr;
   const HRESULT hr = list->QueryInterface(taxi_camera::UnwrappedObjectId, reinterpret_cast<void**>(&unwrapped));
   if (FAILED(hr) || !unwrapped || unwrapped == static_cast<IUnknown*>(list)) {
