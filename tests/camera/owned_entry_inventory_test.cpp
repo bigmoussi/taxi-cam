@@ -23,7 +23,7 @@ void require(bool condition, const char* message) {
 constexpr std::uint64_t Manager = 0x10000000;
 constexpr std::uint64_t Buckets = 0x18000000;
 constexpr std::uint64_t FirstNode = 0x20000000;
-constexpr std::array<std::uint64_t, 2> OwnedIds = {41, 99};
+constexpr std::array<std::uint64_t, 3> OwnedIds = {41, 99, 0};
 
 std::uint64_t node_address(std::uint32_t index) {
   return FirstNode + std::uint64_t(index) * 0x1000;
@@ -95,7 +95,7 @@ struct Fixture {
     memory.integer(Buckets + 8, node_address(0));
     memory.integer(Buckets + 24, node_address(2));
   }
-  OwnedEntryInventory run(std::uint64_t manager = Manager, std::array<std::uint64_t, 2> ids = OwnedIds) {
+  OwnedEntryInventory run(std::uint64_t manager = Manager, std::array<std::uint64_t, 3> ids = OwnedIds) {
     const auto result = inspect_owned_entries(memory, manager, ids);
     require(result.read_bytes == memory.attempted, "Attempted-read accounting disagrees with the adapter");
     require(result.complete == (result.error[0] == '\0'), "Complete/error states disagree");
@@ -118,6 +118,11 @@ void valid_membership() {
             "Valid table traversal failed or read beyond exact metadata");
     for (std::size_t index = 0; index < OwnedIds.size(); ++index) {
       const auto& entry = result.entries[index];
+      if (!OwnedIds[index]) {
+        require(!entry.found && entry.address == 0 && entry.key == 0 && entry.payload_id == 0,
+                "An unused third owned-id slot published a membership result");
+        continue;
+      }
       require(entry.found && entry.address == node_address(index == 0 ? 0 : 2) && entry.key == OwnedIds[index] &&
                   entry.payload_id == OwnedIds[index],
               "An owned entry did not resolve to its exact key, payload ID and address");
@@ -130,7 +135,7 @@ void valid_membership() {
     require(fixture.memory.reads.size() == 22 && fixture.memory.reads[1] == std::pair<std::uint64_t, std::size_t>{Buckets, 32},
             "Shared bucket heads were not read as one exact contiguous field");
   }
-  for (const auto ids : {std::array<std::uint64_t, 2>{99, 41}, {999, 99}, {0, 41}, {41, 0}, {0, 0}, {999, 1000}}) {
+  for (const auto ids : {std::array<std::uint64_t, 3>{99, 41, 0}, {999, 99, 0}, {0, 41, 0}, {41, 0, 0}, {0, 0, 0}, {999, 1000, 0}}) {
     Fixture fixture;
     fixture.normal();
     const auto result = fixture.run(Manager, ids);

@@ -834,10 +834,13 @@ void service_profile_transition(Runtime& runtime, void* manager, ProbeSnapshot& 
         apply_gates(runtime, pair.owned_ids, {}, report, true);
         inspect_pair(runtime, pair.owned_ids, report, views, false);
         bool unchanged = true;
-        for (unsigned i = 0; i < 2; ++i)
+        for (unsigned i = 0; i < views.size(); ++i) {
+          if (!pair.owned_ids[i])
+            continue;
           unchanged = unchanged && views[i].complete && views[i].ready && views[i].view_address == before_views[i].view_address &&
                       views[i].node_address == before_views[i].node_address && views[i].camera_address == before_views[i].camera_address &&
                       views[i].resource_address == before_views[i].resource_address && (views[i].flags[0] & 1u);
+        }
         if (unchanged)
           transition.inspect(runtime.token, runtime.pair.snapshot(), views);
         else

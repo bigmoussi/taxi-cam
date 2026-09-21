@@ -40,7 +40,7 @@ inline void test_view_retirement() {
   // entry is unavailable. A pending OFF remains immediate in the controller.
   struct Engine {
     ViewRetirement retirement;
-    std::array<ec::OwnedViewSnapshot, 2> views{};
+    std::array<ec::OwnedViewSnapshot, 3> views{};
     std::uint64_t update = 1;
     unsigned creates = 0, closes = 0, erases = 0;
     static bool initialize(void*, ec::DescriptorStorage& descriptor) noexcept {
@@ -87,7 +87,7 @@ inline void test_view_retirement() {
   for (engine.update = 2; engine.update < 200; ++engine.update) {
     pair.process_update(owner, engine.callbacks());
     assert(engine.creates == 2 && engine.erases == 0 && engine.closes == 2);
-    assert((pair.snapshot().owned_ids == std::array<ec::EntryId, 2>{1001, 1002}));
+    assert((pair.snapshot().owned_ids == std::array<ec::EntryId, 3>{1001, 1002, 0}));
   }
   ready.flags[0] = 1;
   engine.views = {ready, ready};

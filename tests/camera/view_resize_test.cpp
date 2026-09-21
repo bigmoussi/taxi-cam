@@ -348,9 +348,9 @@ void retained_dimension_restore() {
 
 void empty_manager_warmup(const nc::ViewDimensions& primary) {
   nc::ViewResizeWarmup warmup;
-  const std::array<std::uint64_t, 2> ids{1003, 1004};
-  require(!warmup.begin({0, 1004}, 1) && !warmup.pending(), "zero owned ID admitted");
-  require(!warmup.begin({1003, 1003}, 1) && !warmup.pending(), "duplicate owned ID admitted");
+  const std::array<std::uint64_t, 3> ids{1003, 1004, 0};
+  require(!warmup.begin({0, 1004, 0}, 1) && !warmup.pending(), "zero owned ID admitted");
+  require(!warmup.begin({1003, 1003, 0}, 1) && !warmup.pending(), "duplicate owned ID admitted");
   require(!warmup.begin(ids, 0) && !warmup.pending(), "unobserved iteration admitted");
   Fixture nose;
   Fixture tail(0, 1);
@@ -370,7 +370,7 @@ void empty_manager_warmup(const nc::ViewDimensions& primary) {
   manager_entries = 2;
   require(warmup.begin(ids, 10), "new pair warmup refused");
   require(!warmup.may_resize(ids, 10) && !warmup.finish(ids, 10), "same-update resize or activation admitted");
-  require(!warmup.may_resize({1003, 1005}, 11) && !warmup.may_resize(ids, 9), "stale pair/iteration admitted");
+  require(!warmup.may_resize({1003, 1005, 0}, 11) && !warmup.may_resize(ids, 9), "stale pair/iteration admitted");
   require(nose.refreshed == 0 && nose.allocated == 0 && tail.refreshed == 0 && tail.allocated == 0,
           "private resize called before original warmup");
   original_update();
