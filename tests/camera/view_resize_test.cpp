@@ -83,7 +83,7 @@ void planning() {
   for (const auto inherited : std::array<std::array<std::int32_t, 2>, 7>{
            {{3413, 913}, {1920, 1080}, {768, 763}, {512, 512}, {16384, 16384}, {32, 32}, {16384, 32}}}) {
     input.fill(inherited);
-    for (unsigned feed = 0; feed < 2; ++feed) {
+    for (unsigned feed = 0; feed < 3; ++feed) {
       require(nc::plan_view_resize(input, feed, output), "valid dimensions refused");
       for (const auto pair : output)
         require(pair == std::array<std::int32_t, 2>{736, feed == 0 ? 251 : 496}, "output differs from its exact PFD pane");
@@ -97,13 +97,15 @@ void planning() {
   }
   for (const auto inherited : {MixedPrimary, nc::ViewDimensions{{{1695, 901}, {2542, 1351}, {2542, 1351}}},
                                nc::ViewDimensions{{{32, 16384}, {16384, 32}, {1920, 1080}}}})
-    for (unsigned feed = 0; feed < 2; ++feed) {
+    for (unsigned feed = 0; feed < 3; ++feed) {
       require(nc::plan_view_resize(inherited, feed, output), "bounded independent inherited pairs refused");
       for (const auto pair : output)
         require(pair == nc::kCameraPaneDimensions[feed], "mixed inherited sizes altered the exact requested pane");
     }
   input.fill({3413, 913});
-  for (const auto feed : {2u, 3u, std::numeric_limits<unsigned>::max()})
+  // CameraPanes holds three known feeds (nose / left-or-tail / right). Feed 2 is
+  // valid; only indexes past that capacity must refuse without writing output.
+  for (const auto feed : {3u, std::numeric_limits<unsigned>::max()})
     require(!nc::plan_view_resize(input, feed, output) && output == nc::ViewDimensions{}, "unknown feed accepted/leaked output");
 }
 void independent_dimension_guards() {
