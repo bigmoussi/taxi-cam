@@ -79,22 +79,33 @@ constexpr const wchar_t* camera_rate_limit_text(unsigned reasons) noexcept {
 }
 
 // Ground-speed hysteresis for the parked floor. Parked needs the public GROUND
-// VELOCITY below kParkedBelowKnots continuously for kParkedSettleMs; any sample
-// at or above it restores the moving rate at once. Missing or stale telemetry is
-// treated as moving so a telemetry gap never lowers the rate. The settle time is
-// the only hysteresis: a parked aircraft's GROUND VELOCITY reads 0.00–0.09 kt on
-// the live A350, while 0.4 kt is an aircraft still rolling to a stop, which the
-// earlier 0.5/1.0 kt band parked at 5 fps while it was visibly moving (0.9.42
-// low-speed report). Re-parking after any motion needs the full settle again, so
-// creep at taxi start cannot flap the schedule faster than once per settle.
+// VELOCITY below kParkedBelowKnots continuously for kParkedSettleMs (the dwell:
+// a rolling aircraft never accumulates park time, and a band sample restarts
+// it). Any sample at or above kMovingAboveKnots restores the moving rate at
+// once. Between the two thresholds the current state holds: a parked aircraft
+// whose GROUND VELOCITY jitters to 0.20–0.34 kt stays at the floor, a moving one
+// stays at the saved rate. Missing or stale telemetry is treated as moving so a
+// telemetry gap never lowers the rate. A parked live A350 reads 0.00–0.09 kt;
+// 0.4 kt is an aircraft still rolling to a stop, which the earlier 0.5/1.0 kt
+// band parked at 5 fps while it was visibly moving (0.9.42 low-speed report),
+// and the single 0.2 kt edge of 0.9.48–0.9.56 stepped the inset 5<->10 fps
+// twice per creep (0.9.56 flash/jump report). Re-parking after any motion needs
+// the full settle again.
 class ParkedRatePolicy {
  public:
   static constexpr double kParkedBelowKnots = 0.2;
+  static constexpr double kMovingAboveKnots = 0.35;
   static constexpr std::uint64_t kParkedSettleMs = 3000;
 
   bool update(std::uint64_t now_ms, bool speed_valid, double knots) noexcept {
-    if (!speed_valid || !std::isfinite(knots) || knots < 0 || knots >= kParkedBelowKnots) {
+    if (!speed_valid || !std::isfinite(knots) || knots < 0 || knots >= kMovingAboveKnots) {
       reset();
+      return parked_;
+    }
+    if (knots >= kParkedBelowKnots) {
+      // Hysteresis band: hold the state; a moving aircraft restarts its settle.
+      still_ = false;
+      still_since_ = 0;
       return parked_;
     }
     if (!still_ || now_ms < still_since_) {

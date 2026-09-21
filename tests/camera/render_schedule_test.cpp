@@ -212,6 +212,33 @@ void parked_policy_hysteresis() {
   require(!reversal.update(100, true, 0.0), "Clock reversal parked early");
   require(!reversal.update(100 + ParkedRatePolicy::kParkedSettleMs - 22, true, 0.0), "Clock reversal did not restart the settle time");
   require(reversal.update(100 + ParkedRatePolicy::kParkedSettleMs, true, 0.0), "Settle after clock reversal failed");
+
+  // 0.9.56 live: a parked A350 creeping around the 0.2 kt edge stepped the
+  // inset 5<->10 fps twice in ~130 s. Band samples hold the parked floor; only
+  // a sample at or above the moving threshold unparks, and it does so at once.
+  ParkedRatePolicy creep;
+  for (std::uint64_t now = 0; now <= ParkedRatePolicy::kParkedSettleMs; now += 20)
+    creep.update(now, true, 0.14);
+  require(creep.parked(), "Creep fixture did not park");
+  for (std::uint64_t now = 4000; now < 14000; now += 22)
+    require(creep.update(now, true, 0.2 + 0.14 * ((now / 22) % 2)), "Creep in the hysteresis band unparked the schedule");
+  require(!creep.update(14000, true, ParkedRatePolicy::kMovingAboveKnots), "The moving threshold did not unpark at once");
+  require(!creep.update(14022, true, 0.3), "A moving aircraft in the band re-parked without settling");
+  require(!creep.update(14044, true, 0.0) && !creep.update(14044 + ParkedRatePolicy::kParkedSettleMs - 22, true, 0.0),
+          "A stop after creep parked before the settle time");
+  // Rolling to a stop through the band: below-threshold time only counts while
+  // the aircraft is actually stopped; a band sample restarts the settle.
+  ParkedRatePolicy stop;
+  for (std::uint64_t now = 0; now < 2000; now += 22)
+    require(!stop.update(now, true, 0.3), "Coasting in the band parked");
+  for (std::uint64_t now = 2000; now < 2000 + ParkedRatePolicy::kParkedSettleMs - 22; now += 22)
+    require(!stop.update(now, true, 0.1), "Nearly stopped aircraft parked before the settle time");
+  require(!stop.update(2000 + ParkedRatePolicy::kParkedSettleMs, true, 0.25), "A band sample during the settle parked the schedule");
+  for (std::uint64_t now = 5100; now < 5100 + ParkedRatePolicy::kParkedSettleMs; now += 22)
+    require(!stop.update(now, true, 0.05), "The band sample did not restart the settle");
+  require(stop.update(5100 + ParkedRatePolicy::kParkedSettleMs, true, 0.05), "Stopped aircraft did not park after the restarted settle");
+  require(stop.update(5100 + ParkedRatePolicy::kParkedSettleMs + 22, true, 0.34), "Band noise unparked a freshly parked aircraft");
+  require(!stop.update(5100 + ParkedRatePolicy::kParkedSettleMs + 44, true, 0.4), "A rolling aircraft stayed parked past the band");
 }
 
 void effective_rate_caps() {
@@ -262,9 +289,9 @@ void adaptive_parked_schedule() {
     if (now < 20000)
       return 0.0;  // Parked at the gate.
     if (now < 20500)
-      return 0.3;  // Brake release creep.
+      return 0.4;  // Brake release: at the moving threshold, moving at once (0.2–0.34 kt holds; see parked_policy_hysteresis).
     if (now < 21000)
-      return 0.4;  // Brake release: creeping is already moving.
+      return 0.6;  // Rolling.
     if (now < 40000)
       return 8.0;  // Taxiing.
     return 0.0;    // Holding.
