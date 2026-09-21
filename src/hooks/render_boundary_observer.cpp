@@ -91,19 +91,14 @@ struct Lock {
       ReleaseSRWLockShared(&lock);
   }
 };
-bool pointer(const void* address, void*& value) noexcept;
 // ReShade's command-list proxy and the native list are different pointers.
 // IID_UnwrappedObject returns the native object and AddRefs it. The test fake
 // returns the same pointer without AddRef, so that result is not released.
 // The pointer is a map key only; no method is called on it after Release.
-// Registry keys in the metadata fixture are not COM objects. Leave those
-// pointers unchanged instead of calling through them.
+// Callers must pass a live COM object. Registry entry points use registry_key.
 ID3D12GraphicsCommandList* identity_key(ID3D12GraphicsCommandList* list) noexcept {
   if (!list)
     return nullptr;
-  void* table = nullptr;
-  if (!pointer(list, table) || !table)
-    return list;
   IUnknown* unwrapped = nullptr;
   const HRESULT hr = list->QueryInterface(taxi_camera::UnwrappedObjectId, reinterpret_cast<void**>(&unwrapped));
   if (FAILED(hr) || !unwrapped || unwrapped == static_cast<IUnknown*>(list)) {
@@ -690,6 +685,15 @@ bool pointer(const void* address, void*& value) noexcept {
   MEMORY_BASIC_INFORMATION info{};
   return region(address, 8, info) && pointer_exact(address, value);
 }
+// Metadata fixtures pass integer registry keys. Those are not COM objects, so
+// the hook-path unwrap must not run on them. A known active-pass table also
+// cannot spend a VirtualQuery here: its fast path is two slot reads.
+ID3D12GraphicsCommandList* registry_key(ID3D12GraphicsCommandList* list) noexcept {
+  void* table = nullptr;
+  if (!pointer(list, table) || !table)
+    return list;
+  return identity_key(list);
+}
 bool data_slot(void** address) noexcept {
   MEMORY_BASIC_INFORMATION info{};
   if (!region(address, 8, info))
@@ -894,7 +898,7 @@ Result register_list(ID3D12GraphicsCommandList* list, std::uint64_t generation, 
     }
   }
   {
-    const auto key = identity_key(list);
+    const auto key = registry_key(list);
     const Lock lock(registry_lock, true);
     const auto found = identities.find(key);
     if (found != identities.end() && found->second.generation != generation)
@@ -913,14 +917,14 @@ Result register_list(ID3D12GraphicsCommandList* list, std::uint64_t generation, 
   return result("registered", 0, true);
 }
 void unregister_list(ID3D12GraphicsCommandList* list, std::uint64_t generation) noexcept {
-  const auto key = identity_key(list);
+  const auto key = registry_key(list);
   const Lock lock(registry_lock, true);
   const auto it = identities.find(key);
   if (it != identities.end() && it->second.generation == generation)
     identities.erase(it);
 }
 void successful_reset(ID3D12GraphicsCommandList* list, std::uint64_t generation) noexcept {
-  const auto key = identity_key(list);
+  const auto key = registry_key(list);
   const Lock lock(registry_lock, true);
   const auto it = identities.find(key);
   if (it != identities.end() && it->second.generation == generation)
@@ -930,7 +934,7 @@ void reset_failed(ID3D12GraphicsCommandList* list, std::uint64_t generation) noe
   invalidate_recording(list, generation, InvalidationResetFailed);
 }
 void invalidate_recording(ID3D12GraphicsCommandList* list, std::uint64_t generation, std::uint32_t reasons) noexcept {
-  const auto key = identity_key(list);
+  const auto key = registry_key(list);
   {
     const Lock lock(registry_lock, true);
     const auto it = identities.find(key);
