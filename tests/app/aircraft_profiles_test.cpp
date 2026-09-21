@@ -394,7 +394,6 @@ int main() {
       assert(profile->mounts[1][3] == 0 && profile->mounts[1][4] == -15 && profile->mounts[1][5] == 0.8);
       assert(profile->mounts[2][0] == 4 && profile->mounts[2][1] == 1.5 && profile->mounts[2][2] == -25);
       assert(profile->mounts[2][3] == 0 && profile->mounts[2][4] == 15 && profile->mounts[2][5] == 0.8);
-      assert(profile->composition.speed_panel_origin[0] < 0 && profile->composition.speed_panel_origin[1] < 0);
       assert(profile->formats[0] == 0);
       assert(profiles::matches_display(*profile, profile->width, profile->height, 1, 28));
       assert(profiles::matches_display(*profile, profile->width, profile->height, 12, 87));

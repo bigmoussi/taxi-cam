@@ -45,6 +45,7 @@ class SceneFrameOutput {
   // prepared recording must first be submitted or discarded.
   bool set_display_exposure(float ev) noexcept;
   bool set_ground_speed(float knots, bool valid) noexcept;
+  bool hide_ground_speed() noexcept;
   bool set_composition(const profiles::Composition& layout) noexcept;
   bool set_reference_guides(bool enabled) noexcept;
   bool set_patch_profile(std::uint32_t profile) noexcept;

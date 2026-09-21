@@ -84,6 +84,12 @@ bool SceneFrameOutput::set_ground_speed(float knots, bool valid) noexcept {
   compositor_->set_ground_speed(knots, valid);
   return true;
 }
+bool SceneFrameOutput::hide_ground_speed() noexcept {
+  if (!compositor_ || prepared_ || failed_)
+    return false;
+  compositor_->hide_ground_speed();
+  return true;
+}
 float SceneFrameOutput::display_exposure() const noexcept {
   return compositor_ ? compositor_->display_exposure() : CameraCompositorD3D12::DefaultExposureEv;
 }

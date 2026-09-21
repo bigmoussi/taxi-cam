@@ -397,6 +397,7 @@ std::uint64_t reset_session(std::uint64_t key) {
   item->status.output = false;
   item->status.ground_speed_valid = false;
   item->status.ground_speed_knots = 0;
+  item->status.ground_speed_overlay = true;
   item->queue_config = {};
   item->queue_snapshot = {};
   item->committed = {};
@@ -437,8 +438,17 @@ bool set_display_exposure(std::uint64_t key, float ev) {
 void set_ground_speed(std::uint64_t key, float knots, bool valid) {
   const std::lock_guard lock(runtime().mutex);
   if (auto* item = find(key)) {
+    item->status.ground_speed_overlay = true;
     item->status.ground_speed_valid = item->status.session_active && valid && std::isfinite(knots) && knots >= 0 && knots <= 999;
     item->status.ground_speed_knots = item->status.ground_speed_valid ? knots : 0;
+  }
+}
+void hide_ground_speed(std::uint64_t key) {
+  const std::lock_guard lock(runtime().mutex);
+  if (auto* item = find(key)) {
+    item->status.ground_speed_overlay = false;
+    item->status.ground_speed_valid = false;
+    item->status.ground_speed_knots = 0;
   }
 }
 void service() {
@@ -527,8 +537,10 @@ void service() {
       continue;
     }
     ID3D12Resource* right = split ? third.resource : second.resource;
-    if (!item.output.set_display_exposure(item.status.display_exposure_ev) ||
-        !item.output.set_ground_speed(item.status.ground_speed_knots, item.status.ground_speed_valid) ||
+    const bool speed_ready = item.status.ground_speed_overlay
+                                 ? item.output.set_ground_speed(item.status.ground_speed_knots, item.status.ground_speed_valid)
+                                 : item.output.hide_ground_speed();
+    if (!item.output.set_display_exposure(item.status.display_exposure_ev) || !speed_ready ||
         !item.output.prepare(first.resource, scene_format(first.resource), second.resource, scene_format(second.resource), right,
                              scene_format(right))) {
       item.status.failed = true;

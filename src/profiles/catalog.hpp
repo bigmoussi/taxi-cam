@@ -259,9 +259,6 @@ inline constexpr AircraftProfile Pmdg777 = [] {
   p.display_texture = Pmdg777Texture;
   p.reference_guides = false;
   p.ground_speed = false;
-  // Keep the GS panel origin off the working image so the compositor never
-  // draws the label, even for an invalid-speed dash readout.
-  p.composition.speed_panel_origin = {-1000.f, -1000.f};
   // Symmetrical top/bottom frame around the camera block; L/R stay 0.
   p.camera_padding = {0, 40, 0, 40};
   return p;

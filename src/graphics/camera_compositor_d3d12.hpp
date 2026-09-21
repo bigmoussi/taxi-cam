@@ -75,8 +75,15 @@ class CameraCompositorD3D12 {
   void set_reference_guides(bool enabled) noexcept { reference_guides_ = enabled; }
   void set_ground_speed(float knots, bool valid) noexcept {
     const auto display = ground_speed_display(knots, valid);
+    ground_speed_hidden_ = false;
     ground_speed_valid_ = display.valid;
     ground_speed_ = display.knots;
+  }
+  // Keep the default GS panel as a solid black slot with no label or dashes.
+  void hide_ground_speed() noexcept {
+    ground_speed_hidden_ = true;
+    ground_speed_valid_ = false;
+    ground_speed_ = 0;
   }
   // Recorded root constants capture this value. No resource/descriptors change.
   bool set_display_exposure(float ev) noexcept {
@@ -232,7 +239,7 @@ class CameraCompositorD3D12 {
               std::exp2(exposure_ev_),
               reference_guides_ ? 1u : 0u,
               ground_speed_,
-              ground_speed_valid_ ? 1u : 0u,
+              ground_speed_hidden_ ? 2u : (ground_speed_valid_ ? 1u : 0u),
               composition_};
     static_assert(sizeof(display) == 32 * sizeof(UINT));
     private_list->SetGraphicsRoot32BitConstants(1, 32, &display, 0);
@@ -581,12 +588,15 @@ float glyph_coverage(float2 position, float2 origin, uint glyph) {
   return saturate(1.4 - distance);
 }
 uint ground_speed_digits() {
-  return GroundSpeedValid == 0 || GroundSpeed >= 10 ? 2 : 1;
+  // Mode 1 is a live reading. 0 (unavailable) and 2 (hidden black slot) keep
+  // the two-digit panel width so padding geometry stays stable.
+  return GroundSpeedValid == 1 && GroundSpeed < 10 ? 1 : 2;
 }
 float2 ground_speed_extent() {
   return float2(max(SpeedMinimumWidth, SpeedPaddingX * 2 + 64 + 16 * ground_speed_digits()), max(SpeedMinimumHeight, SpeedPaddingY * 2 + 20));
 }
 float4 ground_speed_pixel(float2 position) {
+  if (GroundSpeedValid == 2) return float4(0, 0, 0, 1);
   position -= float2(SpeedPaddingX, SpeedPaddingY);
   float label = max(glyph_coverage(position, float2(0, 0), 10), glyph_coverage(position, float2(16, 0), 11));
   float speed = 0;
@@ -697,6 +707,7 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
   profiles::Composition composition_{};
   UINT ground_speed_ = 0;
   bool ground_speed_valid_ = false;
+  bool ground_speed_hidden_ = false;
   std::array<char, 1024> error_{};
 };
 

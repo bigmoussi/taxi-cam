@@ -70,6 +70,8 @@ struct Snapshot {
   float display_exposure_ev = -8.8f;
   float ground_speed_knots = 0;
   bool ground_speed_valid = false;
+  // False keeps a black GS panel with no label (PMDG 777).
+  bool ground_speed_overlay = true;
   const char* message = "Start the scene test to prepare the PFD feed.";
   SceneCaptureManager::Statistics capture;
 };
@@ -84,6 +86,8 @@ bool prepare(std::uint64_t key);
 bool set_display_exposure(std::uint64_t key, float ev);
 // A fresh public SimConnect sample; unavailable samples render GS --.
 void set_ground_speed(std::uint64_t key, float knots, bool valid);
+// Black GS panel with no label or dashes; camera must not paint into the slot.
+void hide_ground_speed(std::uint64_t key);
 void reset_feed(std::uint64_t key);
 // Full aircraft/airport boundary. Stop new camera/calibration publications and
 // submissions immediately; replayable buffers and in-flight leases drain on
