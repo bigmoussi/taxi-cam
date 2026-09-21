@@ -186,6 +186,8 @@ class CameraCompositorD3D12 {
   // Supported exact before states: COMMON, RENDER_TARGET, UNORDERED_ACCESS,
   // COPY_DEST, or any nonempty combination of PIXEL_SHADER_RESOURCE,
   // NON_PIXEL_SHADER_RESOURCE and COPY_SOURCE. Other state sets are refused.
+  // Non-split layouts may bind the same tail resource to both bottom SRVs; each
+  // distinct resource is transitioned once so aliased bottoms do not double-barrier.
   HRESULT record(ID3D12GraphicsCommandList* private_list, D3D12_RESOURCE_STATES nose_before, D3D12_RESOURCE_STATES left_before,
                  D3D12_RESOURCE_STATES right_before) noexcept {
     if (!output_.get() || !inputs_[0].get() || !inputs_[1].get() || !inputs_[2].get() || !private_list ||
@@ -193,9 +195,15 @@ class CameraCompositorD3D12 {
         !valid_state(nose_before, input_descriptions_[0]) || !valid_state(left_before, input_descriptions_[1]) ||
         !valid_state(right_before, input_descriptions_[2]))
       return fail(E_INVALIDARG, "A private direct list, bound inputs and supported exact mip-zero states are required.");
+    const bool shared_bottom = same_object(inputs_[1].get(), inputs_[2].get());
+    if (shared_bottom && left_before != right_before)
+      return fail(E_INVALIDARG, "Aliased bottom inputs must share the same before state.");
     const std::array<D3D12_RESOURCE_STATES, 3> states{nose_before, left_before, right_before};
-    for (std::size_t index = 0; index < inputs_.size(); ++index)
+    for (std::size_t index = 0; index < inputs_.size(); ++index) {
+      if (index == 2 && shared_bottom)
+        continue;
       transition(private_list, inputs_[index].get(), states[index], D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    }
     transition(private_list, output_.get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
 
     private_list->SetGraphicsRootSignature(root_signature_.get());
@@ -229,8 +237,11 @@ class CameraCompositorD3D12 {
     private_list->DrawInstanced(3, 1, 0, 0);
 
     transition(private_list, output_.get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
-    for (std::size_t index = 0; index < inputs_.size(); ++index)
+    for (std::size_t index = 0; index < inputs_.size(); ++index) {
+      if (index == 2 && shared_bottom)
+        continue;
       transition(private_list, inputs_[index].get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, states[index]);
+    }
     ++statistics_.recordings;
     error_[0] = '\0';
     return S_OK;
