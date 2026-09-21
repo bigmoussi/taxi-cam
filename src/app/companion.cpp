@@ -681,7 +681,10 @@ void build_controls() {
   for (int i = 0; i < 6; ++i)
     navigation.push_back(button(names[i], 100 + i, 20, 156 + i * 49, 166, 40));
   const auto* nav_profile = profiles::find(s.profile);
-  EnableWindow(GetDlgItem(window, 105), !nav_profile || nav_profile->reference_guides);
+  HWND guides_nav = GetDlgItem(window, 105);
+  const bool guides_enabled = !nav_profile || nav_profile->reference_guides;
+  EnableWindow(guides_nav, guides_enabled);
+  InvalidateRect(guides_nav, nullptr, FALSE);
   const auto donate_button = button(L"Donate", 513, 24, 590, 110, 40);
   const auto report_button = button(L"Report a bug", 512, 24, 638, 40, 40);
   const auto version_link = button(L"v" TAXI_CAM_VERSION_WIDE, 514, 24, 692, 155, 22);
@@ -1516,7 +1519,8 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       if (item->CtlType != ODT_BUTTON)
         break;
       const int id = static_cast<int>(item->CtlID);
-      const bool selected = (id >= 100 && id < 106 && id - 100 == page) || is_on(id, draft());
+      const bool disabled = (item->itemState & ODS_DISABLED) != 0;
+      const bool selected = !disabled && ((id >= 100 && id < 106 && id - 100 == page) || is_on(id, draft()));
       HBRUSH surround = CreateSolidBrush((id >= 100 && id < 106) || id == 512 || id == 513 || id == 514 ? Sidebar : Background);
       FillRect(item->hDC, &item->rcItem, surround);
       DeleteObject(surround);
@@ -1525,11 +1529,11 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         wchar_t label[64]{};
         GetWindowTextW(item->hwndItem, label, 64);
         SelectObject(item->hDC, version_font);
-        SetTextColor(item->hDC, item->itemState & ODS_SELECTED ? Text : Accent);
+        SetTextColor(item->hDC, disabled ? Muted : (item->itemState & ODS_SELECTED ? Text : Accent));
         SetBkMode(item->hDC, TRANSPARENT);
         auto bounds = item->rcItem;
         DrawTextW(item->hDC, label, -1, &bounds, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-        if (item->itemState & ODS_FOCUS) {
+        if (!disabled && (item->itemState & ODS_FOCUS)) {
           InflateRect(&bounds, -1, -1);
           DrawFocusRect(item->hDC, &bounds);
         }
@@ -1537,10 +1541,13 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         return TRUE;
       }
       const bool primary = id == 500;
-      const bool down = (item->itemState & ODS_SELECTED) != 0;
-      const COLORREF fill = primary ? Accent : selected ? RGB(30, 64, 63) : down ? Border : Card;
+      const bool down = !disabled && (item->itemState & ODS_SELECTED) != 0;
+      // Disabled owner-draw buttons need an explicit muted fill/label; EnableWindow
+      // alone leaves them looking enabled because this path paints every button.
+      const COLORREF fill = disabled ? RGB(20, 24, 31) : primary ? Accent : selected ? RGB(30, 64, 63) : down ? Border : Card;
+      const COLORREF outline = disabled ? RGB(36, 44, 54) : selected || primary ? Accent : Border;
       HBRUSH brush = CreateSolidBrush(fill);
-      HPEN pen = CreatePen(PS_SOLID, scale(1), selected || primary ? Accent : Border);
+      HPEN pen = CreatePen(PS_SOLID, scale(1), outline);
       const auto oldb = SelectObject(item->hDC, brush), oldp = SelectObject(item->hDC, pen);
       RoundRect(item->hDC, item->rcItem.left, item->rcItem.top, item->rcItem.right, item->rcItem.bottom, scale(9), scale(9));
       SelectObject(item->hDC, oldb);
@@ -1549,18 +1556,18 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       DeleteObject(pen);
       RECT r = item->rcItem;
       if (id == 512) {
-        draw_bug_icon(item->hDC, r, Accent);
+        draw_bug_icon(item->hDC, r, disabled ? Muted : Accent);
         InflateRect(&r, -scale(4), -scale(4));
       } else {
         wchar_t label[160];
         GetWindowTextW(item->hwndItem, label, 160);
         SelectObject(item->hDC, normal);
-        SetTextColor(item->hDC, primary ? Background : selected ? Accent : Text);
+        SetTextColor(item->hDC, disabled ? Muted : primary ? Background : selected ? Accent : Text);
         SetBkMode(item->hDC, TRANSPARENT);
         InflateRect(&r, -scale(10), 0);
         DrawTextW(item->hDC, label, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
       }
-      if (item->itemState & ODS_FOCUS) {
+      if (!disabled && (item->itemState & ODS_FOCUS)) {
         if (id != 512)
           InflateRect(&r, -2, -4);
         DrawFocusRect(item->hDC, &r);
