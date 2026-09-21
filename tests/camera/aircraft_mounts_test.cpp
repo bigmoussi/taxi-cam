@@ -50,7 +50,7 @@ void identity_and_angles() {
 void defaults() {
   const auto mounts = default_mounts();
   require(valid_mounts(mounts), "valid defaults");
-  std::array<MountedPose, 2> poses;
+  std::array<MountedPose, kMaxCameraFeeds> poses;
   require(make_mounted_pair({}, mounts, poses), "default pair");
   vector_close(poses[0].position, {0, -1.75, 26.950668984}, "nose position retained from verified live framing");
   vector_close(poses[1].position, {0, 18, -25}, "tail framing moves one metre aft");
@@ -75,7 +75,7 @@ void defaults() {
 
 void reference_framing() {
   const auto mounts = default_mounts();
-  std::array<MountedPose, 2> poses;
+  std::array<MountedPose, kMaxCameraFeeds> poses;
   require(make_mounted_pair({}, mounts, poses), "reference framing pair");
   constexpr double radians = 3.14159265358979323846 / 180.0;
   constexpr Vector3 wheel{0, -4.596384, 30.22092};
@@ -113,7 +113,7 @@ void follows_body() {
   // A 90-degree body heading rotates right to -Z and forward to +X.
   BodyPose body{{4e6, 1.4e6, 4.6e6}, {0, 0, -1}, {0, 1, 0}, {1, 0, 0}};
   const auto mounts = default_mounts();
-  std::array<MountedPose, 2> local{}, world{}, moved{};
+  std::array<MountedPose, kMaxCameraFeeds> local{}, world{}, moved{};
   require(make_mounted_pair({}, mounts, local) && make_mounted_pair(body, mounts, world), "world body transform");
   for (unsigned n = 0; n < 2; ++n) {
     vector_close(world[n].position,
@@ -183,7 +183,7 @@ void refusals() {
   for (float bad_fov : {0.0f, -1.0f, kMountMinimumFov - 0.001f, kMountMaximumFov + 0.001f}) {
     auto mounts = defaults_pair;
     mounts[1].fov_radians = bad_fov;
-    std::array<MountedPose, 2> pair;
+    std::array<MountedPose, kMaxCameraFeeds> pair;
     require(make_mounted_pair({}, defaults_pair, pair), "seed pair before failure");
     require(!make_mounted_pair({}, mounts, pair), "bad second mount rejects complete pair");
     for (const auto& item : pair)
