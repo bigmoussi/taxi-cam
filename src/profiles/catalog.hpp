@@ -204,28 +204,25 @@ inline constexpr std::array<unsigned, 6> Pmdg777Formats{};
 // owns three viewpoints: nose on top, and independent left/right wing cameras
 // on the split bottom. Pixels outside the two inboard gauges stay untouched.
 // Working-image layout matched to the reference ND photo on a nearly square
-// 958x971 gauge: full-width nose picture (unchanged 280 px height) sits below a
-// top black band, with a T divider whose bar is ~4/5 of the vertical gap. Bottom
-// panes are equal squares so the compositor does not stretch. Top/bottom ND
-// padding frames the camera block; left/right stay zero so the split is unchanged.
+// 958x971 gauge. Nose picture height stays 280 px from y=0 so the default GS
+// font sample rect still sees camera pixels (not layout chrome). Bottom panes
+// are equal 360 px squares. The T fills nose-bottom to square-top. Extra black
+// above the stamped block on the ND comes from camera_padding top, which moves
+// the whole page down without shortening the nose picture. L/R padding stay 0.
 inline constexpr unsigned Pmdg777NosePictureHeight = 280;
 inline constexpr unsigned Pmdg777BottomGap = 48;
 inline constexpr unsigned Pmdg777BottomPane = (768 - Pmdg777BottomGap) / 2;
-inline constexpr unsigned Pmdg777DividerThickness = (Pmdg777BottomGap * 4 + 2) / 5;
 inline constexpr unsigned Pmdg777TailTop = 763 - Pmdg777BottomPane;
-inline constexpr unsigned Pmdg777TopBand =
-    Pmdg777TailTop - Pmdg777DividerThickness - Pmdg777NosePictureHeight;
-inline constexpr unsigned Pmdg777NoseBottom = Pmdg777TopBand + Pmdg777NosePictureHeight;
-inline constexpr unsigned Pmdg777DividerBottom = Pmdg777NoseBottom + Pmdg777DividerThickness;
+inline constexpr unsigned Pmdg777DividerTop = Pmdg777NosePictureHeight;
+inline constexpr unsigned Pmdg777DividerBottom = Pmdg777TailTop;
+inline constexpr unsigned Pmdg777TopPadding = 85;
 static_assert(Pmdg777BottomPane == 360);
-static_assert(Pmdg777TopBand == 85);
-static_assert(Pmdg777NoseBottom == 365);
-static_assert(Pmdg777DividerBottom == Pmdg777TailTop);
+static_assert(Pmdg777TailTop == 403);
+static_assert(Pmdg777DividerBottom - Pmdg777DividerTop == 123);
 inline constexpr Composition Pmdg777Composition = [] {
   Composition c;
-  // nose_height is the bottom edge of the nose picture (picture height stays 280).
-  c.nose_height = static_cast<float>(Pmdg777NoseBottom);
-  c.divider_top = static_cast<float>(Pmdg777NoseBottom);
+  c.nose_height = static_cast<float>(Pmdg777NosePictureHeight);
+  c.divider_top = static_cast<float>(Pmdg777DividerTop);
   c.divider_bottom = static_cast<float>(Pmdg777DividerBottom);
   c.tail_top = static_cast<float>(Pmdg777TailTop);
   c.split_bottom = 1;
@@ -267,8 +264,9 @@ inline constexpr AircraftProfile Pmdg777 = [] {
   p.display_texture = Pmdg777Texture;
   p.reference_guides = false;
   p.ground_speed = false;
-  // Symmetrical top/bottom frame around the camera block; L/R stay 0.
-  p.camera_padding = {0, 40, 0, 40};
+  // Larger top ND inset moves the stamped page down; bottom inset stays 0 so the
+  // square panes sit on the gauge floor. L/R stay 0.
+  p.camera_padding = {0, Pmdg777TopPadding, 0, 0};
   return p;
 }();
 inline constexpr std::array<const AircraftProfile*, 5> Catalog{&A380, &A359, &A35K, &IniA380, &Pmdg777};

@@ -677,11 +677,6 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
     if (SplitBottom != 0) return split_bottom_t();
     return float4(0, 0, 0, 1);
   }
-  // Split-bottom nose picture height stays 280 px. NoseHeight is the bottom edge,
-  // so any band above it is black without shortening the picture.
-  float nose_top = 0;
-  if (SplitBottom != 0) nose_top = max(NoseHeight - 280, 0);
-  if (SplitBottom != 0 && position.y < nose_top) return float4(0, 0, 0, 1);
   if (SplitBottom != 0 && position.y >= TailTop) {
     float pane = (768 - BottomGap) * 0.5;
     if (position.x >= pane && position.x < pane + BottomGap) return split_bottom_t();
@@ -715,8 +710,8 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
     // Visible black edge under the nose picture before the T (2 px was lost on-ND).
     const float nose_border = 10;
     if (SplitBottom != 0 && position.y >= NoseHeight - nose_border) return float4(0, 0, 0, 1);
-    float nose_h = SplitBottom != 0 ? max(NoseHeight - nose_top - nose_border, 1) : NoseHeight;
-    float2 uv = float2(position.x / 768, (position.y - nose_top) / nose_h);
+    float nose_h = SplitBottom != 0 ? max(NoseHeight - nose_border, 1) : NoseHeight;
+    float2 uv = float2(position.x / 768, position.y / nose_h);
     return float4(display_rgb(Nose.SampleLevel(LinearClamp, uv, 0).rgb, 0), 1);
   }
   if (position.y < TailTop) return float4(0, 0, 0, 1);
