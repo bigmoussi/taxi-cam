@@ -673,8 +673,13 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
     if (all(speed_position >= 0) && all(speed_position < ground_speed_extent())) return ground_speed_pixel(speed_position);
   }
   if (position.y >= DividerTop && position.y < DividerBottom) {
-    // Split-bottom (777) T uses the reference grey; other aircraft keep black.
-    if (SplitBottom != 0) return split_bottom_t();
+    if (SplitBottom != 0) {
+      // Horizontal T bar: same 10 px black as the other edges, only at the
+      // left and right ends — not a black strip along the whole bar.
+      const float edge = 10;
+      if (position.x < edge || position.x >= 768.0 - edge) return float4(0, 0, 0, 1);
+      return split_bottom_t();
+    }
     return float4(0, 0, 0, 1);
   }
   if (SplitBottom != 0 && position.y >= TailTop) {
@@ -683,27 +688,27 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
     float pane_h = pane;
     if (position.y >= TailTop + pane_h) return float4(0, 0, 0, 1);
     if (position.x >= pane && position.x < pane + BottomGap) return split_bottom_t();
-    // Black picture frame: outer edge is the rounded rect (24 px). The border
-    // ring is concentric so the radius sits on the black, not a hard box
-    // around a rounded picture. Left pane top-right / right pane top-left are
-    // the T-junction corners; the other three corners match the same frame.
+    // Black frame on top + sides only (no bottom border). One 24 px round:
+    // left pane top-right, right pane top-left. Other three corners stay square.
     const float pane_border = 10;
     const float radius = 24;
     const float inner_radius = max(radius - pane_border, 0);
-    float local_x = position.x < pane ? position.x : position.x - pane - BottomGap;
+    const bool left_pane = position.x < pane;
+    float local_x = left_pane ? position.x : position.x - pane - BottomGap;
     float local_y = position.y - TailTop;
     float2 local = float2(local_x, local_y);
     float2 outer_min = float2(0, 0);
     float2 outer_max = float2(pane, pane_h);
+    // No bottom inset: picture meets the lower edge of the square.
     float2 inner_min = float2(pane_border, pane_border);
-    float2 inner_max = float2(pane - pane_border, pane_h - pane_border);
-    float4 radii = float4(radius, radius, radius, radius);
-    float4 inner_radii = float4(inner_radius, inner_radius, inner_radius, inner_radius);
+    float2 inner_max = float2(pane - pane_border, pane_h);
+    // radii: TR, BR, BL, TL
+    float4 radii = left_pane ? float4(radius, 0, 0, 0) : float4(0, 0, 0, radius);
+    float4 inner_radii = left_pane ? float4(inner_radius, 0, 0, 0) : float4(0, 0, 0, inner_radius);
     float d_outer = sd_round_rect(local, outer_min, outer_max, radii);
     if (d_outer > 0) {
-      // Outside the rounded frame: T grey toward the gap, black on the outer sides.
-      bool toward_gap = position.x < pane ? local_x > pane * 0.5 : local_x < pane * 0.5;
-      return toward_gap ? split_bottom_t() : float4(0, 0, 0, 1);
+      // Only the T-junction round can sit outside the outer shape → T grey.
+      return split_bottom_t();
     }
     if (sd_round_rect(local, inner_min, inner_max, inner_radii) > 0) return float4(0, 0, 0, 1);
   }
@@ -731,7 +736,7 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
     float local_x = position.x < pane ? position.x : position.x - pane - BottomGap;
     float local_y = position.y - TailTop;
     float2 content_min = float2(pane_border, pane_border);
-    float2 content_max = float2(pane - pane_border, pane_h - pane_border);
+    float2 content_max = float2(pane - pane_border, pane_h);
     float2 uv = float2((local_x - content_min.x) / (content_max.x - content_min.x),
                        (local_y - content_min.y) / (content_max.y - content_min.y));
     if (position.x < pane)
