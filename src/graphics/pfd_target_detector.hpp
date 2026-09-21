@@ -282,7 +282,8 @@ class PfdTargetDetector {
 
   // One destination texture. observe() already ordered matches by resource id,
   // which is the routing dropdown order. The last entry is the navigation
-  // display for this profile; the first entry is not. Side 1 stays empty.
+  // display for this profile; the first entry is not. The confirmed pair is
+  // {id, 0}; routing copies that id onto both inboard rectangles.
   // A changed last id starts a new baseline. Draw count does not rank them.
   const PfdTargetDetection& observe_single_display(std::size_t count, std::uint64_t now_ms) noexcept {
     if (count == 0) {

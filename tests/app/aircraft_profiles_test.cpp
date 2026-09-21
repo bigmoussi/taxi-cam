@@ -361,14 +361,23 @@ int main() {
     assert((profile->id == profiles::Pmdg777.id) != profile->reference_guides);
     assert((profile->id == profiles::Pmdg777.id) == (profile->display_texture[0] != '\0'));
     if (profile->pfd_detection == profiles::PfdDetectionPolicy::single_display) {
-      const auto inboard = profiles::display_rect(*profile, 0);
-      const auto unused = profiles::display_rect(*profile, 1);
-      assert(unused.left == 0 && unused.right == 0 && unused.top == 0 && unused.bottom == 0);
+      const auto left = profiles::display_rect(*profile, 0);
+      const auto right = profiles::display_rect(*profile, 1);
       assert(profile->width == 2048 && profile->height == 2048 && profile->mips == 0);
-      assert(inboard.left == 0 && inboard.top == 0 && inboard.right == profile->width && inboard.bottom == profile->height);
-      const auto content = profiles::display_content_rect(*profile, 0);
-      assert(content.left == inboard.left + 16 && content.top == inboard.top + 12 && content.right + 16 == inboard.right &&
-             content.bottom == inboard.bottom);
+      assert(left.left == profiles::Pmdg777LeftNdX && left.top == profiles::Pmdg777LeftNdY);
+      assert(left.right == profiles::Pmdg777LeftNdX + profiles::Pmdg777NdWidth &&
+             left.bottom == profiles::Pmdg777LeftNdY + profiles::Pmdg777NdHeight);
+      assert(right.left == profiles::Pmdg777RightNdX && right.top == profiles::Pmdg777RightNdY);
+      assert(right.right == profiles::Pmdg777RightNdX + profiles::Pmdg777NdWidth &&
+             right.bottom == profiles::Pmdg777RightNdY + profiles::Pmdg777NdHeight);
+      assert(left.right <= profile->width && right.bottom <= profile->height);
+      for (unsigned side = 0; side < 2; ++side) {
+        const auto outer = profiles::display_rect(*profile, side);
+        const auto content = profiles::display_content_rect(*profile, side);
+        assert(content.left == outer.left + 16 && content.top == outer.top + 12 && content.right + 16 == outer.right &&
+               content.bottom == outer.bottom);
+        assert(outer.right - outer.left == 958 && outer.bottom - outer.top == 971);
+      }
       assert(profile->camera_panes[0][0] == 736 && profile->camera_panes[0][1] == 251);
       assert(profile->camera_panes[1][0] == 736 && profile->camera_panes[1][1] == 496);
       assert(profile->composition.split_bottom == 1.f && profile->composition.bottom_gap == 32.f);

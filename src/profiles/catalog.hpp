@@ -171,22 +171,31 @@ inline constexpr AircraftProfile IniA380 = [] {
   p.pfd_refresh_hz = 16;
   return p;
 }();
-// Scanned on the open 777-200ER RR. Both inboard gauges
-// draw one shared texture. There is no separate taxi-camera texture, and the
-// scan could not tell which inboard was showing the camera page.
+// Scanned on the open 777-200ER RR. Both inboard gauges draw one shared texture.
+// There is no separate taxi-camera texture.
 inline constexpr const char* Pmdg777Texture = "DUS";
 inline constexpr const char* Pmdg777LeftGauge = "DU_LeftInboard";
 inline constexpr const char* Pmdg777RightGauge = "DU_RightInboard";
 inline constexpr unsigned Pmdg777DisplayWidth = 2048;
 inline constexpr unsigned Pmdg777DisplayHeight = 2048;
+// panel.cfg htmlgauge x, y, width, height on DUS. The same values are in the
+// 777-200ER, 777-300ER, and 777F files. The navigation display is the whole
+// inboard gauge, so these rectangles are not cropped further.
+inline constexpr unsigned Pmdg777LeftNdX = 1058;
+inline constexpr unsigned Pmdg777LeftNdY = 33;
+inline constexpr unsigned Pmdg777RightNdX = 30;
+inline constexpr unsigned Pmdg777RightNdY = 1058;
+inline constexpr unsigned Pmdg777NdWidth = 958;
+inline constexpr unsigned Pmdg777NdHeight = 971;
 // Mip count and DXGI format were not in the scan.
 inline constexpr unsigned Pmdg777DisplayMips = 0;
 inline constexpr std::array<unsigned, 6> Pmdg777Formats{};
 // One profile for the 777-200ER, 777-300ER and 777F when they share this
 // cockpit. AircraftLoaded selects the airplane folder. ATC TYPE is the Boeing
 // brand string and is not required. Mounts are unverified starting points.
-// The navigation display is one destination texture. Taxi Cam still owns the nose
-// and tail viewpoints and splits the tail image in the working image.
+// Both navigation displays are rectangles on one destination texture. Taxi Cam
+// still owns the nose and tail viewpoints and splits the tail image in the
+// working image. Pixels outside the two inboard gauges stay untouched.
 inline constexpr Composition Pmdg777Composition = [] {
   Composition c;
   c.split_bottom = 1;
@@ -206,7 +215,8 @@ inline constexpr AircraftProfile Pmdg777 = [] {
                     Pmdg777DisplayMips,
                     TaxiControl::manual_only,
                     {"", "", ""},
-                    {{{0, 0, Pmdg777DisplayWidth, Pmdg777DisplayHeight}, {0, 0, 0, 0}}},
+                    {{{Pmdg777LeftNdX, Pmdg777LeftNdY, Pmdg777LeftNdX + Pmdg777NdWidth, Pmdg777LeftNdY + Pmdg777NdHeight},
+                      {Pmdg777RightNdX, Pmdg777RightNdY, Pmdg777RightNdX + Pmdg777NdWidth, Pmdg777RightNdY + Pmdg777NdHeight}}},
                     {{{736, 251}, {736, 496}}},
                     true,
                     60,

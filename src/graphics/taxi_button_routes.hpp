@@ -100,18 +100,19 @@ class TaxiButtonRoutes {
     return true;
   }
 
-  // Single-display profiles confirm {id, 0}. Pair adoption still requires both
-  // sides, so this path never invents a right PFD.
+  // Single-display profiles confirm one texture. Both navigation-display
+  // rectangles live on it, so both sides receive that id. Pair adoption still
+  // rejects a repeated id and is not used here.
   bool adopt_single(std::uint64_t id) noexcept {
     if (!id)
       return false;
     if (!assigned_ && !targets[0] && !targets[1]) {
-      targets = {id, 0};
-      detected_targets_ = {id, 0};
+      targets = {id, id};
+      detected_targets_ = {id, id};
       assigned_ = true;
       return true;
     }
-    return targets[0] == id && targets[1] == 0;
+    return targets[0] == id && targets[1] == id;
   }
 
   // A complete allocation group may replace stale automatic ranks, but never

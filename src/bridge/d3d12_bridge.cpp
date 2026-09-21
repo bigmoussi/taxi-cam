@@ -1504,10 +1504,13 @@ UINT selected_legacy_targets(void*, ID3D12GraphicsCommandList* native, std::uint
   UINT count = 0;
   for (unsigned side = 0; side < 2; ++side) {
     const auto& item = r.selected_resources[side];
-    if (((r.active_mask | r.calibration_mask) & (1u << side)) && item && item->alive &&
-        profiles::matches_display(*r.profile, static_cast<UINT>(item->desc.Width), item->desc.Height, item->desc.MipLevels,
-                                  static_cast<UINT>(item->desc.Format)))
-      targets[count++] = item->native;
+    if (!(((r.active_mask | r.calibration_mask) & (1u << side)) && item && item->alive &&
+          profiles::matches_display(*r.profile, static_cast<UINT>(item->desc.Width), item->desc.Height, item->desc.MipLevels,
+                                    static_cast<UINT>(item->desc.Format))))
+      continue;
+    if (count && targets[0] == item->native)
+      continue;  // Both navigation displays are regions of one texture.
+    targets[count++] = item->native;
   }
   return count;
 }
@@ -1524,16 +1527,21 @@ void copy_pending_pfd(ID3D12GraphicsCommandList* native,
     return;
   auto& r = registry();
   View pending;
-  for (auto& view : list->pending_pfds)
-    if (view.resource && view.resource->native == target) {
-      pending = view;
-      list->pending_rt[static_cast<unsigned>(&view - list->pending_pfds.data())] = false;
-      view = {};
-      break;
+  for (unsigned side = 0; side < list->pending_pfds.size(); ++side)
+    if (list->pending_pfds[side].resource && list->pending_pfds[side].resource->native == target) {
+      if (!pending.resource)
+        pending = list->pending_pfds[side];
+      list->pending_rt[side] = false;
+      list->pending_pfds[side] = {};
     }
   View view;
   bool selected = false;
-  profiles::DisplayRect area{}, content{};
+  struct PlacedRect {
+    profiles::DisplayRect area{};
+    profiles::DisplayRect content{};
+  };
+  std::array<PlacedRect, 2> placed{};
+  unsigned placed_count = 0;
   {
     const RegistryLock lock(r, wait_budget::close_us, ContentionSite::registry_close);
     if (!lock) {
@@ -1542,16 +1550,18 @@ void copy_pending_pfd(ID3D12GraphicsCommandList* native,
     }
     refresh_selected(r);
     std::shared_ptr<Resource> item;
-    unsigned side = 0;
     for (unsigned i = 0; i < 2; ++i)
       if (((r.active_mask | r.calibration_mask) & (1u << i)) && r.selected_resources[i] && r.selected_resources[i]->alive &&
           r.selected_resources[i]->native == target) {
-        item = r.selected_resources[i];
-        side = i;
-        break;
+        if (!item)
+          item = r.selected_resources[i];
+        if (r.selected_resources[i] != item)
+          continue;
+        placed[placed_count++] = {profiles::display_rect(*r.profile, i), profiles::display_content_rect(*r.profile, i)};
       }
-    if (!item || !profiles::matches_display(*r.profile, static_cast<UINT>(item->desc.Width), item->desc.Height, item->desc.MipLevels,
-                                            static_cast<UINT>(item->desc.Format)))
+    if (!item || !placed_count ||
+        !profiles::matches_display(*r.profile, static_cast<UINT>(item->desc.Width), item->desc.Height, item->desc.MipLevels,
+                                   static_cast<UINT>(item->desc.Format)))
       return;
     ++r.selected_rt_callbacks;
     const auto current = r.rtvs.find(pending.rtv);
@@ -1586,24 +1596,27 @@ void copy_pending_pfd(ID3D12GraphicsCommandList* native,
       }
     }
     ++r.selected_view_resolved;
-    area = profiles::display_rect(*r.profile, side);
-    content = profiles::display_content_rect(*r.profile, side);
     selected = r.routes.matches(item->id, r.active_mask);
   }
   // Calibration is delivered only from the retained descriptor snapshot in stage_pfd.
-  if (!selected)
+  if (!selected || !view.resource)
     return;
   const boundary::ScopedBypass bypass;
-  const D3D12_RECT destination{static_cast<LONG>(area.left), static_cast<LONG>(area.top), static_cast<LONG>(area.right),
-                               static_cast<LONG>(area.bottom)};
-  const D3D12_RECT inner{static_cast<LONG>(content.left), static_cast<LONG>(content.top), static_cast<LONG>(content.right),
-                         static_cast<LONG>(content.bottom)};
-  ++r.copy_attempts;
-  if (!runtime::copy_patch(native, r.key, view.resource->native, view.resource->desc, output_format(view), destination, inner, enhanced)) {
-    ++r.copy_rejected;
-    r.copy_error = "runtime_copy_rejected";
-  } else
-    r.copy_error = "copied";
+  for (unsigned i = 0; i < placed_count; ++i) {
+    const auto& area = placed[i].area;
+    const auto& content = placed[i].content;
+    const D3D12_RECT destination{static_cast<LONG>(area.left), static_cast<LONG>(area.top), static_cast<LONG>(area.right),
+                                 static_cast<LONG>(area.bottom)};
+    const D3D12_RECT inner{static_cast<LONG>(content.left), static_cast<LONG>(content.top), static_cast<LONG>(content.right),
+                           static_cast<LONG>(content.bottom)};
+    ++r.copy_attempts;
+    if (!runtime::copy_patch(native, r.key, view.resource->native, view.resource->desc, output_format(view), destination, inner,
+                             enhanced)) {
+      ++r.copy_rejected;
+      r.copy_error = "runtime_copy_rejected";
+    } else
+      r.copy_error = "copied";
+  }
 }
 void pass_targets(void*,
                   ID3D12GraphicsCommandList*,

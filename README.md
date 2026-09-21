@@ -27,7 +27,7 @@ If you find Taxi Cam useful, please consider donating.
 - **iniBuilds A350-900**, including **ULR**
 - **iniBuilds A350-1000**
 - **iniBuilds A380** — use keyboard shortcuts or manual previews because its TAXI buttons are marked INOP.
-- **PMDG 777** (777-200ER, 777-300ER and 777F) — the navigation display, on the shared `DUS` texture (`DU_LeftInboard` and `DU_RightInboard`). Use the same Ctrl + Shift + L / R / B shortcuts as the other aircraft. There is no cockpit CAM button, and alignment markers are not required.
+- **PMDG 777** (777-200ER, 777-300ER and 777F) — the navigation displays on the shared `DUS` texture, inside `DU_LeftInboard` (1058, 33, 958, 971) and `DU_RightInboard` (30, 1058, 958, 971). Use the same Ctrl + Shift + L / R / B shortcuts as the other aircraft. There is no cockpit CAM button, and alignment markers are not required.
 
 ## Installation
 
