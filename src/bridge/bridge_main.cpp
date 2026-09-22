@@ -561,12 +561,14 @@ DWORD run_impl() {
     const bool manual_only = profile && profile->taxi_control == profiles::TaxiControl::manual_only;
     const auto buttons = native_camera::get_taxi_buttons();
     const auto cutoff = native_camera::get_taxi_cutoff();
-    const auto desired = intent.observe(now, buttons.valid, buttons.left_on, buttons.right_on);
+    const auto desired = intent.observe(now, buttons.valid, buttons.mask());
+    const unsigned sides = profile ? profiles::side_mask(*profile) : PilotDisplaySides;
     const unsigned mask = connected && session_settings && session.ready && settings.enabled && aircraft_matches && win::graphics_ready() &&
                                   !cutoff.inhibited && !degraded
                               ? (settings.follow_taxi && !manual_only ? desired.buttons
                                  : session_settings                   ? settings.manual_mask
-                                                                      : 0)
+                                                                      : 0) &
+                                    sides
                               : 0;
     const bool test_scene = connected && session_settings && session.ready && settings.enabled && aircraft_matches && settings.scene_test &&
                             !cutoff.inhibited && !degraded;
@@ -574,7 +576,10 @@ DWORD run_impl() {
     if (!mask && !test_scene && !prewarm.active())
       failed = false;
     const auto targets = win::target_ids();
-    const unsigned assigned = (targets[0] ? 1u : 0u) | (targets[1] ? 2u : 0u);
+    unsigned assigned = 0;
+    for (unsigned side = 0; side < targets.size(); ++side)
+      assigned |= targets[side] ? 1u << side : 0u;
+    assigned &= sides;
     const auto speed = native_camera::get_ground_speed();
     const auto setup_current = [&]() {
       const auto epoch = native_camera::get_aircraft_session_epoch();
@@ -674,7 +679,7 @@ DWORD run_impl() {
     }
     if (!startup.observed && (mask || test_scene)) {
       startup.observed = true;
-      startup.intent_mask = mask & 3;
+      startup.intent_mask = mask & AllDisplaySides;
       startup.intent_ms = intent_observed_ms;
       startup.baseline_stamps = scene_runtime::snapshot(key).stamps;
       log_startup(status, startup, "accepted_intent");
@@ -837,7 +842,7 @@ DWORD run_impl() {
     const auto taxi_request_status = native_camera::get_taxi_button_request_status();
     const auto command_buttons = native_camera::get_taxi_buttons();
     status.taxi_buttons_valid = command_buttons.valid;
-    status.taxi_buttons_mask = (command_buttons.left_on ? 1u : 0u) | (command_buttons.right_on ? 2u : 0u);
+    status.taxi_buttons_mask = command_buttons.mask();
     status.taxi_buttons_sample_ms = command_buttons.sample_ms;
     status.taxi_request_seen = taxi_request_status.serial;
     status.taxi_request_retired = taxi_request_status.pending_mask ? 0 : taxi_request_status.serial;

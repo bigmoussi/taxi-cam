@@ -12,7 +12,8 @@
 #include "version.hpp"
 
 namespace taxi_camera::standalone {
-constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 13;
+// Protocol 14: side masks gained bit 2 (A340-600 lower ECAM).
+constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 14;
 constexpr const wchar_t* Version = TAXI_CAM_VERSION_WIDE;
 struct Settings {
   std::uint32_t enabled = 1, camera_rate = kDefaultCameraRate, automatic_exposure = 1;
@@ -89,11 +90,14 @@ inline bool valid_settings(const Settings& s) noexcept {
     for (const float c : color)
       if (!std::isfinite(c) || c < 0 || c > 1)
         return false;
-  if (s.auto_profile > 1 || s.notifications > 1 || !profiles::find(s.profile) || s.follow_taxi > 1 || s.auto_detect > 1 ||
-      s.single_camera > 1 || s.scene_test > 1 || s.manual_mask > 3 || s.calibration_mask > 3 || s.calibration_budget < 64 ||
-      s.calibration_budget > 16384)
+  const auto* profile = profiles::find(s.profile);
+  if (s.auto_profile > 1 || s.notifications > 1 || !profile || s.follow_taxi > 1 || s.auto_detect > 1 || s.single_camera > 1 ||
+      s.scene_test > 1 || s.calibration_budget < 64 || s.calibration_budget > 16384)
     return false;
-  if (s.taxi_selected_mask > 3 || (s.taxi_desired_mask & ~s.taxi_selected_mask) || (!s.taxi_request && s.taxi_selected_mask))
+  const auto sides = profiles::side_mask(*profile);
+  if ((s.manual_mask & ~sides) || (s.calibration_mask & ~sides))
+    return false;
+  if ((s.taxi_selected_mask & ~sides) || (s.taxi_desired_mask & ~s.taxi_selected_mask) || (!s.taxi_request && s.taxi_selected_mask))
     return false;
   for (const auto& m : s.mounts) {
     for (const double v : m)

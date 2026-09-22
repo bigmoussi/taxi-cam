@@ -4,13 +4,27 @@
 #include "protocol.hpp"
 
 namespace taxi_camera::standalone {
+// Camera actions: 0 left, 1 right, 2 both pilot displays, 3 lower ECAM (SD).
+// Both never changes the SD; the SD action needs a profile with that side.
+enum CameraAction : unsigned { CameraLeft, CameraRight, CameraBoth, CameraSd, CameraActions };
+// The sides an action toggles, or 0 when the selected profile lacks them.
+inline unsigned camera_action_sides(const profiles::AircraftProfile& profile, unsigned action) noexcept {
+  const unsigned affected = action == CameraBoth ? PilotDisplaySides : action < CameraActions ? 1u << (action == CameraSd ? 2 : action) : 0u;
+  return (affected & profiles::side_mask(profile)) == affected ? affected : 0u;
+}
+// All affected sides on turns them off; otherwise they all turn on.
+inline unsigned toggle_sides(unsigned mask, unsigned affected) noexcept {
+  return (mask & affected) == affected ? mask & ~affected : mask | affected;
+}
 // Only changes session-scoped intent. The bridge still owns service, aircraft
 // identity, flight-session, telemetry and speed-cutoff checks.
 inline void toggle_manual_camera(Settings& settings, unsigned action, std::uint32_t automatic_mask = 0) noexcept {
-  if (action > 2)
+  const auto* profile = profiles::find(settings.profile);
+  const auto affected = profile ? camera_action_sides(*profile, action) : 0u;
+  if (!affected)
     return;
-  const auto mask = (settings.follow_taxi ? automatic_mask : settings.manual_mask) & 3u;
-  settings.manual_mask = action == 2 ? (mask == 3 ? 0u : 3u) : mask ^ (1u << action);
+  const auto mask = (settings.follow_taxi ? automatic_mask : settings.manual_mask) & profiles::side_mask(*profile);
+  settings.manual_mask = toggle_sides(mask, affected);
   settings.follow_taxi = 0;
   settings.calibration_mask = 0;
   settings.scene_test = 0;
@@ -19,7 +33,7 @@ inline void toggle_manual_camera(Settings& settings, unsigned action, std::uint3
 enum class CameraHotkeyResult { manual, aircraft, unavailable };
 inline CameraHotkeyResult request_camera_hotkey(Settings& settings, unsigned action, const Status& status, std::uint64_t now) noexcept {
   const auto* profile = profiles::find(settings.profile);
-  if (!profile || action > 2)
+  if (!profile || !camera_action_sides(*profile, action))
     return CameraHotkeyResult::unavailable;
   if (profile->taxi_control == profiles::TaxiControl::manual_only) {
     const auto follow = settings.follow_taxi;
@@ -32,7 +46,8 @@ inline CameraHotkeyResult request_camera_hotkey(Settings& settings, unsigned act
   // of guessing button state from delivered frames.
   if (!settings.enabled || !status.heartbeat || now < status.heartbeat || now - status.heartbeat > 3000 ||
       status.aircraft_session_epoch != settings.aircraft_session_epoch || status.active_profile != settings.profile ||
-      status.detected_profile != settings.profile || !status.taxi_buttons_valid || status.taxi_buttons_mask > 3 ||
+      status.detected_profile != settings.profile || !status.taxi_buttons_valid ||
+      (status.taxi_buttons_mask & ~profiles::side_mask(*profile)) ||
       !status.taxi_buttons_sample_ms || now < status.taxi_buttons_sample_ms || now - status.taxi_buttons_sample_ms > 500 ||
       std::max(settings.taxi_request, status.taxi_request_seen) == std::numeric_limits<std::uint64_t>::max())
     return CameraHotkeyResult::unavailable;
@@ -44,8 +59,8 @@ inline CameraHotkeyResult request_camera_hotkey(Settings& settings, unsigned act
   auto mask = settings.follow_taxi ? status.taxi_buttons_mask : settings.manual_mask;
   if (settings.follow_taxi)
     mask = (mask & ~pending) | (settings.taxi_desired_mask & pending);
-  const auto affected = action == 2 ? 3u : 1u << action;
-  const auto target = action == 2 ? (mask == 3 ? 0u : 3u) : mask ^ affected;
+  const auto affected = camera_action_sides(*profile, action);
+  const auto target = toggle_sides(mask, affected);
   settings.taxi_desired_mask = (settings.taxi_desired_mask & pending & ~affected) | (target & affected);
   settings.taxi_selected_mask = pending | affected;
   settings.taxi_request = std::max(settings.taxi_request, status.taxi_request_seen) + 1;

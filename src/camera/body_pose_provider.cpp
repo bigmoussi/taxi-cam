@@ -62,7 +62,7 @@ struct State {
   bool on_ground = false;
   std::uint64_t on_ground_ms = 0;
   const char* on_ground_error = "not_initialized";
-  bool taxi_left = false, taxi_right = false;
+  bool taxi_left = false, taxi_right = false, taxi_sd = false;
   AircraftIdentityCache identity;
   AircraftSessionLifecycle aircraft_session;
   bool flow_subscribed = false;
@@ -108,7 +108,7 @@ void reset_session_locked() noexcept {
   state.on_ground_ms = 0;
   state.on_ground_error = "aircraft_session_changed";
   state.timing.last_sample_ms = state.timing.last_interval_ms = 0;
-  state.taxi_left = state.taxi_right = false;
+  state.taxi_left = state.taxi_right = state.taxi_sd = false;
   state.speed_cutoff = {};
   state.button_commands.reset_session();
   state.cutoff_status = "below_speed_limit";
@@ -304,22 +304,27 @@ bool accept_aircraft_packet(const void* raw, DWORD bytes, std::uint64_t sample_m
   ReleaseSRWLockExclusive(&state.lock);
   return true;
 }
-bool accept_taxi_packet(const void* raw, DWORD bytes, std::uint64_t sample_ms) noexcept {
+bool accept_taxi_packet(const void* raw, DWORD bytes, std::uint64_t sample_ms, unsigned sides) noexcept {
   // Definition3 is deliberately separate from the existing seven-field body
   // packet. USER(0) is a request alias, not the returned aircraft object ID.
-  if (!raw || bytes != 56 || !sample_ms)
+  // One FLOAT64 latch per display side: 56 bytes for two, 64 for three.
+  const DWORD expected = 40 + 8 * sides;
+  if (!raw || sides < 2 || sides > MaxDisplaySides || bytes != expected || !sample_ms)
     return false;
   std::array<DWORD, 10> header{};
   std::memcpy(header.data(), raw, sizeof(header));
-  if (header[0] != 56 || header[2] != 8 || header[3] != 3 || header[5] != 3 || header[6] != 0 || header[9] != 2)
+  if (header[0] != expected || header[2] != 8 || header[3] != 3 || header[5] != 3 || header[6] != 0 || header[9] != sides)
     return false;
-  std::array<double, 2> values{};
-  std::memcpy(values.data(), static_cast<const unsigned char*>(raw) + 40, sizeof(values));
-  const bool valid = (values[0] == 0 || values[0] == 1) && (values[1] == 0 || values[1] == 1);
+  std::array<double, MaxDisplaySides> values{};
+  std::memcpy(values.data(), static_cast<const unsigned char*>(raw) + 40, 8 * sides);
+  bool valid = true;
+  for (unsigned side = 0; side < sides; ++side)
+    valid = valid && (values[side] == 0 || values[side] == 1);
   AcquireSRWLockExclusive(&state.lock);
   if (valid) {
     state.taxi_left = values[0] == 1;
     state.taxi_right = values[1] == 1;
+    state.taxi_sd = sides > 2 && values[2] == 1;
     state.taxi_ms = sample_ms;
     state.taxi_error = "";
   } else {
@@ -457,7 +462,7 @@ DWORD WINAPI worker(void*) noexcept {
   // L variables are directly readable through public SimConnect as FLOAT64.
   // https://docs.flightsimulator.com/msfs2024/retail/programming-apis/simconnect/api-reference/events-and-data/simconnect_addtodatadefinition/
   std::array<DWORD, 64> taxi_packets{};
-  std::array<DWORD, 2> taxi_command_packets{};
+  std::array<DWORD, MaxDisplaySides> taxi_command_packets{};
   unsigned taxi_packet_cursor = 0;
   const auto remember_taxi_packet = [&]() {
     DWORD id = 0;
@@ -466,26 +471,26 @@ DWORD WINAPI worker(void*) noexcept {
   };
   const bool manual_only = profile.taxi_control == profiles::TaxiControl::manual_only;
   bool taxi_defined = !manual_only && last_packet != nullptr;
-  for (const auto name : profile.taxi_lvars) {
+  for (unsigned side = 0; side < profile.sides; ++side) {
     if (!taxi_defined)
       break;
-    taxi_defined = SUCCEEDED(define(session, 3, name, "number", 4, 0, 0xffffffffu));
+    taxi_defined = SUCCEEDED(define(session, 3, profile.taxi_lvars[side], "number", 4, 0, 0xffffffffu));
     remember_taxi_packet();
   }
   if (!taxi_defined)
     taxi_failure(manual_only ? "taxi_buttons_unavailable_use_manual_control" : "taxi_definition_unavailable");
-  std::array<bool, 2> taxi_events{};
+  std::array<bool, MaxDisplaySides> taxi_events{};
   // Isolated telemetry readers never control the aircraft. Production sends
   // the aircraft's real input event; its own controller updates the light.
 #if !defined(TAXI_BODY_POSE_PROVIDER_VALIDATION) && !defined(TAXI_BODY_POSE_PROVIDER_EXTERNAL_VALIDATION)
   if (profile.taxi_control == profiles::TaxiControl::push_event && map_event && transmit_event) {
-    for (unsigned side = 0; side < 2; ++side) {
+    for (unsigned side = 0; side < profile.sides; ++side) {
       taxi_events[side] = SUCCEEDED(map_event(session, 10 + side, profile.taxi_events[side]));
       remember_taxi_packet();
     }
   }
   if (profile.taxi_control == profiles::TaxiControl::lvar_off && set_data) {
-    for (unsigned side = 0; side < 2; ++side) {
+    for (unsigned side = 0; side < profile.sides; ++side) {
       // iniBuilds uses this exact latch for TAXI state and its lamp. A separate
       // single-field definition permits idempotent OFF without touching the
       // opposite side or generating a second toggle while awaiting an ACK.
@@ -635,7 +640,7 @@ DWORD WINAPI worker(void*) noexcept {
           if (!accept_lighting_packet(raw, bytes, GetTickCount64()))
             lighting_failure("lighting_packet_layout");
         } else if (bytes >= 40 && (header[3] == 3 || header[5] == 3)) {
-          if (!accept_taxi_packet(raw, bytes, GetTickCount64()))
+          if (!accept_taxi_packet(raw, bytes, GetTickCount64(), profile.sides))
             taxi_failure("taxi_packet_layout");
         } else {
           accept_aircraft_packet(raw, bytes, GetTickCount64());
@@ -680,7 +685,7 @@ DWORD WINAPI worker(void*) noexcept {
         }
         // Keep command correlation independently of the bounded telemetry
         // packet ring; a late rejection must release the right side's ACK wait.
-        for (unsigned side = 0; side < 2; ++side)
+        for (unsigned side = 0; side < profile.sides; ++side)
           if (taxi_command_packets[side] && taxi_command_packets[side] == exception[4]) {
             AcquireSRWLockExclusive(&state.lock);
             state.button_commands.rejected(side);
@@ -700,8 +705,7 @@ DWORD WINAPI worker(void*) noexcept {
     const auto buttons = get_taxi_buttons();
     const auto command_now = GetTickCount64();
     AcquireSRWLockExclusive(&state.lock);
-    const auto commands = state.speed_cutoff.update(command_now, speed.valid, speed.knots, buttons.valid,
-                                                    (buttons.left_on ? 1u : 0u) | (buttons.right_on ? 2u : 0u), buttons.sample_ms,
+    const auto commands = state.speed_cutoff.update(command_now, speed.valid, speed.knots, buttons.valid, buttons.mask(), buttons.sample_ms,
                                                     profile.speed_cutoff_knots, !manual_only);
     state.cutoff_status = state.speed_cutoff.pending()     ? "waiting_for_taxi_off"
                           : state.speed_cutoff.inhibited() ? "ground_speed_above_60_knots"
@@ -709,11 +713,11 @@ DWORD WINAPI worker(void*) noexcept {
     const auto epoch = state.aircraft_session.epoch();
     const auto identity = state.identity.sample(command_now);
     const auto decision = state.button_commands.step(
-        {command_now, epoch, buttons.sample_ms, profile.id, (buttons.left_on ? 1u : 0u) | (buttons.right_on ? 2u : 0u), commands,
+        {command_now, epoch, buttons.sample_ms, profile.id, buttons.mask(), commands,
          readiness_locked(command_now).ready && identity.fresh && identity.detected_profile == profile.id, buttons.valid, speed.valid,
          state.speed_cutoff.inhibited(), !manual_only, speed.knots, profile.speed_cutoff_knots});
     ReleaseSRWLockExclusive(&state.lock);
-    for (unsigned side = 0; side < 2; ++side) {
+    for (unsigned side = 0; side < profile.sides; ++side) {
       if (!(decision.send_mask & (1u << side)))
         continue;
       AcquireSRWLockShared(&state.lock);
@@ -790,6 +794,7 @@ TaxiButtonSample taxi_buttons_locked(std::uint64_t now) noexcept {
     out.valid = true;
     out.left_on = state.taxi_left;
     out.right_on = state.taxi_right;
+    out.sd_on = state.taxi_sd;
     out.error = "";
   } else {
     out.error = out.sample_ms ? "taxi_telemetry_stale" : state.taxi_error;
@@ -832,7 +837,7 @@ bool stop_provider_locked() noexcept {
   state.taxi_error = "not_initialized";
   state.lighting_ms = 0;
   state.lighting_error = "not_initialized";
-  state.taxi_left = state.taxi_right = false;
+  state.taxi_left = state.taxi_right = state.taxi_sd = false;
   state.speed_cutoff = {};
   state.button_commands.reset_session();
   state.cutoff_status = "below_speed_limit";
@@ -1216,8 +1221,8 @@ GroundSpeedSample ground_speed_at(std::uint64_t now_ms) noexcept {
   ReleaseSRWLockShared(&state.lock);
   return out;
 }
-bool accept_taxi_packet(const void* packet, std::uint32_t bytes, std::uint64_t sample_ms) noexcept {
-  return native_camera::accept_taxi_packet(packet, bytes, sample_ms);
+bool accept_taxi_packet(const void* packet, std::uint32_t bytes, std::uint64_t sample_ms, unsigned sides) noexcept {
+  return native_camera::accept_taxi_packet(packet, bytes, sample_ms, sides);
 }
 TaxiButtonSample taxi_buttons_at(std::uint64_t now_ms) noexcept {
   AcquireSRWLockShared(&state.lock);

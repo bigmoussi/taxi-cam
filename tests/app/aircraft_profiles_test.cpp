@@ -402,6 +402,12 @@ int main() {
       assert(std::strcmp(profile->taxi_lvars[1], "L:AB_VC_CAM_FO_SEL") == 0);
       assert(profile->taxi_events[0][0] == '\0' && profile->taxi_events[1][0] == '\0');
       assert(std::strcmp(profile->pfd_labels[0], "CaptND") == 0 && std::strcmp(profile->pfd_labels[1], "CoND") == 0);
+      // CAM SD drives the lower ECAM as a third side: ECAM_LOWER 1529,1230,750,750.
+      assert(profile->sides == 3 && profiles::side_mask(*profile) == 7);
+      assert(std::strcmp(profile->taxi_lvars[2], "L:AB_VC_CAM_SD_SEL") == 0 && std::strcmp(profile->pfd_labels[2], "ECAM_LOWER") == 0);
+      const auto sd = profiles::display_rect(*profile, 2), sd_content = profiles::display_content_rect(*profile, 2);
+      assert(sd.left == 1529 && sd.top == 1230 && sd.right == 2279 && sd.bottom == 1980);
+      assert(sd_content.right - sd_content.left == 718 && sd_content.bottom - sd_content.top == 738);
       // panel.cfg CaptND 769,470,750,750 and CoND 769,1230,750,750.
       const auto left = profiles::display_rect(*profile, 0), right = profiles::display_rect(*profile, 1);
       assert(left.left == 769 && left.top == 470 && left.right == 1519 && left.bottom == 1220);

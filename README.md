@@ -27,7 +27,7 @@ If you find Taxi Cam useful, please consider donating.
 - **iniBuilds A350-1000** — nose and tail cameras on the PFD.
 - **iniBuilds A380** — nose and tail cameras; use keyboard shortcuts or manual previews because its TAXI buttons are marked INOP.
 - **PMDG 777** (777-200ER, 777-300ER and 777F) — three cameras (nose gear, left wing, right wing) on the inboard navigation displays. Split-bottom ND layout; ground-speed overlay off; reference guides disabled. Use Ctrl + Shift + L / R / B. No cockpit CAM button.
-- **Aerosoft A340-600** — nose and tail cameras on the captain and first-officer navigation displays, controlled by the **CAM CAPT** and **CAM F/O** selectors. The aircraft's own built-in taxi-camera page is covered while Taxi Cam draws. Texture identity, framing and guides are not yet verified in the simulator.
+- **Aerosoft A340-600** — nose and tail cameras on the captain and first-officer navigation displays and the lower ECAM, controlled by the **CAM CAPT**, **CAM F/O** and **CAM SD** selectors (or **Ctrl + Shift + D** for the SD). The aircraft's own built-in taxi-camera page is covered while Taxi Cam draws. Texture identity, framing and guides are not yet verified in the simulator.
 
 ## Installation
 
@@ -55,7 +55,7 @@ On the Airbus aircraft, each display first shows a black **PLEASE WAIT** page fo
 
 The cameras switch off above **60 knots**. If a view appears on the wrong display, use **PFD routing** in Settings to correct it.
 
-Keyboard controls work while Taxi Cam is hidden: **Ctrl + Shift + L** toggles the left display, **Ctrl + Shift + R** the right and **Ctrl + Shift + B** both. In **Settings → Overview → Flight-deck control**, select **Keyboard shortcuts…** to configure or disable them. On aircraft with working TAXI buttons, shortcuts also update the cockpit button state and preserve the **TAXI buttons** setting. See [Keyboard controls](docs/keyboard-shortcuts.md) for details.
+Keyboard controls work while Taxi Cam is hidden: **Ctrl + Shift + L** toggles the left display, **Ctrl + Shift + R** the right and **Ctrl + Shift + B** both. On the Aerosoft A340-600, **Ctrl + Shift + D** toggles the lower ECAM (SD). In **Settings → Overview → Flight-deck control**, select **Keyboard shortcuts…** to configure or disable them. On aircraft with working TAXI buttons, shortcuts also update the cockpit button state and preserve the **TAXI buttons** setting. See [Keyboard controls](docs/keyboard-shortcuts.md) for details.
 
 ## Adjusting the views
 

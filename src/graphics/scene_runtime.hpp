@@ -11,7 +11,7 @@ struct QueuePatchConfig {
   std::uint64_t generation = 0;
   std::uint32_t profile = 0;
   unsigned camera_mask = 0, calibration_mask = 0;
-  std::array<DXGI_FORMAT, 2> formats{DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN};
+  std::array<DXGI_FORMAT, MaxDisplaySides> formats{DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN};
   // Camera sides still inside their minimum PLEASE WAIT time. The runtime also
   // shows the page, on profiles that have one, while the image is missing or stale.
   unsigned waiting_mask = 0;
@@ -27,7 +27,7 @@ struct QueuePatchSnapshot {
   std::uint64_t generation = 0;
   std::uint32_t profile = 0;
   unsigned ready_mask = 0;
-  std::array<QueuePatch, 2> sides{};
+  std::array<QueuePatch, MaxDisplaySides> sides{};
 };
 // Metadata only; allocation/recording/submission happens in service(). An empty
 // config disables snapshots immediately without freeing replayable buffers.

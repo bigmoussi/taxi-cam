@@ -2,6 +2,7 @@
 #include <array>
 #include <cstdint>
 #include <string_view>
+#include "../shared/display_sides.hpp"
 namespace taxi_camera::profiles {
 struct DisplayRect {
   unsigned left, top, right, bottom;
@@ -50,16 +51,18 @@ struct AircraftProfile {
   std::uint32_t id;
   std::string_view key;
   const wchar_t* name;
-  std::array<const char*, 2> taxi_lvars;
-  std::array<const char*, 2> taxi_events;
-  std::array<const char*, 2> pfd_labels;
+  // Per display side (see display_sides.hpp). Entries at or beyond `sides`
+  // are unused and may be null.
+  std::array<const char*, MaxDisplaySides> taxi_lvars;
+  std::array<const char*, MaxDisplaySides> taxi_events;
+  std::array<const char*, MaxDisplaySides> pfd_labels;
   // right/up/forward metres, pitch/yaw degrees, lens radians.
   // [0] nose, [1] tail or bottom-left, [2] bottom-right when split_bottom != 0.
   std::array<std::array<double, 6>, 3> mounts;
   unsigned width, height, mips;
   TaxiControl taxi_control = TaxiControl::push_event;
   std::array<std::string_view, 3> aircraft_types{"A388"};
-  std::array<DisplayRect, 2> display_regions{{{0, 0, 768, 763}, {0, 0, 768, 763}}};
+  std::array<DisplayRect, MaxDisplaySides> display_regions{{{0, 0, 768, 763}, {0, 0, 768, 763}}};
   CameraPanes camera_panes{{{736, 251}, {736, 496}, {736, 496}}};
   bool higher_id_left = true;
   double speed_cutoff_knots = 60;
@@ -83,7 +86,13 @@ struct AircraftProfile {
   // Airbus displays show a black PLEASE WAIT page, in the GS colour, while a
   // side starts or its camera image is missing or stale.
   bool waiting_page = true;
+  // Display sides this aircraft drives: captain and first officer, plus the
+  // lower ECAM on the A340-600.
+  unsigned sides = 2;
 };
+inline constexpr unsigned side_mask(const AircraftProfile& p) noexcept {
+  return p.sides >= MaxDisplaySides ? AllDisplaySides : (1u << p.sides) - 1;
+}
 // Minimum PLEASE WAIT time after a side starts drawing, and the camera-image
 // age that brings the page back while the side stays on.
 inline constexpr std::uint64_t WaitingPageMinimumMs = 2000;
@@ -299,22 +308,26 @@ static_assert(Pmdg777300ER.mounts[0] != Pmdg777Mounts[0]);
 static_assert(Pmdg777F.mounts[0] == Pmdg777Mounts[0]);
 // Aerosoft A346 Pro 1.0.1 panel.cfg: every display is an htmlgauge on one
 // 4096x4096 $GAUGES_UNIFIED texture. The TACS selectors show the camera on the
-// captain's ND (CAM CAPT) and the first officer's ND (CAM FO); CAM SD (lower
-// ECAM) is not a Taxi Cam side. Mip count and DXGI format are not scanned yet.
+// captain's ND (CAM CAPT), the first officer's ND (CAM FO) and the lower ECAM
+// (CAM SD), which are sides 0, 1 and 2. Mip count and DXGI format are not
+// scanned yet.
 inline constexpr const char* A346Texture = "$GAUGES_UNIFIED";
 inline constexpr unsigned A346DisplaySize = 4096;
 inline constexpr unsigned A346NdX = 769;
 inline constexpr unsigned A346CaptNdY = 470;
 inline constexpr unsigned A346FoNdY = 1230;
 inline constexpr unsigned A346NdSize = 750;
+// ECAM_LOWER 1529, 1230, 750, 750.
+inline constexpr unsigned A346SdX = 1529;
+inline constexpr unsigned A346SdY = 1230;
 // flight_model.cfg contact points (feet): NLG forward/up 103.51/-21.4; left
 // MLG right/up/forward -17.5/-22.4/-4.46. Mounts keep the A350-900's accepted
 // gear-relative offsets (nose 8.22 m aft and 2.75 m above the NLG contact;
 // tail 27.63 m aft and 15.01 m above the MLG contact) until calibrated live.
 inline constexpr std::array<std::array<double, 6>, 3> A346Mounts{
     {{0, -3.77, 23.33, -15, 0, 0.55}, {0, 8.18, -28.99, -15, 0, 0.62}, {0, 8.18, -28.99, -15, 0, 0.62}}};
-// Both TAXI selectors are two-state XML switches whose setter writes 1/0 to
-// the latch. Same idempotent zero write as the A350 for automatic cutoff.
+// All three TAXI selectors are two-state XML switches whose setter writes 1/0
+// to the latch. Same idempotent zero write as the A350 for automatic cutoff.
 inline constexpr AircraftProfile AerosoftA346 = [] {
   AircraftProfile p{8,
                     "aerosoft-a346",
@@ -330,6 +343,11 @@ inline constexpr AircraftProfile AerosoftA346 = [] {
                     {"", "", ""},
                     {{{A346NdX, A346CaptNdY, A346NdX + A346NdSize, A346CaptNdY + A346NdSize},
                       {A346NdX, A346FoNdY, A346NdX + A346NdSize, A346FoNdY + A346NdSize}}}};
+  p.sides = 3;
+  p.taxi_lvars[2] = "L:AB_VC_CAM_SD_SEL";
+  p.taxi_events[2] = "";
+  p.pfd_labels[2] = "ECAM_LOWER";
+  p.display_regions[2] = {A346SdX, A346SdY, A346SdX + A346NdSize, A346SdY + A346NdSize};
   p.composition = A350Etacs;
   p.formats = {};
   p.package_markers = {"simobjects/airplanes/airbus-a346-pro", "aerosoft-aircraft-a346-pro", ""};
@@ -340,7 +358,7 @@ inline constexpr AircraftProfile AerosoftA346 = [] {
 inline constexpr std::array<const AircraftProfile*, 8> Catalog{&A380, &A359, &A35K, &IniA380, &Pmdg777, &Pmdg777300ER,
                                                               &Pmdg777F, &AerosoftA346};
 inline constexpr DisplayRect display_rect(const AircraftProfile& p, unsigned side) noexcept {
-  return p.display_regions[side < 2 ? side : 0];
+  return p.display_regions[side < p.sides && side < MaxDisplaySides ? side : 0];
 }
 inline constexpr DisplayRect display_content_rect(const AircraftProfile& p, unsigned side) noexcept {
   const auto outer = display_rect(p, side);

@@ -69,6 +69,20 @@ int main() {
     require(!valid_settings(settings), "Parked floor below the schedule minimum is rejected");
     settings.parked_rate = 0;
     require(valid_settings(settings), "Parked floor 0 disables the floor and stays valid");
+    {
+      // Bit 2 is the lower ECAM: valid only for a profile with that side.
+      auto sd = settings;
+      sd.manual_mask = 4;
+      require(!valid_settings(sd), "A two-display profile rejects the SD side");
+      sd.profile = taxi_camera::profiles::AerosoftA346.id;
+      require(valid_settings(sd), "The A340-600 accepts its SD side");
+      sd.manual_mask = 8;
+      require(!valid_settings(sd), "Bits beyond the lower ECAM stay invalid");
+      sd.manual_mask = 0;
+      sd.taxi_request = 1;
+      sd.taxi_selected_mask = sd.taxi_desired_mask = 4;
+      require(valid_settings(sd), "An SD cockpit request is valid on the A340-600");
+    }
     settings.parked_rate = 8;
     settings.notifications = 0;
     require(valid_settings(settings), "Notifications off is valid");
@@ -102,7 +116,7 @@ int main() {
     require(change.started && change.generation == 4, "New companion owner restarts setup despite reused serial");
     change = setup.observe(true, false, control.owner_pid() + 1, 2);
     require(change.stopped, "Disabled connection closes output without waiting for heartbeat timeout");
-    require(ProtocolVersion == 13 && control.settings().nose_dot == settings.nose_dot &&
+    require(ProtocolVersion == 14 && control.settings().nose_dot == settings.nose_dot &&
                 control.settings().tail_upper == settings.tail_upper && control.settings().tail_corner == settings.tail_corner &&
                 control.settings().tail_inner == settings.tail_inner,
             "Protocol11 guide coordinates roundtrip");

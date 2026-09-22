@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include "../shared/display_sides.hpp"
 
 namespace taxi_camera {
 
@@ -18,12 +19,12 @@ class TaxiButtonIntent {
  public:
   static constexpr std::uint64_t gap_grace_ms = 2000;
   void reset() noexcept { *this = {}; }
-  TaxiButtonIntentSnapshot observe(std::uint64_t now, bool valid, bool left, bool right) noexcept {
+  TaxiButtonIntentSnapshot observe(std::uint64_t now, bool valid, unsigned buttons) noexcept {
     if (valid) {
       known_ = true;
       gap_ = false;
       expired_ = false;
-      buttons_ = (left ? 1u : 0u) | (right ? 2u : 0u);
+      buttons_ = buttons & AllDisplaySides;
       return {buttons_, false, false};
     }
     if (!known_)
@@ -49,25 +50,37 @@ class TaxiButtonIntent {
 
 // Session-only resource identities. The caller serializes access and forgets
 // destroyed resources; no simulator state or resource lifetime is owned here.
+// Pair detection routes the captain and first-officer sides; a single-display
+// profile routes one texture to every side.
 class TaxiButtonRoutes {
  public:
-  std::array<std::uint64_t, 2> targets{};
+  using Pair = std::array<std::uint64_t, 2>;
+  using Sides = std::array<std::uint64_t, MaxDisplaySides>;
+  Sides targets{};
 
   // Explicit device/profile session change only. Resource destruction uses forget().
   void reset() noexcept { *this = {}; }
 
   // The caller first validates supplied nonzero resource IDs. Zero requests
   // automatic detection for that side; both zero starts a fresh explicit request.
-  bool select_explicit(const std::array<std::uint64_t, 2>& selection) noexcept {
+  bool select_explicit(const Pair& selection) noexcept {
     if (selection[0] && selection[0] == selection[1])
       return false;
-    targets = selection;
+    targets = {selection[0], selection[1], 0};
     detected_targets_ = {};
     assigned_ = selection[0] != 0 || selection[1] != 0;
     return true;
   }
+  // Single-display profiles: an explicit texture serves every side, because all
+  // display rectangles live on it. Zero requests automatic detection again.
+  bool select_single(std::uint64_t id) noexcept {
+    targets = {id, id, id};
+    detected_targets_ = {};
+    assigned_ = id != 0;
+    return true;
+  }
   bool assign(unsigned side, std::uint64_t id) noexcept {
-    if (side >= targets.size() || id == 0 || targets[1 - side] == id)
+    if (side >= 2 || id == 0 || targets[1 - side] == id)
       return false;
     targets[side] = id;
     detected_targets_[side] = 0;
@@ -78,17 +91,17 @@ class TaxiButtonRoutes {
   // Detector ordering is only an initial-session hint. Once a side is known,
   // retain every surviving identity through replacement. With both lost,
   // semantic labels or an explicit assignment are required to recover sides.
-  bool adopt_detected(const std::array<std::uint64_t, 2>& detected, bool exact_names = false) noexcept {
+  bool adopt_detected(const Pair& detected, bool exact_names = false) noexcept {
     if (!detected[0] || !detected[1] || detected[0] == detected[1])
       return false;
     if (exact_names || (!assigned_ && !targets[0] && !targets[1])) {
-      targets = detected;
-      detected_targets_ = exact_names ? std::array<std::uint64_t, 2>{} : detected;
+      targets = {detected[0], detected[1], 0};
+      detected_targets_ = exact_names ? Sides{} : Sides{detected[0], detected[1], 0};
       assigned_ = true;
       return true;
     }
     if (targets[0] && targets[1])
-      return (targets == detected) || (targets[0] == detected[1] && targets[1] == detected[0]);
+      return (targets[0] == detected[0] && targets[1] == detected[1]) || (targets[0] == detected[1] && targets[1] == detected[0]);
     if (!targets[0] && !targets[1])
       return false;
     const unsigned survivor = targets[0] ? 0u : 1u;
@@ -100,21 +113,21 @@ class TaxiButtonRoutes {
     return true;
   }
 
-  // Single-display profiles confirm one texture. Both navigation-display
-  // rectangles live on it, so both sides receive that id. Pair adoption still
-  // rejects a repeated id and is not used here.
+  // Single-display profiles confirm one texture. Every display rectangle lives
+  // on it, so every side receives that id. Pair adoption still rejects a
+  // repeated id and is not used here.
   // Both-zero after forget() can leave assigned_ set (same sticky ownership as
   // dual-PFD both-lost). Unlike pair adoption, a lone navigation texture may
   // be re-bound automatically: there is no left/right ambiguity to resolve.
   bool adopt_single(std::uint64_t id) noexcept {
     if (!id)
       return false;
-    if (targets[0] == id && targets[1] == id)
+    if (targets[0] == id && targets[1] == id && targets[2] == id)
       return true;
-    if (targets[0] || targets[1])
+    if (targets[0] || targets[1] || targets[2])
       return false;
-    targets = {id, id};
-    detected_targets_ = {id, id};
+    targets = {id, id, id};
+    detected_targets_ = {id, id, id};
     assigned_ = true;
     return true;
   }
@@ -122,19 +135,19 @@ class TaxiButtonRoutes {
   // A complete allocation group may replace stale automatic ranks, but never
   // a surviving explicit/semantic side. Keep the replacement marked detected
   // so a later group change can withdraw or replace it in the same way.
-  bool replace_detected(const std::array<std::uint64_t, 2>& detected) noexcept {
+  bool replace_detected(const Pair& detected) noexcept {
     if (!detected[0] || !detected[1] || detected[0] == detected[1])
       return false;
     for (unsigned side = 0; side < targets.size(); ++side)
       if (targets[side] && targets[side] != detected_targets_[side])
         return false;
-    targets = detected_targets_ = detected;
+    targets = detected_targets_ = Sides{detected[0], detected[1], 0};
     assigned_ = true;
     return true;
   }
 
   void forget(std::uint64_t id) noexcept {
-    assigned_ = assigned_ || targets[0] != 0 || targets[1] != 0;
+    assigned_ = assigned_ || targets[0] != 0 || targets[1] != 0 || targets[2] != 0;
     for (unsigned side = 0; side < targets.size(); ++side)
       if (targets[side] == id) {
         targets[side] = 0;
@@ -152,19 +165,24 @@ class TaxiButtonRoutes {
         forget(id);
   }
 
-  unsigned active_mask(bool valid, bool left, bool right) const noexcept {
-    if (!valid)
-      return 0;
-    return (left && targets[0] != 0 ? 1u : 0u) | (right && targets[1] != 0 ? 2u : 0u);
+  unsigned active_mask(bool valid, unsigned buttons) const noexcept { return valid ? buttons & assigned_mask() : 0; }
+  unsigned assigned_mask() const noexcept {
+    unsigned mask = 0;
+    for (unsigned side = 0; side < targets.size(); ++side)
+      mask |= targets[side] ? 1u << side : 0u;
+    return mask;
   }
 
   bool matches(std::uint64_t id, unsigned mask) const noexcept {
-    return id != 0 && (((mask & 1u) != 0 && targets[0] == id) || ((mask & 2u) != 0 && targets[1] == id));
+    for (unsigned side = 0; id && side < targets.size(); ++side)
+      if ((mask & (1u << side)) && targets[side] == id)
+        return true;
+    return false;
   }
 
  private:
   bool assigned_ = false;
-  std::array<std::uint64_t, 2> detected_targets_{};
+  Sides detected_targets_{};
 };
 
 }  // namespace taxi_camera

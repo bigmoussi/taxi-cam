@@ -1,6 +1,7 @@
 #pragma once
 #include <cmath>
 #include <cstdint>
+#include "display_sides.hpp"
 
 namespace taxi_camera::standalone {
 // Display demand is independent of native ownership. OFF parks the existing
@@ -18,9 +19,9 @@ inline SceneDemand scene_demand(unsigned accepted_mask,
                                 bool scene_requested,
                                 bool failed,
                                 bool prewarm = false) noexcept {
-  accepted_mask &= 3;
+  accepted_mask &= AllDisplaySides;
   const bool wanted = accepted_mask || test_scene || prewarm;
-  return {wanted && !scene_requested && !failed, !wanted || failed, failed ? 0 : accepted_mask & assigned_mask & 3};
+  return {wanted && !scene_requested && !failed, !wanted || failed, failed ? 0 : accepted_mask & assigned_mask & AllDisplaySides};
 }
 // Preconditions are independent of display assignment. Unsupported, airborne,
 // moving, loading or stale sessions cannot perform background rendering.

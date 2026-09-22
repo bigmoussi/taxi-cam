@@ -101,10 +101,10 @@ bool valid_queue_config(const Device& item, const QueuePatchConfig& config) {
   if (!config.generation)
     return config == QueuePatchConfig{};
   const auto* profile = profiles::find(config.profile);
-  if (!profile || config.profile != item.patch_profile || ((config.camera_mask | config.calibration_mask) & ~3u) ||
+  if (!profile || config.profile != item.patch_profile || ((config.camera_mask | config.calibration_mask) & ~profiles::side_mask(*profile)) ||
       (config.waiting_mask & ~config.camera_mask))
     return false;
-  for (unsigned side = 0; side < 2; ++side)
+  for (unsigned side = 0; side < profile->sides; ++side)
     if (((config.camera_mask | config.calibration_mask) & (1u << side)) &&
         (std::find(Formats.begin(), Formats.end(), config.formats[side]) == Formats.end() ||
          !profiles::matches_display(*profile, profile->width, profile->height, profile->mips ? profile->mips : 1,
@@ -120,7 +120,7 @@ bool request_queue_patches(Device& item) {
   if (config.calibration_mask &&
       (!item.calibration_output.initialize(item.native, true) || !item.calibration_output.set_patch_profile(config.profile)))
     return false;
-  for (unsigned side = 0; side < 2; ++side) {
+  for (unsigned side = 0; side < profile->sides; ++side) {
     const auto outer = profiles::display_rect(*profile, side), inner = profiles::display_content_rect(*profile, side);
     const D3D12_RECT local{static_cast<LONG>(inner.left - outer.left), static_cast<LONG>(inner.top - outer.top),
                            static_cast<LONG>(inner.right - outer.left), static_cast<LONG>(inner.bottom - outer.top)};
@@ -146,7 +146,7 @@ void publish_queue_patches(Device& item) {
   snapshot.generation = config.generation;
   snapshot.profile = config.profile;
   const bool camera_ready = current_output(item);
-  for (unsigned side = 0; side < 2; ++side) {
+  for (unsigned side = 0; side < profile->sides; ++side) {
     const bool calibration = (config.calibration_mask & (1u << side)) != 0;
     bool waiting = false;
     if (!calibration) {

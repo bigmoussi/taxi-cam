@@ -189,8 +189,8 @@ void run(bool warp, unsigned fbw_count, bool common, bool mixed_exit, bool first
   require(inventory.size() == count, "Complete pre-hook display inventory recovered through barriers");
   std::sort(inventory.begin(), inventory.end(), [](const auto& a, const auto& b) { return a.id < b.id; });
   const auto ids = win::target_ids();
-  const std::array<std::uint64_t, 2> expected =
-      fbw_count ? std::array{inventory[1].id, inventory[0].id} : std::array{inventory[7].id, inventory[5].id};
+  const std::array<std::uint64_t, taxi_camera::MaxDisplaySides> expected =
+      fbw_count ? std::array{inventory[1].id, inventory[0].id, std::uint64_t{0}} : std::array{inventory[7].id, inventory[5].id, std::uint64_t{0}};
   require(ids == expected, "Existing automatic side mapping works without manual assignment");
   for (unsigned i = 0; i < count; ++i) {
     selected[i] = inventory[i].id == ids[0] || inventory[i].id == ids[1];

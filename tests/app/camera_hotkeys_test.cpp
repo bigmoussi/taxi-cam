@@ -35,14 +35,14 @@ void shortcut_command(HWND editor, int id) {
   shortcut_dialog(editor, WM_COMMAND, MAKEWPARAM(id, BN_CLICKED), 0);
 }
   struct FakeRegistration {
-  inline static std::array<bool, 3> active{};
+  inline static std::array<bool, 4> active{};
   inline static unsigned adds{}, removes{};
   inline static int blocked = -1;
   static BOOL WINAPI add(HWND, int id, UINT modifiers, UINT) {
     ++adds;
     require((modifiers & MOD_NOREPEAT) != 0, "Every actual registration suppresses held-key repeats");
     const int i = id - win::CameraHotkeyFirstId;
-    require(i >= 0 && i < 3 && !active[i], "Registration owns unique action IDs and releases before reconfiguration");
+    require(i >= 0 && i < 4 && !active[i], "Registration owns unique action IDs and releases before reconfiguration");
     if (i == blocked) {
       SetLastError(ERROR_HOTKEY_ALREADY_REGISTERED);
       return FALSE;
@@ -53,7 +53,7 @@ void shortcut_command(HWND editor, int id) {
   static BOOL WINAPI remove(HWND, int id) {
     ++removes;
     const int i = id - win::CameraHotkeyFirstId;
-    require(i >= 0 && i < 3 && active[i], "Only owned registrations are removed, once");
+    require(i >= 0 && i < 4 && active[i], "Only owned registrations are removed, once");
     active[i] = false;
     return TRUE;
   }
@@ -70,8 +70,10 @@ void registration_checks() {
             "Preview startup never calls RegisterHotKey");
     require(registration.action(CameraHotkeyFirstId, MAKELPARAM(MOD_CONTROL | MOD_SHIFT, 'L')) == -1,
             "A fabricated hotkey message cannot activate preview bindings");
-    require(registration.configure(fixture, DefaultCameraHotkeys, false) && FakeRegistration::adds == 3,
-            "Normal startup registers all three independent actions");
+    require(registration.configure(fixture, DefaultCameraHotkeys, false) && FakeRegistration::adds == 4,
+            "Normal startup registers all four independent actions");
+    require(registration.action(CameraHotkeyFirstId + 3, MAKELPARAM(MOD_CONTROL | MOD_SHIFT, 'D')) == 3,
+            "SD action dispatches from the matching chord");
     require(registration.action(CameraHotkeyFirstId + 2, MAKELPARAM(MOD_CONTROL | MOD_SHIFT, 'B')) == 2,
             "Both action dispatches from the matching chord");
     auto duplicate = DefaultCameraHotkeys;
@@ -81,7 +83,7 @@ void registration_checks() {
     auto replacement = DefaultCameraHotkeys;
     replacement[0] = {'L', MOD_ALT | MOD_CONTROL};
     FakeRegistration::blocked = 1;
-    require(registration.configure(fixture, replacement, false) && FakeRegistration::removes == 3,
+    require(registration.configure(fixture, replacement, false) && FakeRegistration::removes == 4,
             "Reconfiguration unregisters all previous bindings before replacement");
     require(registration.conflicts() && registration.status(1).find(L"another app") != std::wstring::npos,
             "Registration conflicts identify the affected action");
@@ -90,14 +92,14 @@ void registration_checks() {
     require(registration.action(CameraHotkeyFirstId, MAKELPARAM(MOD_CONTROL | MOD_SHIFT, 'L')) == -1 &&
                 registration.action(CameraHotkeyFirstId, MAKELPARAM(MOD_ALT | MOD_CONTROL, 'L')) == 0,
             "Old queued hotkeys are rejected after changing a shortcut");
-    require(registration.configure(fixture, replacement, true) && FakeRegistration::removes == 5 && FakeRegistration::adds == 6,
+    require(registration.configure(fixture, replacement, true) && FakeRegistration::removes == 7 && FakeRegistration::adds == 8,
             "Switching to preview releases live registrations without acquiring any");
     FakeRegistration::blocked = -1;
     replacement[1] = {};
-    require(registration.configure(fixture, replacement, false) && FakeRegistration::adds == 8,
+    require(registration.configure(fixture, replacement, false) && FakeRegistration::adds == 11,
             "Disabled actions do not reserve a key combination");
   }
-  require(FakeRegistration::removes == 7 && FakeRegistration::active == std::array<bool, 3>{},
+  require(FakeRegistration::removes == 10 && FakeRegistration::active == std::array<bool, 4>{},
           "Shutdown releases every remaining owned shortcut");
 }
 void persistence_checks() {
@@ -140,6 +142,19 @@ void persistence_checks() {
   require(WritePrivateProfileStringW(L"shortcuts", L"both", nullptr, path.c_str()), "Write incomplete fixture");
   require(!load_camera_hotkeys(loaded, settings_override) && loaded == CameraHotkeys{}, "Incomplete saved shortcuts fail closed");
   require(save_camera_hotkeys(custom, settings_override), "Valid preferences recover after malformed input");
+  // A hotkeys.ini written before the SD shortcut existed keeps its three
+  // bindings and gains the SD default, or leaves SD off if that chord is taken.
+  require(WritePrivateProfileStringW(L"shortcuts", L"sd", nullptr, path.c_str()), "Write pre-SD fixture");
+  auto expected = custom;
+  expected[3] = DefaultCameraHotkeys[3];
+  require(load_camera_hotkeys(loaded, settings_override) && loaded == expected, "Older shortcut files gain the SD default");
+  auto taken = custom;
+  taken[1] = DefaultCameraHotkeys[3];
+  require(save_camera_hotkeys(taken, settings_override) && WritePrivateProfileStringW(L"shortcuts", L"sd", nullptr, path.c_str()),
+          "Write pre-SD fixture with the SD chord in use");
+  require(load_camera_hotkeys(loaded, settings_override) && loaded == taken && !loaded[3].key,
+          "An SD default already in use stays disabled instead of duplicating a shortcut");
+  require(save_camera_hotkeys(custom, settings_override), "Restore saved shortcut fixture after SD migration");
 }
 void manual_intent_checks() {
   using namespace win;
@@ -260,7 +275,23 @@ void aircraft_hotkey_intent_checks() {
           "PMDG uses the same Both shortcut and writes no aircraft variable");
   require(request_camera_hotkey(pmdg, 0, {}, 0) == CameraHotkeyResult::manual && pmdg.manual_mask == 2 && !pmdg.taxi_request,
           "PMDG Left toggles the same way as the other profiles");
-  require(request_camera_hotkey(pmdg, 3, {}, 0) == CameraHotkeyResult::unavailable, "There is no fourth camera shortcut");
+  require(request_camera_hotkey(pmdg, 3, {}, 0) == CameraHotkeyResult::unavailable && pmdg.manual_mask == 2,
+          "The PMDG 777 has no SD display for the SD shortcut");
+  Settings a346;
+  a346.profile = profiles::AerosoftA346.id;
+  a346.follow_taxi = 0;
+  toggle_manual_camera(a346, CameraSd);
+  require(a346.manual_mask == 4, "SD preview turns on only the lower ECAM");
+  toggle_manual_camera(a346, CameraBoth);
+  require(a346.manual_mask == 7, "Both turns on the pilot displays and keeps the SD");
+  toggle_manual_camera(a346, CameraBoth);
+  require(a346.manual_mask == 4, "Both turns off only the pilot displays");
+  toggle_manual_camera(a346, CameraSd);
+  require(a346.manual_mask == 0, "SD toggles off");
+  Settings a380;
+  a380.follow_taxi = 0;
+  toggle_manual_camera(a380, CameraSd);
+  require(a380.manual_mask == 0, "A two-display aircraft ignores the SD action");
   Settings saved;
   saved.profile = 2;
   saved.taxi_request = 9;
@@ -305,8 +336,9 @@ void ui_checks() {
   SetWindowTextW(rate, L"-");
   const auto original_rate = current.camera_rate;
   const auto editor = shortcut_fixture();
-  require(GetDlgItem(editor, 620) && GetDlgItem(editor, 621) && GetDlgItem(editor, 622) && !GetDlgItem(editor, 623),
-          "Flight-deck shortcut editor exposes Left, Right and Both");
+  require(GetDlgItem(editor, 620) && GetDlgItem(editor, 621) && GetDlgItem(editor, 622) && GetDlgItem(editor, 623) &&
+              !GetDlgItem(editor, 624),
+          "Flight-deck shortcut editor exposes Left, Right, Both and SD");
   shortcut_command(editor, 631);
   require(!hotkey_draft[1].key && hotkey_draft != hotkey_saved, "Clear marks a shortcut disabled without applying it early");
   shortcut_command(editor, IDOK);

@@ -26,6 +26,6 @@ class WaitingPageTimer {
   }
 
  private:
-  std::array<std::uint64_t, 2> since_{};
+  std::array<std::uint64_t, MaxDisplaySides> since_{};
 };
 }  // namespace taxi_camera::standalone

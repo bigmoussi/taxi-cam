@@ -196,7 +196,7 @@ void set_target_mask(unsigned mask) noexcept;
 // admitted side draws; it never admits a side for display writes.
 void set_waiting_mask(unsigned mask) noexcept;
 void set_calibration(unsigned mask, unsigned budget) noexcept;
-std::array<std::uint64_t, 2> target_ids() noexcept;
+std::array<std::uint64_t, MaxDisplaySides> target_ids() noexcept;
 // Control-thread flight reset: drop routes/activity and make all older recording
 // proofs ineligible. Keep native metadata and already-recorded GPU ownership.
 void reset_display_session() noexcept;

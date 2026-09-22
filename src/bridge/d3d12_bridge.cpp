@@ -87,8 +87,8 @@ struct List : Metadata {
   std::atomic<std::uint64_t> observation_epoch{};
   PfdGraphicsState graphics;
   std::array<View, 8> targets{};
-  std::array<View, 2> pending_pfds{};
-  std::array<bool, 2> pending_rt{};
+  std::array<View, MaxDisplaySides> pending_pfds{};
+  std::array<bool, MaxDisplaySides> pending_rt{};
   QueryScope queries;
   PfdCopyProof copy_proof;
   PfdSubmissionProof submission_proof;
@@ -225,12 +225,12 @@ struct Registry {
   unsigned active_mask{}, calibration_mask{};
   // Active sides still inside their minimum PLEASE WAIT time.
   unsigned waiting_mask{};
-  std::array<std::shared_ptr<Resource>, 2> selected_resources{};
-  std::array<std::atomic<ID3D12Resource*>, 2> selected_native{};
-  std::array<std::atomic<std::uint64_t>, 2> selected_ids{};
+  std::array<std::shared_ptr<Resource>, MaxDisplaySides> selected_resources{};
+  std::array<std::atomic<ID3D12Resource*>, MaxDisplaySides> selected_native{};
+  std::array<std::atomic<std::uint64_t>, MaxDisplaySides> selected_ids{};
   std::atomic<unsigned> selected_mask{};
   std::atomic<std::uint64_t> queue_patch_generation{1};
-  std::array<std::uint64_t, 2> queue_patch_targets{};
+  std::array<std::uint64_t, MaxDisplaySides> queue_patch_targets{};
   unsigned queue_patch_camera{}, queue_patch_calibration{}, queue_patch_waiting{};
   std::uint32_t queue_patch_profile{};
   std::atomic<std::uint64_t> queue_patch_plans{};
@@ -469,7 +469,7 @@ void clear_views(Registry& r) noexcept {
   r.rtvs.clear();
 }
 void refresh_selected(Registry& r) {
-  for (unsigned side = 0; side < 2; ++side) {
+  for (unsigned side = 0; side < MaxDisplaySides; ++side) {
     auto& selected = r.selected_resources[side];
     const auto id = r.routes.targets[side];
     if (!selected || !selected->alive || selected->id != id) {
@@ -487,7 +487,7 @@ void refresh_selected(Registry& r) {
     r.selected_ids[side].store(selected ? selected->id : 0, std::memory_order_relaxed);
   }
   r.selected_mask.store(r.active_mask | r.calibration_mask, std::memory_order_relaxed);
-  const std::array<std::uint64_t, 2> selected{r.selected_ids[0].load(), r.selected_ids[1].load()};
+  const std::array<std::uint64_t, MaxDisplaySides> selected{r.selected_ids[0].load(), r.selected_ids[1].load(), r.selected_ids[2].load()};
   if (selected != r.queue_patch_targets || r.queue_patch_camera != r.active_mask || r.queue_patch_calibration != r.calibration_mask ||
       r.queue_patch_waiting != (r.waiting_mask & r.active_mask) || r.queue_patch_profile != r.profile->id) {
     r.queue_patch_targets = selected;
@@ -501,8 +501,10 @@ void refresh_selected(Registry& r) {
 bool maybe_selected(ID3D12Resource* native) noexcept {
   auto& r = registry();
   const auto mask = r.selected_mask.load(std::memory_order_relaxed);
-  return native && (((mask & 1) && r.selected_native[0].load(std::memory_order_relaxed) == native) ||
-                    ((mask & 2) && r.selected_native[1].load(std::memory_order_relaxed) == native));
+  for (unsigned side = 0; native && side < MaxDisplaySides; ++side)
+    if ((mask & (1u << side)) && r.selected_native[side].load(std::memory_order_relaxed) == native)
+      return true;
+  return false;
 }
 void selected_metadata(ID3D12Resource* native, std::uint32_t scope, bool base, bool split) noexcept {
   if (!maybe_selected(native))
@@ -512,7 +514,7 @@ void selected_metadata(ID3D12Resource* native, std::uint32_t scope, bool base, b
   if (!lock)
     return;  // Diagnostics only.
   refresh_selected(r);
-  for (unsigned side = 0; side < 2; ++side)
+  for (unsigned side = 0; side < MaxDisplaySides; ++side)
     if (((r.active_mask | r.calibration_mask) & (1u << side)) && r.selected_resources[side] && r.selected_resources[side]->alive &&
         r.selected_resources[side]->native == native) {
       ++r.selected_rt_metadata;
@@ -1148,7 +1150,7 @@ void observe_legacy(void*,
                       (b.Flags & (D3D12_RESOURCE_BARRIER_FLAG_BEGIN_ONLY | D3D12_RESOURCE_BARRIER_FLAG_END_ONLY)) != 0);
   if (b.Type == D3D12_RESOURCE_BARRIER_TYPE_TRANSITION)
     if ((item = metadata_list(list, id, fallback)))
-      for (unsigned side = 0; side < 2; ++side)
+      for (unsigned side = 0; side < MaxDisplaySides; ++side)
         if (item->pending_pfds[side].resource && item->pending_pfds[side].resource->native == b.Transition.pResource)
           item->pending_rt[side] = false;
   if (b.Type == D3D12_RESOURCE_BARRIER_TYPE_ALIASING) {
@@ -1203,7 +1205,7 @@ void observe_enhanced(void*,
                                 b.Subresources.FirstPlane == 0 && b.Subresources.NumPlanes == 1,
                       ((b.SyncBefore | b.SyncAfter) & D3D12_BARRIER_SYNC_SPLIT) != 0);
   if ((item = metadata_list(list, id, fallback)))
-    for (unsigned side = 0; side < 2; ++side)
+    for (unsigned side = 0; side < MaxDisplaySides; ++side)
       if (item->pending_pfds[side].resource && item->pending_pfds[side].resource->native == b.pResource)
         item->pending_rt[side] = false;
   const auto& range = b.Subresources;
@@ -1344,9 +1346,11 @@ void after_draw(void*, ID3D12GraphicsCommandList* native, std::uint64_t id, bool
         else
           list->copy_proof.invalidate();
         const auto selected_mask = r.selected_mask.load(std::memory_order_relaxed);
-        if (((selected_mask & 1) && target.resource->id == r.selected_ids[0].load(std::memory_order_relaxed)) ||
-            ((selected_mask & 2) && target.resource->id == r.selected_ids[1].load(std::memory_order_relaxed)))
-          ++r.selected_draws;
+        for (unsigned side = 0; side < MaxDisplaySides; ++side)
+          if ((selected_mask & (1u << side)) && target.resource->id == r.selected_ids[side].load(std::memory_order_relaxed)) {
+            ++r.selected_draws;
+            break;
+          }
       }
       sources[count] = target.resource->native;
       ids[count++] = target.resource->id;
@@ -1392,7 +1396,7 @@ void stage_pfd(ID3D12GraphicsCommandList* native, std::uint64_t id) noexcept {
     if (!profiles::matches_display(*r.profile, static_cast<UINT>(view.resource->desc.Width), view.resource->desc.Height,
                                    view.resource->desc.MipLevels, static_cast<UINT>(view.resource->desc.Format)))
       continue;
-    for (unsigned side = 0; side < 2; ++side) {
+    for (unsigned side = 0; side < MaxDisplaySides; ++side) {
       if (r.routes.targets[side] != view.resource->id || !((r.active_mask | r.calibration_mask) & (1u << side)))
         continue;
       list->pending_pfds[side] = view;
@@ -1446,7 +1450,7 @@ void drain_pfds(ID3D12GraphicsCommandList* native, std::uint64_t id, bool record
   if (!registry().ready || !list || list->id != id || !list->ready || !recording_observed(*list))
     return;
   bool pending = false;
-  for (unsigned side = 0; side < 2; ++side)
+  for (unsigned side = 0; side < MaxDisplaySides; ++side)
     pending |= list->pending_rt[side] && bool(list->pending_pfds[side].resource);
   if (!pending)
     return;
@@ -1462,7 +1466,7 @@ void drain_pfds(ID3D12GraphicsCommandList* native, std::uint64_t id, bool record
     count_contention(ContentionSite::skipped_pfd_writes);
     return;
   }
-  for (unsigned side = 0; side < 2; ++side) {
+  for (unsigned side = 0; side < MaxDisplaySides; ++side) {
     const auto view = list->pending_pfds[side];
     if (!list->pending_rt[side] || !view.resource || !view.resource->alive || !view.rtv || view.mip || !(r.active_mask & (1u << side)) ||
         (r.calibration_mask & (1u << side)) || r.routes.targets[side] != view.resource->id)
@@ -1557,14 +1561,19 @@ UINT selected_legacy_targets(void*, ID3D12GraphicsCommandList* native, std::uint
     return 0;  // No selected targets: the boundary observer emits no RT-exit callback.
   refresh_selected(r);
   UINT count = 0;
-  for (unsigned side = 0; side < 2; ++side) {
+  for (unsigned side = 0; side < MaxDisplaySides; ++side) {
     const auto& item = r.selected_resources[side];
     if (!(((r.active_mask | r.calibration_mask) & (1u << side)) && item && item->alive &&
           profiles::matches_display(*r.profile, static_cast<UINT>(item->desc.Width), item->desc.Height, item->desc.MipLevels,
                                     static_cast<UINT>(item->desc.Format))))
       continue;
-    if (count && targets[0] == item->native)
-      continue;  // Both navigation displays are regions of one texture.
+    bool listed = false;
+    for (UINT i = 0; i < count; ++i)
+      listed |= targets[i] == item->native;  // Single-display sides are regions of one texture.
+    if (listed)
+      continue;
+    if (count == capacity)
+      return 0;
     targets[count++] = item->native;
   }
   return count;
@@ -1596,7 +1605,7 @@ void copy_pending_pfd(ID3D12GraphicsCommandList* native,
     profiles::DisplayRect content{};
     bool waiting = false;
   };
-  std::array<PlacedRect, 2> placed{};
+  std::array<PlacedRect, MaxDisplaySides> placed{};
   unsigned placed_count = 0;
   {
     const RegistryLock lock(r, wait_budget::close_us, ContentionSite::registry_close);
@@ -1606,7 +1615,7 @@ void copy_pending_pfd(ID3D12GraphicsCommandList* native,
     }
     refresh_selected(r);
     std::shared_ptr<Resource> item;
-    for (unsigned i = 0; i < 2; ++i)
+    for (unsigned i = 0; i < MaxDisplaySides; ++i)
       if (((r.active_mask | r.calibration_mask) & (1u << i)) && r.selected_resources[i] && r.selected_resources[i]->alive &&
           r.selected_resources[i]->native == target) {
         if (!item)
@@ -1893,10 +1902,11 @@ void plan_display_submission(void*,
     return;
   }
   const auto no_position = count * 2;
-  std::array<UINT, 2> positions{no_position, no_position};
-  std::array<PfdSubmissionProof::Candidate, 2> selected{};
-  std::array<std::uint64_t, 2> cover_serial{};
-  std::array<bool, 2> carried{};
+  std::array<UINT, MaxDisplaySides> positions{};
+  positions.fill(no_position);
+  std::array<PfdSubmissionProof::Candidate, MaxDisplaySides> selected{};
+  std::array<std::uint64_t, MaxDisplaySides> cover_serial{};
+  std::array<bool, MaxDisplaySides> carried{};
   unsigned candidates = 0;
   for (UINT i = 0; i < count; ++i) {
     for (std::size_t slot = 0; slot < PfdSubmissionProof::maximum_resources; ++slot) {
@@ -1927,7 +1937,7 @@ void plan_display_submission(void*,
       found->second->submission_activity.fetch_add(1, std::memory_order_relaxed);
     }
   }
-  for (unsigned side = 0; side < 2; ++side) {
+  for (unsigned side = 0; side < MaxDisplaySides; ++side) {
     if (!(patches.ready_mask & (1u << side)))
       continue;
     const auto& target = r.selected_resources[side];
@@ -1955,7 +1965,7 @@ void plan_display_submission(void*,
       cover_serial[side] = target->content_serial.load(std::memory_order_acquire);
     }
   }
-  if (!candidates && positions[0] == no_position && positions[1] == no_position) {
+  if (!candidates && std::all_of(positions.begin(), positions.end(), [&](UINT position) { return position == no_position; })) {
     outcome(DisplaySubmissionOutcome::no_display_exit);
     return;
   }
@@ -1967,8 +1977,12 @@ void plan_display_submission(void*,
   plan.generation = generation;
   plan.current_generation = &r.queue_patch_generation;
   auto empty_reason = DisplaySubmissionOutcome::no_selected_exit;
-  for (unsigned order = 0; order < 2; ++order) {
-    const unsigned side = positions[0] <= positions[1] ? order : 1u - order;
+  // Insertions must be in batch order; ties keep side order.
+  std::array<unsigned, MaxDisplaySides> order{};
+  for (unsigned side = 0; side < MaxDisplaySides; ++side)
+    order[side] = side;
+  std::stable_sort(order.begin(), order.end(), [&](unsigned a, unsigned b) { return positions[a] < positions[b]; });
+  for (const unsigned side : order) {
     if (positions[side] == no_position || !selected[side])
       continue;
     const auto& target = r.selected_resources[side];
@@ -2577,7 +2591,7 @@ struct Targets {
     if (count > 8 || (count && !handles) || (contiguous && count && handles[0].ptr > SIZE_MAX - SIZE_T{count - 1} * r.rtv_stride))
       return;
     bool relevant = false;
-    for (unsigned side = 0; side < 2; ++side)
+    for (unsigned side = 0; side < MaxDisplaySides; ++side)
       relevant |= l.pending_rt[side];
     std::array<D3D12_CPU_DESCRIPTOR_HANDLE, 8> input{};
     l.count = count;
@@ -2606,7 +2620,8 @@ struct Targets {
     // native OM call. Snapshot their contents BEFORE forwarding, never retain
     // only their borrowed CPU handle values for a later query-end restoration.
     if (!l.snapshot_rtvs) {
-      D3D12_DESCRIPTOR_HEAP_DESC desc{D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 10, D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 0};
+      // Eight application slots, then one retained view per display side.
+      D3D12_DESCRIPTOR_HEAP_DESC desc{D3D12_DESCRIPTOR_HEAP_TYPE_RTV, 8 + MaxDisplaySides, D3D12_DESCRIPTOR_HEAP_FLAG_NONE, 0};
       if (FAILED(r.device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&l.snapshot_rtvs))))
         return;
     }
@@ -3272,7 +3287,7 @@ void service_display_patches() noexcept {
     refresh_selected(r);
     config.generation = r.queue_patch_generation.load(std::memory_order_acquire);
     config.profile = r.profile->id;
-    for (unsigned side = 0; side < 2; ++side) {
+    for (unsigned side = 0; side < r.profile->sides && side < MaxDisplaySides; ++side) {
       const auto& target = r.selected_resources[side];
       if (!target || !display_item(r, *target))
         continue;
@@ -3303,7 +3318,10 @@ bool assign_targets(std::uint64_t left, std::uint64_t right) noexcept {
   }
   if (!l || !rr)
     return false;
-  const bool assigned = r.routes.select_explicit({left, right});
+  // One texture holds every single-display side; either id selects it.
+  const bool assigned = r.profile->pfd_detection == profiles::PfdDetectionPolicy::single_display
+                            ? (!left || !right || left == right) && r.routes.select_single(left ? left : right)
+                            : r.routes.select_explicit({left, right});
   if (assigned && live_display_rtvs(r) != live_display_resources(r))
     rearm_live_backfill(r);
   refresh_selected(r);
@@ -3312,23 +3330,23 @@ bool assign_targets(std::uint64_t left, std::uint64_t right) noexcept {
 void set_calibration(unsigned mask, unsigned budget) noexcept {
   auto& r = registry();
   const std::lock_guard lock(r.mutex);
-  r.calibration_mask = mask & 3u;
+  r.calibration_mask = mask & profiles::side_mask(*r.profile);
   refresh_selected(r);
   r.calibration_budget.set_limit(budget);
 }
 void set_target_mask(unsigned mask) noexcept {
   auto& r = registry();
   const std::lock_guard lock(r.mutex);
-  r.active_mask = mask & 3u;
+  r.active_mask = mask & profiles::side_mask(*r.profile);
   refresh_selected(r);
 }
 void set_waiting_mask(unsigned mask) noexcept {
   auto& r = registry();
   const std::lock_guard lock(r.mutex);
-  r.waiting_mask = mask & 3u;
+  r.waiting_mask = mask & profiles::side_mask(*r.profile);
   refresh_selected(r);
 }
-std::array<std::uint64_t, 2> target_ids() noexcept {
+std::array<std::uint64_t, MaxDisplaySides> target_ids() noexcept {
   auto& r = registry();
   const std::lock_guard lock(r.mutex);
   return r.routes.targets;

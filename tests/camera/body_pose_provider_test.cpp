@@ -518,6 +518,25 @@ int offline_tests() {
     check(taxi.valid && taxi.left_on == ((mask & 1) != 0) && taxi.right_on == ((mask & 2) != 0));
     check(taxi.sample_ms == 10000 && !*taxi.error);
   }
+  // The A340-600 adds the lower ECAM latch: three FLOAT64 values, 64 bytes.
+  std::array<unsigned char, 64> sd_packet{};
+  const std::array<DWORD, 10> sd_header{64, 0, 8, 3, 2883584, 3, 0, 0, 1, 3};
+  for (unsigned mask = 0; mask < 8; ++mask) {
+    const std::array<double, 3> values{static_cast<double>(mask & 1), static_cast<double>((mask >> 1) & 1),
+                                       static_cast<double>((mask >> 2) & 1)};
+    std::memcpy(sd_packet.data(), sd_header.data(), sizeof(sd_header));
+    std::memcpy(sd_packet.data() + 40, values.data(), sizeof(values));
+    check(testing::accept_taxi_packet(sd_packet.data(), sd_packet.size(), 10000, 3));
+    check(!testing::accept_taxi_packet(sd_packet.data(), sd_packet.size(), 10000));  // Two-side layout rejects it.
+    const auto taxi = testing::taxi_buttons_at(10000);
+    check(taxi.valid && taxi.mask() == mask);
+  }
+  check(!testing::accept_taxi_packet(taxi_packet.data(), taxi_packet.size(), 10000, 3));  // Three-side layout rejects two.
+  check(!testing::accept_taxi_packet(sd_packet.data(), sd_packet.size(), 10000, 4));
+  // Restore the two-side fixture for the checks below.
+  taxi_values = {1, 1};
+  refresh_taxi();
+  check(testing::accept_taxi_packet(taxi_packet.data(), taxi_packet.size(), 10000) && !testing::taxi_buttons_at(10000).sd_on);
   check(testing::taxi_buttons_at(10500).valid);
   check(!testing::taxi_buttons_at(10501).valid);
   check(std::strcmp(testing::taxi_buttons_at(10501).error, "taxi_telemetry_stale") == 0);

@@ -25,9 +25,9 @@ int main() {
   WaitingPageTimer backwards;
   assert(backwards.observe(9000, 2) == 2);
   assert(backwards.observe(8000, 2) == 2);
-  // Bits outside the two sides are ignored.
+  // Bits beyond the three display sides are ignored.
   WaitingPageTimer wide;
-  assert(wide.observe(100, 0xffu) == 3);
+  assert(wide.observe(100, 0xffu) == 7);
   std::puts("PASS waiting page timer: per-side minimum, OFF reset, clock guards and side bounds");
   return 0;
 }

@@ -223,7 +223,7 @@ class ReadOnlyIpc {
       out.error = "ipc_settings_invalid";
     else if (!fresh(value.owner_heartbeat, now) || !fresh(s.heartbeat, now))
       out.error = "ipc_stale_or_future";
-    else if (s.taxi_mask > 3 || s.candidate_count > 16 || s.graphics_ready > 1 || s.scene_ready > 1 || !terminated(s.aircraft_type) ||
+    else if ((s.taxi_mask & ~taxi_camera::AllDisplaySides) || s.candidate_count > 16 || s.graphics_ready > 1 || s.scene_ready > 1 || !terminated(s.aircraft_type) ||
              !terminated(s.aircraft_path) || !terminated(s.message) || !std::isfinite(s.speed) || !std::isfinite(s.exposure) ||
              !std::isfinite(s.probe_cpu_ms) || !std::isfinite(s.probe_max_ms))
       out.error = "ipc_status_invalid";
@@ -424,7 +424,7 @@ Options arguments(int argc, wchar_t** argv) {
     else
       throw std::runtime_error("Unknown sampler argument");
   }
-  if (!options.pid || !taxi_camera::profiles::find(options.profile) || !mask || options.mask > 3 || options.output.empty() ||
+  if (!options.pid || !taxi_camera::profiles::find(options.profile) || !mask || options.mask > taxi_camera::AllDisplaySides || options.output.empty() ||
       options.phase.empty() || options.phase.size() > 64 || options.duration_ms < 1000 || options.duration_ms > 120000 ||
       options.interval_ms < 100 || options.interval_ms > 1000)
     throw std::runtime_error(
