@@ -289,8 +289,48 @@ inline constexpr AircraftProfile Pmdg777F =
 static_assert(Pmdg777300ER.mounts[0][2] == 22);
 static_assert(Pmdg777300ER.mounts[0] != Pmdg777Mounts[0]);
 static_assert(Pmdg777F.mounts[0] == Pmdg777Mounts[0]);
-inline constexpr std::array<const AircraftProfile*, 7> Catalog{&A380, &A359, &A35K, &IniA380, &Pmdg777, &Pmdg777300ER,
-                                                              &Pmdg777F};
+// Aerosoft A346 Pro 1.0.1 panel.cfg: every display is an htmlgauge on one
+// 4096x4096 $GAUGES_UNIFIED texture. The TACS selectors show the camera on the
+// captain's ND (CAM CAPT) and the first officer's ND (CAM FO); CAM SD (lower
+// ECAM) is not a Taxi Cam side. Mip count and DXGI format are not scanned yet.
+inline constexpr const char* A346Texture = "$GAUGES_UNIFIED";
+inline constexpr unsigned A346DisplaySize = 4096;
+inline constexpr unsigned A346NdX = 769;
+inline constexpr unsigned A346CaptNdY = 470;
+inline constexpr unsigned A346FoNdY = 1230;
+inline constexpr unsigned A346NdSize = 750;
+// flight_model.cfg contact points (feet): NLG forward/up 103.51/-21.4; left
+// MLG right/up/forward -17.5/-22.4/-4.46. Mounts keep the A350-900's accepted
+// gear-relative offsets (nose 8.22 m aft and 2.75 m above the NLG contact;
+// tail 27.63 m aft and 15.01 m above the MLG contact) until calibrated live.
+inline constexpr std::array<std::array<double, 6>, 3> A346Mounts{
+    {{0, -3.77, 23.33, -15, 0, 0.55}, {0, 8.18, -28.99, -15, 0, 0.62}, {0, 8.18, -28.99, -15, 0, 0.62}}};
+// Both TAXI selectors are two-state XML switches whose setter writes 1/0 to
+// the latch. Same idempotent zero write as the A350 for automatic cutoff.
+inline constexpr AircraftProfile AerosoftA346 = [] {
+  AircraftProfile p{8,
+                    "aerosoft-a346",
+                    L"Aerosoft A340-600",
+                    {"L:AB_VC_CAM_CAPT_SEL", "L:AB_VC_CAM_FO_SEL"},
+                    {"", ""},
+                    {"CaptND", "CoND"},
+                    A346Mounts,
+                    A346DisplaySize,
+                    A346DisplaySize,
+                    0,
+                    TaxiControl::lvar_off,
+                    {"", "", ""},
+                    {{{A346NdX, A346CaptNdY, A346NdX + A346NdSize, A346CaptNdY + A346NdSize},
+                      {A346NdX, A346FoNdY, A346NdX + A346NdSize, A346FoNdY + A346NdSize}}}};
+  p.composition = A350Etacs;
+  p.formats = {};
+  p.package_markers = {"simobjects/airplanes/airbus-a346-pro", "aerosoft-aircraft-a346-pro", ""};
+  p.pfd_detection = PfdDetectionPolicy::single_display;
+  p.display_texture = A346Texture;
+  return p;
+}();
+inline constexpr std::array<const AircraftProfile*, 8> Catalog{&A380, &A359, &A35K, &IniA380, &Pmdg777, &Pmdg777300ER,
+                                                              &Pmdg777F, &AerosoftA346};
 inline constexpr DisplayRect display_rect(const AircraftProfile& p, unsigned side) noexcept {
   return p.display_regions[side < 2 ? side : 0];
 }
@@ -378,7 +418,9 @@ inline std::uint32_t detect_aircraft(std::string_view type, std::string_view pat
   // reported SimObjects\Airplanes\PMDG 777-200ER\... and did not contain
   // pmdg-aircraft-77er. The 300ER and 777F use the same folder-component
   // pattern; those two paths were not in this log.
-  for (const auto* profile : {&Pmdg777, &Pmdg777300ER, &Pmdg777F}) {
+  // The Aerosoft A346 also reports the Airbus brand string; its SimObject
+  // folder identifies the product.
+  for (const auto* profile : {&Pmdg777, &Pmdg777300ER, &Pmdg777F, &AerosoftA346}) {
     for (const auto marker : profile->package_markers)
       if (!marker.empty() && path_contains(path, marker))
         return profile->id;

@@ -298,6 +298,17 @@ int main() {
   assert(!profiles::detect_aircraft("777", "Community/pmdg-aircraft-77er-copy/aircraft.cfg"));
   assert(!profiles::detect_aircraft("777", "SimObjects/Airplanes/PMDG 777-200ER-copy/aircraft.cfg"));
   assert(!profiles::detect_aircraft("777", "Community/not-pmdg-aircraft-77f/aircraft.cfg"));
+  // aircraft.cfg atc_type is the Airbus brand string; the SimObject folder
+  // identifies the Aerosoft product. The live AircraftLoaded path is not yet logged.
+  assert(profiles::detect_aircraft("ATCCOM.ATC_NAME AIRBUS.0.text", "SimObjects\\Airplanes\\airbus-a346-pro\\aircraft.CFG") ==
+         profiles::AerosoftA346.id);
+  assert(profiles::detect_aircraft("", "Community/aerosoft-aircraft-a346-pro/SimObjects/Airplanes/airbus-a346-pro/aircraft.cfg") ==
+         profiles::AerosoftA346.id);
+  assert(!profiles::detect_aircraft("ATCCOM.ATC_NAME AIRBUS.0.text", "SimObjects/Airplanes/airbus-a346-pro-copy/aircraft.cfg"));
+  assert(!profiles::detect_aircraft("A346", "Community/aerosoft-aircraft-a346-pro_CVT_/aircraft.cfg"));
+  assert(!profiles::detect_aircraft("A346", "SimObjects/Airplanes/Other_A346/aircraft.cfg"));
+  assert(!profiles::detect_aircraft("ATCCOM.ATC_NAME AIRBUS.0.text",
+                                    "SimObjects\\Airplanes\\inibuilds-a340\\presets\\inibuilds\\a340-300\\config\\aircraft.CFG"));
   assert(profiles::detect_aircraft(
              "ATCCOM.ATC_NAME AIRBUS.0.text",
              "SimObjects\\Airplanes\\FlyByWire_A380X\\presets\\flybywire\\FlyByWire_A380_842\\config\\aircraft.CFG") == 1);
@@ -312,6 +323,11 @@ int main() {
   assert(pmdg_300.exposure == -8.f && pmdg_f.exposure == -8.f && pmdg.exposure == -8.f);
   assert(settings_path(pmdg_300) != settings_path(pmdg) && settings_path(pmdg_f) != settings_path(pmdg));
   assert(settings_path(pmdg_300) != settings_path(pmdg_f));
+  Settings a346;
+  assert(load_settings(a346, L"missing", profiles::AerosoftA346.id));
+  assert(a346.profile == profiles::AerosoftA346.id && a346.follow_taxi && a346.mounts == profiles::AerosoftA346.mounts);
+  assert(a346.exposure == -8.f && a346.tail_corner == profiles::A359.composition.tail_corner);
+  assert(settings_path(a346) != settings_path(pmdg) && settings_path(a346) != settings_path(a380));
   assert(profiles::matches_display(profiles::IniA380, 768, 1024, 1, 27));
   assert(profiles::matches_display(profiles::IniA380, 768, 1024, 1, 28));
   assert(profiles::matches_display(profiles::IniA380, 768, 1024, 1, 87));
@@ -371,9 +387,44 @@ int main() {
     s.profile = profile->id;
     s.mounts = profile->mounts;
     assert(valid_settings(s));
-    assert((profile->pfd_detection == profiles::PfdDetectionPolicy::single_display) != profile->reference_guides);
-    assert((profile->pfd_detection == profiles::PfdDetectionPolicy::single_display) != profile->ground_speed);
+    const bool pmdg = std::strcmp(profile->display_texture, profiles::Pmdg777Texture) == 0;
+    assert(pmdg != profile->reference_guides);
+    assert(pmdg != profile->ground_speed);
     assert((profile->pfd_detection == profiles::PfdDetectionPolicy::single_display) == (profile->display_texture[0] != '\0'));
+    if (profile->id == profiles::AerosoftA346.id) {
+      assert(profile->pfd_detection == profiles::PfdDetectionPolicy::single_display);
+      assert(std::strcmp(profile->display_texture, "$GAUGES_UNIFIED") == 0);
+      assert(profile->width == 4096 && profile->height == 4096 && profile->mips == 0 && profile->formats[0] == 0);
+      assert(profile->taxi_control == profiles::TaxiControl::lvar_off);
+      assert(std::strcmp(profile->taxi_lvars[0], "L:AB_VC_CAM_CAPT_SEL") == 0);
+      assert(std::strcmp(profile->taxi_lvars[1], "L:AB_VC_CAM_FO_SEL") == 0);
+      assert(profile->taxi_events[0][0] == '\0' && profile->taxi_events[1][0] == '\0');
+      assert(std::strcmp(profile->pfd_labels[0], "CaptND") == 0 && std::strcmp(profile->pfd_labels[1], "CoND") == 0);
+      // panel.cfg CaptND 769,470,750,750 and CoND 769,1230,750,750.
+      const auto left = profiles::display_rect(*profile, 0), right = profiles::display_rect(*profile, 1);
+      assert(left.left == 769 && left.top == 470 && left.right == 1519 && left.bottom == 1220);
+      assert(right.left == 769 && right.top == 1230 && right.right == 1519 && right.bottom == 1980);
+      for (unsigned side = 0; side < 2; ++side) {
+        const auto outer = profiles::display_rect(*profile, side);
+        const auto content = profiles::display_content_rect(*profile, side);
+        assert(content.left == outer.left + 16 && content.right + 16 == outer.right && content.top == outer.top + 12 &&
+               content.bottom == outer.bottom);
+        assert(content.right - content.left == 718 && content.bottom - content.top == 738);
+        // A380 source panes; the compositor scales them into the smaller ND.
+        assert(profile->camera_panes[side][0] == 736 && profile->camera_panes[side][1] == (side == 0 ? 251 : 496));
+        native_camera::ViewDimensions desired, original{{{3413, 913}, {3413, 913}, {3413, 913}}};
+        assert(native_camera::plan_view_resize(original, side, desired, profile->camera_panes));
+        assert(desired[0] == profile->camera_panes[side] && desired[1] == desired[0] && desired[2] == desired[0]);
+        assert(profiles::camera_candidate(desired[0][0], desired[0][1]));
+      }
+      assert(profile->composition.split_bottom == 0);
+      assert(profiles::matches_display(*profile, 4096, 4096, 1, 28));
+      assert(profiles::matches_display(*profile, 4096, 4096, 12, 87));
+      assert(!profiles::matches_display(*profile, 4096, 4096, 0, 28));
+      assert(!profiles::matches_display(*profile, 4096, 4096, 1, 0));
+      assert(!profiles::matches_display(*profile, 2048, 2048, 1, 28));
+      continue;
+    }
     if (profile->pfd_detection == profiles::PfdDetectionPolicy::single_display) {
       const auto left = profiles::display_rect(*profile, 0);
       const auto right = profiles::display_rect(*profile, 1);
@@ -487,8 +538,21 @@ int main() {
   // Guide bounds and persistence are tested separately. Ground-contact point
   // projections do not establish visible tyre alignment for these overlays.
 
+  // Aerosoft A346 Pro 1.0.1 flight_model.cfg contact points are feet: NLG
+  // forward/up 103.51/-21.4; left MLG right/up/forward -17.5/-22.4/-4.46.
+  // The starting mounts keep the A350-900 gear-relative framing.
+  {
+    const auto& a346 = profiles::AerosoftA346;
+    const auto nose = project_landmark(a346, 0, {0, -21.4 * 0.3048, 103.51 * 0.3048});
+    assert(std::abs(nose[0] - 0.5) < 1e-6 && nose[1] > 0.55 && nose[1] < 0.75);
+    const auto gear = project_landmark(a346, 1, {-17.5 * 0.3048, -22.4 * 0.3048, -4.46 * 0.3048});
+    assert(gear[0] > 0.28 && gear[0] < 0.34 && gear[1] > 0.85 && gear[1] < 0.90);
+    assert(a346.composition.tail_corner == profiles::A359.composition.tail_corner);
+    assert(a346.mounts[1] == a346.mounts[2]);
+  }
+
   for (const auto* profile : profiles::Catalog) {
-    if (profile->pfd_detection == profiles::PfdDetectionPolicy::single_display) {
+    if (std::strcmp(profile->display_texture, profiles::Pmdg777Texture) == 0) {
       assert(profile->composition.divider_top == 280 && profile->composition.divider_bottom == 318);
       assert(profile->composition.nose_height == 280 && profile->composition.tail_top == 318);
       continue;

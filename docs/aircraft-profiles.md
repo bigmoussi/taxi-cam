@@ -15,6 +15,7 @@ Each profile owns its camera calibration, display colour and exposure settings. 
 | PMDG 777-200ER | `pmdg-777` | Shared `DUS`, 2048 x 2048; gauges `DU_LeftInboard` and `DU_RightInboard` | Nose 736 x 268 / left and right wing 360 x 360 |
 | PMDG 777-300ER | `pmdg-777-300er` | Same `DUS` layout as 200ER | Same pane sizes; nose forward **22** m |
 | PMDG 777F | `pmdg-777f` | Same `DUS` layout as 200ER | Same pane sizes; nose mount copied from 200ER |
+| Aerosoft A340-600 | `aerosoft-a346` | Shared `$GAUGES_UNIFIED`, 4096 x 4096; gauges `CaptND` and `CoND` (750 x 750) | Nose 736 x 251 / tail 736 x 496 |
 
 A350 package identifiers and geometry were inspected in iniBuilds version 1.2.6. The user has verified A350 rendering in the simulator. This does not establish every aircraft variant, framing, graphics mode or automatic target ordering; see [PR 42 validation](pr42-validation.md).
 
@@ -26,6 +27,7 @@ A350 package identifiers and geometry were inspected in iniBuilds version 1.2.6.
 | A350 | `L:INI_TAXI_LEFT`, `L:INI_TAXI_RIGHT` | Write zero to the selected latch through public SimConnect |
 | iniBuilds A380 | Manual previews or configurable camera hotkeys; cockpit buttons marked INOP | Suppress camera output above the speed limit; no aircraft-variable writes |
 | PMDG 777 | Manual preview or Ctrl + Shift + L / R / B; no cockpit TAXI or CAM binding | Suppress camera output above the speed limit; no aircraft-variable writes |
+| Aerosoft A340-600 | `L:AB_VC_CAM_CAPT_SEL`, `L:AB_VC_CAM_FO_SEL` (0 OFF, 1 TAXI) | Write zero to the selected latch through public SimConnect |
 
 The installed iniBuilds A350 behavior XML uses each TAXI latch for its button state and lamp. Its input-event setter toggles that latch. An idempotent zero write makes cutoff independent of toggle timing. The other side is not written. The FBW A380 and A350 adapters wait for a fresh OFF acknowledgement. The manual-only iniBuilds A380 suppresses output without waiting for a cockpit-button acknowledgement. The catalog supplies the speed limit, currently 60 knots for all profiles.
 
@@ -95,6 +97,18 @@ Published mount defaults: 777-200ER and 777F nose **0 / -2 / 16 m, pitch/yaw -18
 The display list only offers GPU resources that match the selected profile's size. Until this profile is selected, the bridge keeps the previous profile's filter. The default is the FBW A380 at 768 x 1024, five mips, format 28. A 2048 x 2048 `DUS` texture is not a candidate for that filter, so the list stays empty and detection reports `no_candidates`. The log does not print gauge names. After this profile is selected, a 2048 x 2048 resource with any non-zero format and 1–12 mips is a candidate. Mip count and DXGI format were not in the scan. The texture list and the display-routing dropdown use resource-id order, not draw count. When more than one candidate matches, automatic selection takes the last entry, which is the highest resource id, and assigns that one texture to both inboard rectangles. It does not take the first entry, and it does not use a texture name. Display routing can still assign a texture by hand. GPU targeting cannot read gauge or material names; `DU_LeftInboard` and `DU_RightInboard` are the rectangles above on the shared `DUS` texture.
 
 The cockpit has no CAM button for this profile. The profile does not read or write a TAXI Lvar, a CAM event, or any other aircraft variable. Camera on/off is the same Left, Right and Both shortcuts as the other aircraft (Ctrl + Shift + L / R / B) and the same left/right preview controls. There is no extra Camera shortcut. On this profile those requests are manual: they do not write an aircraft variable.
+
+### Aerosoft A340-600 configuration
+
+Inspected in the installed Aerosoft A346 Pro 1.0.1 package (`aerosoft-aircraft-a346-pro`), a ToLiss systems port. `aircraft.cfg` gives `atc_type` as the Airbus brand string and `atc_model` `A346`. The profile matches the SimObject folder component `SimObjects/Airplanes/airbus-a346-pro` (or the package folder) and does not require ATC TYPE. A `-copy` folder, the simulator's `_CVT_` conversion folder and the iniBuilds A340 do not match. The live `AircraftLoaded` path has not been logged yet.
+
+`panel.cfg` draws every display into one 4096 x 4096 `$GAUGES_UNIFIED` texture through `MSFS_ToLiss_Plugin.wasm`. The TACS selectors on the main panel (**CAM CAPT**, **CAM SD**, **CAM F/O**) place the camera on the captain's ND, the lower ECAM or the first officer's ND. Taxi Cam uses the two NDs: `CaptND` at 769, 470, 750, 750 and `CoND` at 769, 1230, 750, 750. The lower ECAM is not a Taxi Cam side. Detection uses the single-texture rule: the last size-matched texture-list entry is assigned to both ND rectangles, and everything else on `$GAUGES_UNIFIED` stays clear. Mip count and DXGI format have not been scanned. Until they are, any 4096 x 4096 render target with a non-zero format and 1–12 mips is a candidate, so automatic selection must be checked against the texture list.
+
+Each ND keeps the Airbus layout: nose above the 12-pixel divider, tail below, the GS panel and the reference guides. The border is the usual 16 pixels at the sides and 12 at the top, which gives 718 x 738 content pixels. The A380 source panes are scaled into that slightly smaller rectangle. Guide defaults start from the A350-900 values.
+
+Each selector is a two-state XML switch whose setter writes 1 (TAXI) or 0 (OFF) to its latch, `L:AB_VC_CAM_CAPT_SEL` or `L:AB_VC_CAM_FO_SEL`. The profile reads those latches and uses the A350's idempotent zero write for automatic cutoff. The ToLiss module also reads the latches: when one is set, it draws its own synthetic taxi-camera page on that ND from the sprite sheet `data/display data/TaxiCam.png`. No package setting disabling that page was found. While Taxi Cam draws, its stamp covers the whole ND rectangle. The built-in page stays visible whenever a latch is on without Taxi Cam output, for example during camera start-up, and on the lower ECAM through CAM SD. Stamp ordering against the module's redraws (visible flicker) is unverified.
+
+`flight_model.cfg` contact points (feet) put the nose gear at forward/up 103.51 / -21.4 and the wing gear at right/up/forward ±17.5 / -22.4 / -4.46. The starting mounts keep the A350-900's accepted gear-relative offsets: nose **0 / -3.77 / 23.33 m, -15 / 0 degrees, 0.55 rad**; tail **0 / 8.18 / -28.99 m, -15 / 0 degrees, 0.62 rad**. These have not been calibrated in the simulator. PFD refresh is not measured (`pfd_refresh_hz` 0). Settings are stored in `aerosoft-a346.ini`.
 
 ### Integration requirements
 

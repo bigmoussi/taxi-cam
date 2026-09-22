@@ -45,9 +45,12 @@ void patch_demand_case() {
   require(output.set_patch_profile(taxi_camera::profiles::IniA380.id), "Select ini A380");
   request(taxi_camera::profiles::IniA380, DXGI_FORMAT_R8G8B8A8_UNORM);
   require(output.patch_requests() == 5, "ini A380 starting geometry reuses the existing A380 slot");
+  require(output.set_patch_profile(taxi_camera::profiles::AerosoftA346.id), "Select Aerosoft A346");
+  request(taxi_camera::profiles::AerosoftA346, DXGI_FORMAT_R8G8B8A8_UNORM);
+  require(output.patch_requests() == 6, "The smaller A346 ND reserves its own exact slot");
   require(!output.set_patch_profile(99) && output.set_patch_profile(1), "Invalid profile refuses without losing prior slots");
   request(taxi_camera::profiles::A380, DXGI_FORMAT_R8G8B8A8_UNORM);
-  require(output.patch_requests() == 5 && !output.patch_draws(), "Profile roundtrip retains bounded demand without GPU work");
+  require(output.patch_requests() == 6 && !output.patch_draws(), "Profile roundtrip retains bounded demand without GPU work");
   std::printf("PASS CPU-only typed patch demand: cold, invalid, duplicate, typed formats and retained profile geometry.\n");
 }
 struct ClearStatePipeline {
