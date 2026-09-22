@@ -255,15 +255,15 @@ function New-TaxiCameraRateSnapshot([string]$BackupDirectory) {
 
 function Set-TaxiSnapshotIniKeys($Entry, [hashtable[]]$Assignments) {
     $expected = if ($Entry.owned) { $Entry.installedHash } else { $Entry.priorHash }
-    if ((Get-TaxiSettingsHash $Entry) -ne $expected) { throw "Settings changed before camera rate update: $($Entry.path)" }
-    $temporary = Join-Path (Split-Path -Parent $Entry.path) ('taxi-camera-rate-' + [Guid]::NewGuid().ToString('N') + '.tmp')
+    if ((Get-TaxiSettingsHash $Entry) -ne $expected) { throw "Settings changed before keep-install migrate: $($Entry.path)" }
+    $temporary = Join-Path (Split-Path -Parent $Entry.path) ('taxi-keep-install-' + [Guid]::NewGuid().ToString('N') + '.tmp')
     try {
         Copy-Item -LiteralPath $Entry.path -Destination $temporary
         foreach ($assignment in $Assignments) {
             Set-TaxiIniKey $temporary $assignment.Section $assignment.Key $assignment.Value
         }
         $sourceHash = (Get-FileHash -LiteralPath $temporary -Algorithm SHA256).Hash
-        if ((Get-TaxiSettingsHash $Entry) -ne $expected) { throw "Settings changed while preparing camera rate update: $($Entry.path)" }
+        if ((Get-TaxiSettingsHash $Entry) -ne $expected) { throw "Settings changed while preparing keep-install migrate: $($Entry.path)" }
         if ($expected) { [IO.File]::Replace($temporary, $Entry.path, [NullString]::Value) }
         else { [IO.File]::Move($temporary, $Entry.path) }
         $Entry.owned = $true
