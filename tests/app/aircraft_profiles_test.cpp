@@ -283,9 +283,12 @@ int main() {
   assert(profiles::detect_aircraft("777-200ER GE", "Community/pmdg-aircraft-77er/SimObjects/Airplanes/PMDG 777-200ER/aircraft.cfg") ==
          profiles::Pmdg777.id);
   assert(profiles::detect_aircraft("", "Community\\pmdg-aircraft-77w\\SimObjects\\Airplanes\\PMDG 777-300ER\\aircraft.cfg") ==
-         profiles::Pmdg777.id);
+         profiles::Pmdg777300ER.id);
   assert(profiles::detect_aircraft("B77F", "Community/pmdg-aircraft-77f/SimObjects/Airplanes/PMDG 777F/aircraft.cfg") ==
-         profiles::Pmdg777.id);
+         profiles::Pmdg777F.id);
+  assert(profiles::Pmdg777300ER.mounts[0] == profiles::Pmdg777.mounts[0]);
+  assert(profiles::Pmdg777F.mounts[0] == profiles::Pmdg777.mounts[0]);
+  assert(profiles::Pmdg777300ER.key != profiles::Pmdg777.key && profiles::Pmdg777F.key != profiles::Pmdg777.key);
   assert(!profiles::detect_aircraft("ATCCOM.ATC_NAME BOEING.0.text", "Community/pmdg-aircraft-77er/aircraft.cfg"));
   assert(!profiles::detect_aircraft("ATCCOM.ATC_NAME BOEING.0.text",
                                     "SimObjects\\Airplanes\\Other\\presets\\pmdg\\PMDG 777-200ER RR\\config\\aircraft.CFG"));
@@ -299,6 +302,12 @@ int main() {
   assert(load_settings(pmdg, L"missing", profiles::Pmdg777.id));
   assert(pmdg.profile == profiles::Pmdg777.id && !pmdg.follow_taxi && pmdg.mounts == profiles::Pmdg777.mounts);
   assert(settings_path(pmdg) != settings_path(a380));
+  Settings pmdg_300, pmdg_f;
+  assert(load_settings(pmdg_300, L"missing", profiles::Pmdg777300ER.id));
+  assert(load_settings(pmdg_f, L"missing", profiles::Pmdg777F.id));
+  assert(pmdg_300.mounts[0] == profiles::Pmdg777.mounts[0] && pmdg_f.mounts[0] == profiles::Pmdg777.mounts[0]);
+  assert(settings_path(pmdg_300) != settings_path(pmdg) && settings_path(pmdg_f) != settings_path(pmdg));
+  assert(settings_path(pmdg_300) != settings_path(pmdg_f));
   assert(profiles::matches_display(profiles::IniA380, 768, 1024, 1, 27));
   assert(profiles::matches_display(profiles::IniA380, 768, 1024, 1, 28));
   assert(profiles::matches_display(profiles::IniA380, 768, 1024, 1, 87));
@@ -358,9 +367,9 @@ int main() {
     s.profile = profile->id;
     s.mounts = profile->mounts;
     assert(valid_settings(s));
-    assert((profile->id == profiles::Pmdg777.id) != profile->reference_guides);
-    assert((profile->id == profiles::Pmdg777.id) != profile->ground_speed);
-    assert((profile->id == profiles::Pmdg777.id) == (profile->display_texture[0] != '\0'));
+    assert((profile->pfd_detection == profiles::PfdDetectionPolicy::single_display) != profile->reference_guides);
+    assert((profile->pfd_detection == profiles::PfdDetectionPolicy::single_display) != profile->ground_speed);
+    assert((profile->pfd_detection == profiles::PfdDetectionPolicy::single_display) == (profile->display_texture[0] != '\0'));
     if (profile->pfd_detection == profiles::PfdDetectionPolicy::single_display) {
       const auto left = profiles::display_rect(*profile, 0);
       const auto right = profiles::display_rect(*profile, 1);

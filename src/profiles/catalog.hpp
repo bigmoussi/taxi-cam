@@ -197,9 +197,9 @@ inline constexpr unsigned Pmdg777NdHeight = 971;
 // Mip count and DXGI format were not in the scan.
 inline constexpr unsigned Pmdg777DisplayMips = 0;
 inline constexpr std::array<unsigned, 6> Pmdg777Formats{};
-// One profile for the 777-200ER, 777-300ER and 777F when they share this
-// cockpit. AircraftLoaded selects the airplane folder. ATC TYPE is the Boeing
-// brand string and is not required.
+// Separate settings files per airplane folder (200ER / 300ER / 777F). They share
+// this cockpit layout on DUS. AircraftLoaded selects the airplane folder. ATC
+// TYPE is the Boeing brand string and is not required.
 // Both navigation displays are rectangles on one destination texture. Taxi Cam
 // owns three viewpoints: nose on top, and independent left/right wing cameras
 // on the split bottom. Pixels outside the two inboard gauges stay untouched.
@@ -233,22 +233,30 @@ inline constexpr Composition Pmdg777Composition = [] {
 }();
 // Nose: forward/down over the nose gear. Bottom-left/right: outside each side of
 // the fuselage looking at that wing (own Right offset and yaw; not a mirrored
-// single tail capture). Published defaults from Robert's live 777 calibration.
+// single tail capture). Published defaults from Robert's live 777-200ER
+// calibration. 300ER and 777F copy that nose mount; wing mounts stay these
+// published values until those types are calibrated separately.
 inline constexpr std::array<std::array<double, 6>, 3> Pmdg777Mounts{
     {{0, -2, 16, -18, 0, 1}, {-6, 1.5, -28, -5, -12, 0.6}, {6, 1.5, -28, -5, 12, 0.6}}};
+inline constexpr std::array<std::array<double, 6>, 3> Pmdg777300Mounts{
+    {Pmdg777Mounts[0], Pmdg777Mounts[1], Pmdg777Mounts[2]}};
+inline constexpr std::array<std::array<double, 6>, 3> Pmdg777FMounts{
+    {Pmdg777Mounts[0], Pmdg777Mounts[1], Pmdg777Mounts[2]}};
 // Nose matches the 280 px picture; each bottom feed is a square half-pane.
 inline constexpr CameraPanes Pmdg777Panes{
     {{736, static_cast<std::int32_t>((Pmdg777NosePictureHeight * 736 + 384) / 768)},
      {static_cast<std::int32_t>(Pmdg777BottomPane), static_cast<std::int32_t>(Pmdg777BottomPane)},
      {static_cast<std::int32_t>(Pmdg777BottomPane), static_cast<std::int32_t>(Pmdg777BottomPane)}}};
-inline constexpr AircraftProfile Pmdg777 = [] {
-  AircraftProfile p{5,
-                    "pmdg-777",
-                    L"PMDG 777",
+inline constexpr auto make_pmdg_777 = [](std::uint32_t id, std::string_view key, const wchar_t* name,
+                                         std::string_view marker,
+                                         std::array<std::array<double, 6>, 3> mounts) {
+  AircraftProfile p{id,
+                    key,
+                    name,
                     {"", ""},
                     {"", ""},
                     {Pmdg777LeftGauge, Pmdg777RightGauge},
-                    Pmdg777Mounts,
+                    mounts,
                     Pmdg777DisplayWidth,
                     Pmdg777DisplayHeight,
                     Pmdg777DisplayMips,
@@ -261,7 +269,7 @@ inline constexpr AircraftProfile Pmdg777 = [] {
                     60,
                     Pmdg777Composition,
                     Pmdg777Formats,
-                    {"PMDG 777-200ER", "PMDG 777-300ER", "PMDG 777F"}};
+                    {marker, "", ""}};
   p.pfd_detection = PfdDetectionPolicy::single_display;
   p.display_texture = Pmdg777Texture;
   p.reference_guides = false;
@@ -271,8 +279,17 @@ inline constexpr AircraftProfile Pmdg777 = [] {
   // are black. L/R stay 0.
   p.camera_padding = {0, Pmdg777TopPadding, 0, 0};
   return p;
-}();
-inline constexpr std::array<const AircraftProfile*, 5> Catalog{&A380, &A359, &A35K, &IniA380, &Pmdg777};
+};
+inline constexpr AircraftProfile Pmdg777 =
+    make_pmdg_777(5, "pmdg-777", L"PMDG 777-200ER", "PMDG 777-200ER", Pmdg777Mounts);
+inline constexpr AircraftProfile Pmdg777300ER =
+    make_pmdg_777(6, "pmdg-777-300er", L"PMDG 777-300ER", "PMDG 777-300ER", Pmdg777300Mounts);
+inline constexpr AircraftProfile Pmdg777F =
+    make_pmdg_777(7, "pmdg-777f", L"PMDG 777F", "PMDG 777F", Pmdg777FMounts);
+static_assert(Pmdg777300ER.mounts[0] == Pmdg777Mounts[0]);
+static_assert(Pmdg777F.mounts[0] == Pmdg777Mounts[0]);
+inline constexpr std::array<const AircraftProfile*, 7> Catalog{&A380, &A359, &A35K, &IniA380, &Pmdg777, &Pmdg777300ER,
+                                                              &Pmdg777F};
 inline constexpr DisplayRect display_rect(const AircraftProfile& p, unsigned side) noexcept {
   return p.display_regions[side < 2 ? side : 0];
 }
@@ -360,9 +377,11 @@ inline std::uint32_t detect_aircraft(std::string_view type, std::string_view pat
   // reported SimObjects\Airplanes\PMDG 777-200ER\... and did not contain
   // pmdg-aircraft-77er. The 300ER and 777F use the same folder-component
   // pattern; those two paths were not in this log.
-  for (const auto marker : Pmdg777.package_markers)
-    if (!marker.empty() && path_contains(path, marker))
-      return Pmdg777.id;
+  for (const auto* profile : {&Pmdg777, &Pmdg777300ER, &Pmdg777F}) {
+    for (const auto marker : profile->package_markers)
+      if (!marker.empty() && path_contains(path, marker))
+        return profile->id;
+  }
   std::uint32_t match = 0;
   for (const auto* p : Catalog) {
     if (!matches_aircraft(*p, type))
