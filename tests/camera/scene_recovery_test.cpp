@@ -331,6 +331,68 @@ void manager_failure_before_calibration() {
           "Stop arriving during calibration rearmed native creation");
 }
 
+void stale_local_calibration_restarts_creation() {
+  // Issue 54: outside_local_calibration_radius must not latch pose_invalid.
+  // Map it onto the existing retryable inspection path so cleanup plus
+  // calibration can recreate the pair (manual deactivate/activate is fallback).
+  require(outside_local_calibration_radius("outside_local_calibration_radius"),
+          "Exact outside-radius sample detail was not recognized");
+  require(!outside_local_calibration_radius("outside_calibration_radius") && !outside_local_calibration_radius("pose_invalid") &&
+              !outside_local_calibration_radius(nullptr) && !outside_local_calibration_radius(""),
+          "Unrelated pose errors were treated as a stale local lock");
+  require(stop_reason_for_body_pose_failure("outside_local_calibration_radius") == SceneStopReason::inspection_unavailable &&
+              retryable_scene_stop(stop_reason_for_body_pose_failure("outside_local_calibration_radius")),
+          "Stale local calibration did not select the retryable restart path");
+  require(stop_reason_for_body_pose_failure("invalid_body_basis") == SceneStopReason::pose_invalid &&
+              !retryable_scene_stop(stop_reason_for_body_pose_failure("invalid_body_basis")),
+          "Ordinary pose failures must still latch without automatic recreate");
+  require(!temporary_pose_unavailable("outside_local_calibration_radius"),
+          "Stale local calibration must not retain a closed pair forever without reset");
+
+  constexpr ec::ManagerToken manager{23, 9};
+  constexpr std::uint64_t revision = 11;
+  CreationEngine engine;
+  engine.mode = CreationEngine::Mode::ready;
+  ec::PairController pair;
+  SceneRecovery recovery;
+  recovery.start();
+  pair.request_independent_pose();
+  require(pair.process_update(manager, engine.callbacks()) && pair.snapshot().state == ec::State::active && engine.creates == 2,
+          "Active parked-pair fixture was not created");
+  const auto original = pair.snapshot().owned_ids;
+
+  // Active-pair re-arm after a long sector: retire through retryable recovery.
+  recovery.failed(stop_reason_for_body_pose_failure("outside_local_calibration_radius"), 100);
+  require(recovery.pending() && recovery.reason() == SceneStopReason::inspection_unavailable && recovery.attempts() == 0,
+          "Outside-radius stop latched instead of requesting a bounded recreate");
+  pair.request_disable();
+  require(pair.process_update(manager, engine.callbacks()) && pair.snapshot().state == ec::State::cleanup_pending &&
+              pair.snapshot().owned_ids == original,
+          "Stale-calibration restart lost ownership before confirmed cleanup");
+  engine.allow_erase = true;
+  require(pair.process_update(manager, engine.callbacks()) && pair.snapshot().state == ec::State::disabled && !pair.snapshot().owned_ids[0] &&
+              !pair.snapshot().owned_ids[1],
+          "Confirmed cleanup did not clear the departure pair");
+  const auto clean = pair.snapshot();
+  // Same gate used after manager failure: uncalibrated arrival may progress the
+  // read-only pose path before the bounded retry consumes an attempt.
+  require(initial_retry_calibration_allowed(recovery, clean, true, false, revision, revision),
+          "Arrival recalibration was refused after the outside-radius restart");
+  require(!recovery.retry(2099, clean, false) && engine.creates == 2, "Retry bypassed a usable pose after relocation");
+  require(recovery.retry(2100, clean, true) && recovery.attempts() == 1, "Validated outside-radius restart did not recreate");
+  pair.request_independent_pose();
+  require(pair.process_update(manager, engine.callbacks()) && pair.snapshot().state == ec::State::active && engine.creates == 4 &&
+              pair.snapshot().owned_ids != original,
+          "Outside-radius recovery did not create exactly one fresh arrival pair");
+
+  // Ordinary pose_invalid remains a latched stop that needs an explicit Start.
+  SceneRecovery latched;
+  latched.start();
+  latched.failed(stop_reason_for_body_pose_failure("invalid_body_basis"), 5000);
+  require(latched.reason() == SceneStopReason::pose_invalid && !latched.pending() && !latched.retry(99999, clean, true),
+          "Non-radius pose failure became automatically retryable");
+}
+
 void partial_creation_failure_stays_latched() {
   constexpr ec::ManagerToken manager{13, 5};
   CreationEngine engine;
@@ -396,13 +458,15 @@ int main() {
   manager_failure_recovery();
   manager_failure_before_calibration();
   initial_pose_deferral();
+  stale_local_calibration_restarts_creation();
   partial_creation_failure_stays_latched();
   SceneRecovery recovery;
   ec::Snapshot clean;
   require(!recovery.retry(9999, clean, true), "No initial invented request");
   for (const auto* error : {"telemetry_busy", "aircraft_telemetry_stale", "camera_telemetry_stale", "not_initialized"})
     require(temporary_pose_unavailable(error), "Temporary telemetry errors retain a closed pair");
-  for (const auto* error : {"", "invalid_basis", "outside_calibration_radius", "identity_mismatch"})
+  for (const auto* error :
+       {"", "invalid_basis", "outside_calibration_radius", "outside_local_calibration_radius", "identity_mismatch"})
     require(!temporary_pose_unavailable(error), "Identity and numeric failures remain fatal");
   require(!temporary_pose_unavailable(nullptr), "Null error never classified temporary");
   for (const auto reason :

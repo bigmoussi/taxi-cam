@@ -64,6 +64,19 @@ inline bool temporary_pose_unavailable(const char* reason) noexcept {
                     !std::strcmp(reason, "aircraft_session_changed"));
 }
 
+// Body-pose sample detail when the aircraft is more than 10 km from the local
+// calibration origin (typical after a long sector with a parked pair).
+inline bool outside_local_calibration_radius(const char* reason) noexcept {
+  return reason && !std::strcmp(reason, "outside_local_calibration_radius");
+}
+
+// Issue 54: a stale local lock must not latch pose_invalid (that needs a manual
+// deactivate/activate). Use the existing retryable inspection path so cleanup
+// then recalibration can recreate the pair at the arrival airport.
+inline SceneStopReason stop_reason_for_body_pose_failure(const char* pose_error) noexcept {
+  return outside_local_calibration_radius(pose_error) ? SceneStopReason::inspection_unavailable : SceneStopReason::pose_invalid;
+}
+
 // Observer policy, serialized by the probe mailbox mutex. No native calls.
 // Retry only after the existing controller has confirmed every old ID absent,
 // and a fresh pose plus fresh manager validation is available to the caller.

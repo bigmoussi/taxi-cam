@@ -121,6 +121,9 @@ struct Runtime {
   bool creation_pose_unavailable = false;
   bool pose_captured = false;
   bool pose_busy = false;
+  // Set when sample_body_pose reports outside_local_calibration_radius so the
+  // active-pair path can reset calibration and restart creation (issue 54).
+  bool stale_local_calibration = false;
   bool inspection_changed = false;
   SceneStopReason inspection_stop = SceneStopReason::identity_refused;
   MountPair mounts = default_mounts();
@@ -348,6 +351,7 @@ std::string describe_camera_match(const CameraMatchReport& report) {
 bool capture_pose(Runtime& runtime) {
   runtime.pose_captured = false;
   runtime.pose_busy = false;
+  runtime.stale_local_calibration = false;
   runtime.mounted_poses = {};
   std::string memory_detail;
   auto body = sample_body_pose(GetTickCount64());
@@ -370,6 +374,14 @@ bool capture_pose(Runtime& runtime) {
   if (!body.valid && temporary_pose_unavailable(body.error)) {
     runtime.pose_busy = true;
     runtime.message = std::string("Aircraft telemetry temporarily unavailable; render gates remain closed: ") + body.error;
+    return false;
+  }
+  if (!body.valid && outside_local_calibration_radius(body.error)) {
+    // Departure local lock is still held after a long sector. Clear it so the
+    // caller can recalibrate and recreate instead of latching pose_invalid.
+    reset_body_pose_calibration();
+    runtime.stale_local_calibration = true;
+    runtime.message = std::string("Aircraft body pose unavailable: ") + body.error;
     return false;
   }
   if (!body.valid && !body.calibration_required) {
@@ -1438,8 +1450,17 @@ void observer(void* manager) noexcept {
     } else if (requested_start && !before.owned_ids[0] && !before.owned_ids[1] && !before.owned_ids[2] && !start_body.valid && !start_body.calibration_required) {
       // Public startup is asynchronous. Do not walk private manager, pool or
       // aircraft graphs repeatedly while its first telemetry is still pending.
-      report.pair = before;
-      report.message = std::string("Waiting for read-only aircraft telemetry: ") + start_body.error;
+      // A stale local lock after relocation is cleared so the next tick can
+      // enter the ordinary calibration path (issue 54).
+      if (outside_local_calibration_radius(start_body.error)) {
+        reset_body_pose_calibration();
+        report.pair = before;
+        report.pose_waiting = true;
+        report.message = "Local body-pose calibration expired after relocation; waiting to recalibrate.";
+      } else {
+        report.pair = before;
+        report.message = std::string("Waiting for read-only aircraft telemetry: ") + start_body.error;
+      }
     } else if (close_only && close_owned_pair(runtime, manager, before, report)) {
       runtime.schedule = next_schedule;
     } else if (!inspect_manager()) {
@@ -1838,6 +1859,21 @@ void observer(void* manager) noexcept {
             } else if (hold_changed_session(runtime, pair)) {
               report.pose_waiting = true;
               runtime.message = "Aircraft changed during pose inspection; retaining the closed camera pair.";
+            } else if (runtime.stale_local_calibration) {
+              // Issue 54: parked re-arm after a long sector. Drop the departure
+              // local lock and retire the pair through the retryable path so
+              // creation restarts at the arrival airport instead of latching
+              // pose_invalid (manual deactivate/activate remains a fallback).
+              reset_body_pose_calibration();
+              runtime.stale_local_calibration = false;
+              record_stop(runtime, stop_reason_for_body_pose_failure("outside_local_calibration_radius"),
+                          "Local body-pose calibration expired after relocation; requesting a fresh camera pair.", now);
+              scene_handoff().stop_scene();
+              runtime.pair.request_disable();
+              timed(runtime, ProbeStage::lifecycle, [&] { runtime.pair.process_update(runtime.token, callbacks); });
+              pair = runtime.pair.snapshot();
+              runtime.stage_error = "Local body-pose calibration expired after relocation; owned cameras were closed for recalibration.";
+              runtime.message = runtime.stage_error;
             } else {
               record_stop(runtime, SceneStopReason::pose_invalid, runtime.message.c_str(), now);
               scene_handoff().stop_scene();
