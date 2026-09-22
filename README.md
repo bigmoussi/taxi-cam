@@ -26,7 +26,7 @@ If you find Taxi Cam useful, please consider donating.
 - **iniBuilds A350-900**, including **ULR** — nose and tail cameras on the PFD.
 - **iniBuilds A350-1000** — nose and tail cameras on the PFD.
 - **iniBuilds A380** — nose and tail cameras; use keyboard shortcuts or manual previews because its TAXI buttons are marked INOP.
-- **PMDG 777** (777-200ER, 777-300ER and 777F) — three cameras (nose gear, left wing, right wing) on the inboard navigation displays. Shared texture `DUS`, gauges `DU_LeftInboard` (1058, 33, 958, 971) and `DU_RightInboard` (30, 1058, 958, 971). Split-bottom ND layout; ground-speed overlay off; reference guides disabled. Use Ctrl + Shift + L / R / B. No cockpit CAM button.
+- **PMDG 777** (777-200ER, 777-300ER and 777F) — three cameras (nose gear, left wing, right wing) on the inboard navigation displays. Split-bottom ND layout; ground-speed overlay off; reference guides disabled. Use Ctrl + Shift + L / R / B. No cockpit CAM button.
 
 ## Installation
 
