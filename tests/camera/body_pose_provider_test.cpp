@@ -327,8 +327,46 @@ void session_readiness_regressions(Check check) {
       check(!stale.public_ready && stale.calibration_samples == 1);
     }
   }
+  // Issue 54: after relocating more than 10 km from the calibration origin,
+  // samples refuse with outside_local_calibration_radius. Resetting clears the
+  // departure lock so arrival recalibration can proceed. A short taxi move stays
+  // inside the radius and remains valid without reset.
+  {
+    check(sample_body_pose(now).valid);
+    std::array<double, 7> near_bv{51.01, -0.1, 123, 0, 0, 270, 0};
+    std::array<double, 3> near_cv{51.01, -0.1, 125};
+    std::memcpy(body.data() + 40, near_bv.data(), sizeof(near_bv));
+    std::memcpy(camera.data() + 12, near_cv.data(), sizeof(near_cv));
+    now = GetTickCount64() + 10;
+    supply();
+    check(sample_body_pose(now).valid);
+    std::array<double, 7> far_bv{51.2, -0.1, 123, 0, 0, 270, 0};
+    std::array<double, 3> far_cv{51.2, -0.1, 125};
+    std::memcpy(body.data() + 40, far_bv.data(), sizeof(far_bv));
+    std::memcpy(camera.data() + 12, far_cv.data(), sizeof(far_cv));
+    now = GetTickCount64() + 20;
+    supply();
+    const auto relocated = sample_body_pose(now);
+    check(!relocated.valid && !relocated.calibration_required &&
+          std::strcmp(relocated.error, "outside_local_calibration_radius") == 0);
+    reset_body_pose_calibration();
+    const auto waiting = sample_body_pose(now);
+    check(!waiting.valid && waiting.calibration_required && std::strcmp(waiting.error, "local_camera_calibration_required") == 0);
+    const auto arrival = body_math::ecef(far_cv[0], far_cv[1], far_cv[2]);
+    bool arrived = false;
+    for (unsigned sample = 0; sample < 3; ++sample) {
+      now = GetTickCount64() + 30 + sample;
+      supply();
+      arrived = calibrate_body_pose(arrival, static_cast<float>(fov), now);
+      check(sample < 2 ? !arrived : arrived);
+    }
+    check(sample_body_pose(now).valid);
+    // Restore the original local coordinates for the refusal fixture below.
+    std::memcpy(body.data() + 40, bv.data(), sizeof(bv));
+    std::memcpy(camera.data() + 12, cv.data(), sizeof(cv));
+  }
   // A camera proven to be somewhere else still loses the latch.
-  now = GetTickCount64() + 4;
+  now = GetTickCount64() + 40;
   supply();
   CameraMatchReport wrong;
   check(!calibrate_body_pose(body_math::ecef(0, 0, 0), static_cast<float>(fov), now, &wrong));
