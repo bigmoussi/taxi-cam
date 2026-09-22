@@ -256,7 +256,10 @@ try {
     Assert-SettingsTest $refused 'Locked destination executable did not fail keep-install.'
     Assert-SettingsTest ((Get-TaxiIniKey $settingsIni 'display' 'camera_rate') -eq '15') 'Failed keep-install left a forced camera_rate after rollback.'
     Assert-CameraRateRevision $settingsIni $null
-    Assert-SettingsTest ((Get-TaxiIniKey $profileIni 'display' 'camera_rate') -eq '15' -and (Get-TaxiIniKey $profileIni 'nose' 'forward') -eq '27.25' -and (Get-TaxiIniKey $profileIni 'display' 'calibration_budget') -eq '4096') 'Failed keep-install rate rollback dropped calibration.'
+    Assert-ExposureRevision $settingsIni $null
+    Assert-SettingsTest ((Get-TaxiIniKey $profileIni 'display' 'camera_rate') -eq '15') 'Failed keep-install left a forced profile camera_rate after rollback.'
+    Assert-SettingsTest ((Get-TaxiIniKey $profileIni 'display' 'exposure') -eq '-7.5') 'Failed keep-install left a forced exposure after rollback.'
+    Assert-SettingsTest ((Get-TaxiIniKey $profileIni 'nose' 'forward') -eq '27.25' -and (Get-TaxiIniKey $profileIni 'display' 'calibration_budget') -eq '4096') 'Failed keep-install rate rollback dropped calibration.'
     Assert-Saved $preserved
     Assert-Saved $unrelated
     Invoke-Install
@@ -266,6 +269,7 @@ try {
     Assert-ExposureRevision $settingsIni '1'
     Assert-SettingsTest ((Get-TaxiIniKey $settingsIni 'aircraft' 'profile') -eq '4') 'Retry keep-install after rate rollback changed aircraft selection.'
     Assert-MountCalibrationUnchanged $profileIni
+    Assert-SettingsTest ((Get-TaxiIniKey $profileIni 'display' 'exposure') -eq '-8') 'Retry keep-install after rollback did not force exposure to -8.'
 
     Write-RateFixture
     Assert-SettingsTest ($null -eq (Get-TaxiIniKey $settingsIni 'display' 'camera_rate')) 'Missing-key fixture still had camera_rate.'
