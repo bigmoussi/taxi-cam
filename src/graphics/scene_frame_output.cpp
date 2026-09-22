@@ -253,6 +253,26 @@ bool SceneFrameOutput::prepare(ID3D12Resource* nose, DXGI_FORMAT nose_format, ID
     gpu_timing_.end(0);
     gpu_timing_.start(1);
   }
+  record_buffer_copy();
+  if (timed) {
+    gpu_timing_.end(1);
+    if (patch_requests_)
+      gpu_timing_.start(2);
+  }
+  if (!prepare_patches())
+    return false;
+  if (timed) {
+    if (patch_requests_)
+      gpu_timing_.end(2);
+    gpu_timing_.resolve();
+  }
+  if (FAILED(list_->Close()))
+    return fail("Closing the private composition list failed.");
+  prepared_ = true;
+  return true;
+}
+
+void SceneFrameOutput::record_buffer_copy() noexcept {
   D3D12_RESOURCE_BARRIER barrier{};
   barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
   barrier.Transition = {buffer_, 0, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST};
@@ -270,22 +290,30 @@ bool SceneFrameOutput::prepare(ID3D12Resource* nose, DXGI_FORMAT nose_format, ID
   barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
   barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COMMON;
   list_->ResourceBarrier(1, &barrier);
-  if (timed) {
-    gpu_timing_.end(1);
-    if (patch_requests_)
-      gpu_timing_.start(2);
-  }
-  if (!prepare_patches())
+}
+
+bool SceneFrameOutput::prepare_waiting() noexcept {
+  if (calibration_only_ || !idle() || prepared_)
     return false;
-  if (timed) {
-    if (patch_requests_)
-      gpu_timing_.end(2);
-    gpu_timing_.resolve();
-  }
-  if (FAILED(list_->Close()))
-    return fail("Closing the private composition list failed.");
+  if (FAILED(device_->GetDeviceRemovedReason()))
+    return fail("The waiting page device was removed.");
+  if (FAILED(allocator_->Reset()) || FAILED(list_->Reset(allocator_, nullptr)))
+    return fail("Resetting the private waiting page list failed.");
+  gpu_timing_.discard_unsubmitted();
+  if (FAILED(compositor_->record_waiting(list_)))
+    return fail("Recording the waiting page failed.");
+  record_buffer_copy();
+  if (!prepare_patches() || FAILED(list_->Close()))
+    return fail("Closing the private waiting page list failed.");
   prepared_ = true;
   return true;
+}
+
+bool SceneFrameOutput::patches_pending() const noexcept {
+  for (const auto& patch : patches_)
+    if (patch.width && !patch.written)
+      return true;
+  return false;
 }
 
 bool SceneFrameOutput::prepare_calibration(std::uint64_t frame) noexcept {

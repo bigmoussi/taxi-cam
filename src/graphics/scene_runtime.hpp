@@ -12,6 +12,9 @@ struct QueuePatchConfig {
   std::uint32_t profile = 0;
   unsigned camera_mask = 0, calibration_mask = 0;
   std::array<DXGI_FORMAT, 2> formats{DXGI_FORMAT_UNKNOWN, DXGI_FORMAT_UNKNOWN};
+  // Camera sides still inside their minimum PLEASE WAIT time. The runtime also
+  // shows the page, on profiles that have one, while the image is missing or stale.
+  unsigned waiting_mask = 0;
   bool operator==(const QueuePatchConfig&) const = default;
 };
 struct QueuePatch {
@@ -41,6 +44,8 @@ bool set_patch_profile(std::uint64_t device_key, std::uint32_t profile);
 // setters; the original application barrier remains the caller's responsibility.
 // A validated cold request reserves bounded metadata and returns false without
 // GPU work. service() builds that exact patch for subsequent copy opportunities.
+// waiting marks a side inside its minimum PLEASE WAIT time; the retained
+// waiting page is also used when the camera image is missing or stale.
 bool copy_patch(ID3D12GraphicsCommandList*,
                 std::uint64_t device_key,
                 ID3D12Resource* target,
@@ -48,7 +53,8 @@ bool copy_patch(ID3D12GraphicsCommandList*,
                 DXGI_FORMAT view_format,
                 const D3D12_RECT& destination,
                 const D3D12_RECT& content,
-                ID3D12GraphicsCommandList7* enhanced = nullptr);
+                ID3D12GraphicsCommandList7* enhanced = nullptr,
+                bool waiting = false);
 struct Snapshot {
   std::uint64_t session_generation = 0;
   bool session_active = false;
@@ -67,6 +73,8 @@ struct Snapshot {
   std::uint64_t stale_frames = 0;
   // Completed captures accepted per feed, compared with activations per feed.
   std::array<std::uint64_t, 3> accepted_frames{};
+  // Submitted renders of the retained PLEASE WAIT page.
+  std::uint64_t waiting_pages = 0;
   std::uint32_t patch_requests = 0;
   std::uint64_t patch_draws = 0;
   float display_exposure_ev = -8.8f;
@@ -113,5 +121,6 @@ bool stamp_at_recording_end(ID3D12GraphicsCommandList*,
                             UINT height,
                             DXGI_FORMAT depth_format = DXGI_FORMAT_UNKNOWN,
                             const D3D12_RECT* destination = nullptr,
-                            const D3D12_RECT* content = nullptr);
+                            const D3D12_RECT* content = nullptr,
+                            bool waiting = false);
 }  // namespace taxi_camera::scene_runtime

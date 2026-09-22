@@ -506,6 +506,30 @@ void active_profile_switch_case(bool warp) {
   std::array<std::uint64_t, 2> old_routes{};
   SceneCopyObservation initial_match{}, previous_match{};
   UINT64 checked_pixels = 0;
+  // Before fresh feeds, Airbus profiles show the retained PLEASE WAIT page:
+  // black content except the centred text box. No stale camera pixel survives.
+  const auto require_waiting_page = [&](const std::array<std::vector<unsigned char>, 2>& pixels, bool a350, UINT offset,
+                                        const char* label) {
+    constexpr UINT TextLeft = (768 - 344) / 2, TextTop = (763 - 40) / 2;
+    UINT text_pixels = 0;
+    for (UINT side = 0; side < 2; ++side) {
+      const UINT left = a350 && side ? 838u : 0u, width = a350 ? 806u : 768u;
+      const auto row_pitch = footprints[offset + side].Footprint.RowPitch;
+      for (UINT y = 12; y < 763; ++y)
+        for (UINT x = left + 16; x < left + width - 16; ++x) {
+          const auto* pixel = pixels[side].data() + SIZE_T{y} * row_pitch + 4 * x;
+          const auto wx = static_cast<UINT>((x - left - 16 + .5) * 768 / (width - 32));
+          const auto wy = static_cast<UINT>((y - 12 + .5) * 763 / 751);
+          const bool text = wx + 1 >= TextLeft && wx <= TextLeft + 344 && wy + 1 >= TextTop && wy <= TextTop + 40;
+          if (!text)
+            require(pixel[0] == 0 && pixel[1] == 0 && pixel[2] == 0 && pixel[3] == 255, label);
+          else if (pixel[1] > 64)
+            ++text_pixels;
+          ++checked_pixels;
+        }
+    }
+    require(text_pixels > 1000, "PLEASE WAIT text reaches both sides");
+  };
   for (UINT phase = 0; phase < 3; ++phase) {
     const bool a350 = phase == 1;
     const auto& profile = a350 ? profiles::A359 : profiles::A380;
@@ -553,16 +577,18 @@ void active_profile_switch_case(bool warp) {
     runtime::service();
     require(!runtime::snapshot(key).output && runtime::snapshot(key).frames == old_status.frames,
             "Old composed frame is unavailable before fresh sources");
-    const auto old_stamps = runtime::snapshot(key).stamps;
-    render_displays(offset, 3);
-    require(runtime::snapshot(key).stamps == old_stamps, "No stale profile image can stamp before either fresh feed");
+    service_until([&] { return runtime::snapshot(key).waiting_pages > 0; }, "Retained PLEASE WAIT page is rendered");
+    auto old_stamps = runtime::snapshot(key).stamps;
+    require_waiting_page(render_displays(offset, 3), a350, offset, "No stale profile image can stamp before either fresh feed");
+    require(runtime::snapshot(key).stamps == old_stamps + 2, "PLEASE WAIT covers both current-profile PFDs before fresh feeds");
+    old_stamps = runtime::snapshot(key).stamps;
     const auto completed = runtime::snapshot(key).capture.completed;
     draw_source(0, phase & 1);
     service_until([&] { return runtime::snapshot(key).capture.completed > completed; }, "Fresh nose capture completes");
     require(!runtime::snapshot(key).output && runtime::snapshot(key).frames == old_status.frames,
             "One fresh feed cannot pair with the old profile tail");
-    render_displays(offset, 3);
-    require(runtime::snapshot(key).stamps == old_stamps, "No stale mixed-profile image can stamp after only one fresh feed");
+    require_waiting_page(render_displays(offset, 3), a350, offset, "No stale mixed-profile image can stamp after only one fresh feed");
+    require(runtime::snapshot(key).stamps == old_stamps + 2, "PLEASE WAIT stays until both fresh feeds compose");
     Sleep(20);
     draw_source(1, phase & 1);
     service_until([&] { return runtime::snapshot(key).output && runtime::snapshot(key).frames > old_status.frames; },

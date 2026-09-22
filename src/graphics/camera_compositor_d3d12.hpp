@@ -221,37 +221,9 @@ class CameraCompositorD3D12 {
       transition(private_list, inputs_[index].get(), states[index], D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
     }
     transition(private_list, output_.get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
-
-    private_list->SetGraphicsRootSignature(root_signature_.get());
-    private_list->SetPipelineState(pipeline_.get());
-    ID3D12DescriptorHeap* heaps[]{srv_heap_.get()};
-    private_list->SetDescriptorHeaps(1, heaps);
-    private_list->SetGraphicsRootDescriptorTable(0, srv_heap_->GetGPUDescriptorHandleForHeapStart());
-    UINT hdr = (formats_[0] == DXGI_FORMAT_R11G11B10_FLOAT ? 1u : 0u) | (formats_[1] == DXGI_FORMAT_R11G11B10_FLOAT ? 2u : 0u) |
-               (formats_[2] == DXGI_FORMAT_R11G11B10_FLOAT ? 4u : 0u);
-    const struct {
-      UINT hdr_mask;
-      float exposure;
-      UINT guides;
-      UINT ground_speed;
-      UINT ground_speed_valid;
-      profiles::Composition composition;
-    } display{hdr,
-              std::exp2(exposure_ev_),
-              reference_guides_ ? 1u : 0u,
-              ground_speed_,
-              ground_speed_hidden_ ? 2u : (ground_speed_valid_ ? 1u : 0u),
-              composition_};
-    static_assert(sizeof(display) == 32 * sizeof(UINT));
-    private_list->SetGraphicsRoot32BitConstants(1, 32, &display, 0);
-    private_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    const D3D12_VIEWPORT viewport{0, 0, static_cast<float>(Width), static_cast<float>(Height), 0, 1};
-    const D3D12_RECT scissor{0, 0, static_cast<LONG>(Width), static_cast<LONG>(Height)};
-    private_list->RSSetViewports(1, &viewport);
-    private_list->RSSetScissorRects(1, &scissor);
-    private_list->OMSetRenderTargets(1, &rtv_, FALSE, nullptr);
-    private_list->DrawInstanced(3, 1, 0, 0);
-
+    const UINT hdr = (formats_[0] == DXGI_FORMAT_R11G11B10_FLOAT ? 1u : 0u) | (formats_[1] == DXGI_FORMAT_R11G11B10_FLOAT ? 2u : 0u) |
+                     (formats_[2] == DXGI_FORMAT_R11G11B10_FLOAT ? 4u : 0u);
+    draw_output(private_list, hdr, ground_speed_hidden_ ? 2u : (ground_speed_valid_ ? 1u : 0u));
     transition(private_list, output_.get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
     for (std::size_t index = 0; index < inputs_.size(); ++index) {
       if (index == 2 && shared_bottom)
@@ -265,6 +237,33 @@ class CameraCompositorD3D12 {
 
   HRESULT record(ID3D12GraphicsCommandList* private_list, D3D12_RESOURCE_STATES nose_before, D3D12_RESOURCE_STATES tail_before) noexcept {
     return record(private_list, nose_before, tail_before, tail_before);
+  }
+
+  // Black page with PLEASE WAIT centred in the GS font and speed colour. No
+  // input is sampled or transitioned. A compositor that has never had inputs
+  // writes null SRVs once, before its first submission, so the root table
+  // stays valid. Leaves output COPY_SOURCE, as record() does.
+  HRESULT record_waiting(ID3D12GraphicsCommandList* private_list) noexcept {
+    if (!output_.get() || !private_list || private_list->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT || !same_device(private_list))
+      return fail(E_INVALIDARG, "A private direct list is required for the waiting page.");
+    if (!inputs_[0].get() && !null_inputs_) {
+      auto handle = srv_heap_->GetCPUDescriptorHandleForHeapStart();
+      const UINT stride = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+      D3D12_SHADER_RESOURCE_VIEW_DESC view{};
+      view.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+      view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+      view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+      view.Texture2D.MipLevels = 1;
+      for (std::size_t index = 0; index < inputs_.size(); ++index, handle.ptr += stride)
+        device_->CreateShaderResourceView(nullptr, &view, handle);
+      null_inputs_ = true;
+    }
+    transition(private_list, output_.get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
+    draw_output(private_list, 0, WaitingPageMode);
+    transition(private_list, output_.get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    ++statistics_.recordings;
+    error_[0] = '\0';
+    return S_OK;
   }
 
   // Call only after checked GPU completion, including downstream output copies.
@@ -334,6 +333,34 @@ class CameraCompositorD3D12 {
   }
 
   bool same_device(ID3D12DeviceChild* child) const noexcept { return same_native_device(child, device_.get()); }
+
+  // Ground-speed modes in the shader constants: 0 unavailable, 1 valid,
+  // 2 hidden, and 3 the waiting page.
+  static constexpr UINT WaitingPageMode = 3;
+  void draw_output(ID3D12GraphicsCommandList* private_list, UINT hdr, UINT ground_speed_mode) noexcept {
+    private_list->SetGraphicsRootSignature(root_signature_.get());
+    private_list->SetPipelineState(pipeline_.get());
+    ID3D12DescriptorHeap* heaps[]{srv_heap_.get()};
+    private_list->SetDescriptorHeaps(1, heaps);
+    private_list->SetGraphicsRootDescriptorTable(0, srv_heap_->GetGPUDescriptorHandleForHeapStart());
+    const struct {
+      UINT hdr_mask;
+      float exposure;
+      UINT guides;
+      UINT ground_speed;
+      UINT ground_speed_valid;
+      profiles::Composition composition;
+    } display{hdr, std::exp2(exposure_ev_), reference_guides_ ? 1u : 0u, ground_speed_, ground_speed_mode, composition_};
+    static_assert(sizeof(display) == 32 * sizeof(UINT));
+    private_list->SetGraphicsRoot32BitConstants(1, 32, &display, 0);
+    private_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    const D3D12_VIEWPORT viewport{0, 0, static_cast<float>(Width), static_cast<float>(Height), 0, 1};
+    const D3D12_RECT scissor{0, 0, static_cast<LONG>(Width), static_cast<LONG>(Height)};
+    private_list->RSSetViewports(1, &viewport);
+    private_list->RSSetScissorRects(1, &scissor);
+    private_list->OMSetRenderTargets(1, &rtv_, FALSE, nullptr);
+    private_list->DrawInstanced(3, 1, 0, 0);
+  }
 
   static DXGI_FORMAT typeless_family(DXGI_FORMAT format) noexcept {
     switch (format) {
@@ -528,12 +555,15 @@ float segment_distance(float2 sample_position, float2 first, float2 last) {
 }
 // Original stroke lettering, defined in a 12 x 20 pixel cell. Chamfered turns
 // and 1.8 pixel strokes keep the small readout legible without enlarged bitmap
-// blocks. Indices 0..9 are digits, followed by G, S and the unavailable dash.
-static const uint2 GlyphPaths[13] = {
+// blocks. Indices 0..9 are digits, followed by G, S and the unavailable dash,
+// then P, L, E, A, W, I and T for the waiting page. Each glyph is one path of
+// at most 16 vertices; E, A, I and T retrace a stroke to reach their bars.
+static const uint2 GlyphPaths[20] = {
   uint2(0, 9), uint2(9, 3), uint2(12, 7), uint2(19, 9), uint2(28, 4), uint2(32, 9), uint2(41, 11), uint2(52, 3), uint2(55, 16),
-  uint2(71, 11), uint2(82, 10), uint2(92, 12), uint2(104, 2)
+  uint2(71, 11), uint2(82, 10), uint2(92, 12), uint2(104, 2), uint2(106, 7), uint2(113, 3), uint2(116, 7), uint2(123, 8),
+  uint2(131, 5), uint2(136, 6), uint2(142, 4)
 };
-static const float2 GlyphVertices[106] = {
+static const float2 GlyphVertices[146] = {
   // 0
   float2(3.5, 1.5), float2(8.5, 1.5), float2(10.5, 3.5), float2(10.5, 16.5), float2(8.5, 18.5), float2(3.5, 18.5), float2(1.5, 16.5),
   float2(1.5, 3.5), float2(3.5, 1.5),
@@ -568,11 +598,25 @@ static const float2 GlyphVertices[106] = {
   float2(10.5, 4), float2(8.5, 1.5), float2(3.5, 1.5), float2(1.5, 3.5), float2(1.5, 7.5), float2(3.5, 9.5), float2(8.5, 10.5),
   float2(10.5, 12.5), float2(10.5, 16.5), float2(8.5, 18.5), float2(3.5, 18.5), float2(1.5, 16),
   // dash
-  float2(1.5, 10), float2(10.5, 10)
+  float2(1.5, 10), float2(10.5, 10),
+  // P
+  float2(1.5, 18.5), float2(1.5, 1.5), float2(8.5, 1.5), float2(10.5, 3.5), float2(10.5, 7.5), float2(8.5, 9.5), float2(1.5, 9.5),
+  // L
+  float2(1.5, 1.5), float2(1.5, 18.5), float2(10.5, 18.5),
+  // E
+  float2(10.5, 1.5), float2(1.5, 1.5), float2(1.5, 9.5), float2(8, 9.5), float2(1.5, 9.5), float2(1.5, 18.5), float2(10.5, 18.5),
+  // A
+  float2(1.5, 18.5), float2(1.5, 5.5), float2(5.5, 1.5), float2(6.5, 1.5), float2(10.5, 5.5), float2(10.5, 18.5), float2(10.5, 11.5),
+  float2(1.5, 11.5),
+  // W
+  float2(1.5, 1.5), float2(3, 18.5), float2(6, 9), float2(9, 18.5), float2(10.5, 1.5),
+  // I
+  float2(3, 1.5), float2(9, 1.5), float2(6, 1.5), float2(6, 18.5), float2(3, 18.5), float2(9, 18.5),
+  // T
+  float2(1.5, 1.5), float2(10.5, 1.5), float2(6, 1.5), float2(6, 18.5)
 };
-float glyph_coverage(float2 position, float2 origin, uint glyph) {
-  float2 local = position - origin;
-  if (any(local < 0) || any(local >= float2(12, 20))) return 0;
+// Distance in cell units from a 12 x 20 cell position to the glyph strokes.
+float glyph_distance(float2 local, uint glyph) {
   uint2 path = GlyphPaths[glyph];
   float distance = 100;
   // A fixed unroll also covers the one-segment dash without the shader
@@ -584,9 +628,30 @@ float glyph_coverage(float2 position, float2 origin, uint glyph) {
   // The one has a short base; the three has a distinct middle bar.
   if (glyph == 1) distance = min(distance, segment_distance(local, float2(1.5, 18.5), float2(10.5, 18.5)));
   if (glyph == 3) distance = min(distance, segment_distance(local, float2(4.5, 10), float2(7.5, 10)));
+  return distance;
+}
+float glyph_coverage(float2 position, float2 origin, uint glyph) {
+  float2 local = position - origin;
+  if (any(local < 0) || any(local >= float2(12, 20))) return 0;
   // One pixel of edge coverage around the 0.9 pixel stroke radius. The box
   // remains opaque: coverage scales the text colour, never its output alpha.
-  return saturate(1.4 - distance);
+  return saturate(1.4 - glyph_distance(local, glyph));
+}
+// PLEASE WAIT in cell order; 20 is the space. The GS font drawn at twice its
+// size keeps a one-pixel edge ramp, so the text is sharp rather than blurred.
+static const uint WaitingText[11] = { 13, 14, 15, 16, 11, 15, 20, 17, 16, 18, 19 };
+static const float WaitingScale = 2;
+float4 waiting_pixel(float2 position) {
+  float2 size = float2(16 * 10 + 12, 20) * WaitingScale;
+  float2 origin = floor((float2(768, 763) - size) * 0.5);
+  float2 local = (position - origin) / WaitingScale;
+  if (any(local < 0) || local.y >= 20 || local.x >= 16 * 11) return float4(0, 0, 0, 1);
+  uint cell = min((uint)(local.x / 16), 10);
+  uint glyph = WaitingText[cell];
+  float2 inner = local - float2(16 * cell, 0);
+  if (glyph == 20 || inner.x >= 12) return float4(0, 0, 0, 1);
+  float coverage = saturate(WaitingScale * (0.9 - glyph_distance(inner, glyph)) + 0.5);
+  return float4(float3(SpeedRed, SpeedGreen, SpeedBlue) * coverage, 1);
 }
 uint ground_speed_digits() {
   // Mode 1 is a live reading. Unavailable (0) keeps the two-digit panel width.
@@ -669,6 +734,8 @@ float4 split_bottom_t() {
   return float4(28.0 / 255.0, 27.0 / 255.0, 34.0 / 255.0, 1);
 }
 float4 ps_main(float4 position : SV_Position) : SV_Target {
+  // Mode 3 is the waiting page: no camera input is sampled.
+  if (GroundSpeedValid == 3) return waiting_pixel(position.xy);
   // Mode 2 hides the overlay entirely (no glyphs, no black panel). Modes 0/1
   // keep the existing GS panel so font fixtures stay unchanged.
   if (GroundSpeedValid != 2) {
@@ -768,6 +835,7 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
   UINT ground_speed_ = 0;
   bool ground_speed_valid_ = false;
   bool ground_speed_hidden_ = false;
+  bool null_inputs_ = false;
   std::array<char, 1024> error_{};
 };
 

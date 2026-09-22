@@ -223,13 +223,15 @@ struct Registry {
   std::atomic<bool> pfd_inventory_complete{true};
   const profiles::AircraftProfile* profile = &profiles::A380;
   unsigned active_mask{}, calibration_mask{};
+  // Active sides still inside their minimum PLEASE WAIT time.
+  unsigned waiting_mask{};
   std::array<std::shared_ptr<Resource>, 2> selected_resources{};
   std::array<std::atomic<ID3D12Resource*>, 2> selected_native{};
   std::array<std::atomic<std::uint64_t>, 2> selected_ids{};
   std::atomic<unsigned> selected_mask{};
   std::atomic<std::uint64_t> queue_patch_generation{1};
   std::array<std::uint64_t, 2> queue_patch_targets{};
-  unsigned queue_patch_camera{}, queue_patch_calibration{};
+  unsigned queue_patch_camera{}, queue_patch_calibration{}, queue_patch_waiting{};
   std::uint32_t queue_patch_profile{};
   std::atomic<std::uint64_t> queue_patch_plans{};
   std::array<std::atomic<std::uint64_t>, static_cast<unsigned>(DisplaySubmissionOutcome::count)> queue_outcomes{};
@@ -487,10 +489,11 @@ void refresh_selected(Registry& r) {
   r.selected_mask.store(r.active_mask | r.calibration_mask, std::memory_order_relaxed);
   const std::array<std::uint64_t, 2> selected{r.selected_ids[0].load(), r.selected_ids[1].load()};
   if (selected != r.queue_patch_targets || r.queue_patch_camera != r.active_mask || r.queue_patch_calibration != r.calibration_mask ||
-      r.queue_patch_profile != r.profile->id) {
+      r.queue_patch_waiting != (r.waiting_mask & r.active_mask) || r.queue_patch_profile != r.profile->id) {
     r.queue_patch_targets = selected;
     r.queue_patch_camera = r.active_mask;
     r.queue_patch_calibration = r.calibration_mask;
+    r.queue_patch_waiting = r.waiting_mask & r.active_mask;
     r.queue_patch_profile = r.profile->id;
     r.queue_patch_generation.fetch_add(1, std::memory_order_release);
   }
@@ -1485,7 +1488,8 @@ void drain_pfds(ID3D12GraphicsCommandList* native, std::uint64_t id, bool record
       ++r.preferred_copy_attempts;
       // ensure_list's boundary registration has already proved identical QI7.
       auto* enhanced = model == PfdCopyProof::Mode::enhanced_rt ? static_cast<ID3D12GraphicsCommandList7*>(native) : nullptr;
-      if (runtime::copy_patch(native, r.key, view.resource->native, view.resource->desc, format, destination, inner, enhanced)) {
+      if (runtime::copy_patch(native, r.key, view.resource->native, view.resource->desc, format, destination, inner, enhanced,
+                              (r.waiting_mask & (1u << side)) != 0)) {
         ++r.preferred_copy_stamps;
         r.preferred_copy_reason = model == PfdCopyProof::Mode::legacy_rt ? "copied_legacy" : "copied_enhanced";
         list->pending_rt[side] = false;
@@ -1527,7 +1531,8 @@ void drain_pfds(ID3D12GraphicsCommandList* native, std::uint64_t id, bool record
     // This is the last work recorded before native Close. Leave our bindings
     // in place: no application commands follow and no root replay is needed.
     if (runtime::stamp_at_recording_end(native, list->graphics, r.key, format, static_cast<UINT>(view.resource->desc.Width),
-                                        view.resource->desc.Height, DXGI_FORMAT_UNKNOWN, &destination, &inner)) {
+                                        view.resource->desc.Height, DXGI_FORMAT_UNKNOWN, &destination, &inner,
+                                        (r.waiting_mask & (1u << side)) != 0)) {
       ++r.fallback_stamps;
       ++r.recording_end_draws;
       list->pending_rt[side] = false;
@@ -1589,6 +1594,7 @@ void copy_pending_pfd(ID3D12GraphicsCommandList* native,
   struct PlacedRect {
     profiles::DisplayRect area{};
     profiles::DisplayRect content{};
+    bool waiting = false;
   };
   std::array<PlacedRect, 2> placed{};
   unsigned placed_count = 0;
@@ -1607,7 +1613,8 @@ void copy_pending_pfd(ID3D12GraphicsCommandList* native,
           item = r.selected_resources[i];
         if (r.selected_resources[i] != item)
           continue;
-        placed[placed_count++] = {profiles::display_rect(*r.profile, i), profiles::display_content_rect(*r.profile, i)};
+        placed[placed_count++] = {profiles::display_rect(*r.profile, i), profiles::display_content_rect(*r.profile, i),
+                                  (r.waiting_mask & (1u << i)) != 0};
       }
     if (!item || !placed_count ||
         !profiles::matches_display(*r.profile, static_cast<UINT>(item->desc.Width), item->desc.Height, item->desc.MipLevels,
@@ -1661,7 +1668,7 @@ void copy_pending_pfd(ID3D12GraphicsCommandList* native,
                            static_cast<LONG>(content.bottom)};
     ++r.copy_attempts;
     if (!runtime::copy_patch(native, r.key, view.resource->native, view.resource->desc, output_format(view), destination, inner,
-                             enhanced)) {
+                             enhanced, placed[i].waiting)) {
       ++r.copy_rejected;
       r.copy_error = "runtime_copy_rejected";
     } else
@@ -3276,6 +3283,7 @@ void service_display_patches() noexcept {
       if (config.formats[side] == DXGI_FORMAT_UNKNOWN)
         continue;
       config.camera_mask |= r.active_mask & (1u << side);
+      config.waiting_mask |= r.active_mask & r.waiting_mask & (1u << side);
       config.calibration_mask |= r.calibration_mask & (1u << side);
     }
   }
@@ -3312,6 +3320,12 @@ void set_target_mask(unsigned mask) noexcept {
   auto& r = registry();
   const std::lock_guard lock(r.mutex);
   r.active_mask = mask & 3u;
+  refresh_selected(r);
+}
+void set_waiting_mask(unsigned mask) noexcept {
+  auto& r = registry();
+  const std::lock_guard lock(r.mutex);
+  r.waiting_mask = mask & 3u;
   refresh_selected(r);
 }
 std::array<std::uint64_t, 2> target_ids() noexcept {

@@ -16,6 +16,7 @@
 #include "../shared/rotating_log.hpp"
 #include "../shared/scene_demand.hpp"
 #include "../shared/sim_messages.hpp"
+#include "../shared/waiting_page.hpp"
 #include "camera_status.hpp"
 #include "crash_evidence.hpp"
 #include "d3d12_bridge.hpp"
@@ -270,6 +271,7 @@ DWORD run_impl() {
   std::vector<PfdTargetObservation> inventory;
   unsigned rate{}, feeds{}, applied_profile{};
   ParkedRatePolicy parked_policy;
+  win::WaitingPageTimer waiting_page;
   EffectiveCameraRate effective_rate;
   std::uint64_t applied_profile_request{}, applied_session_epoch{};
   std::uint64_t pending_profile_request{}, pending_session_epoch{}, transition_token{};
@@ -642,6 +644,8 @@ DWORD run_impl() {
     // Warmup and scene-only diagnostics need capture observation without PFD
     // writes. Settled OFF may bypass PFD state while lifetime tracking remains.
     win::set_graphics_observation_demand(!demand.suspend || calibration != 0);
+    // Before the target mask: a newly admitted side starts on the waiting page.
+    win::set_waiting_mask(waiting_page.observe(GetTickCount64(), active));
     win::set_target_mask(active);
     win::set_calibration(calibration, settings.calibration_budget);
     const win::OwnedWork owned;
@@ -1138,12 +1142,14 @@ DWORD run_impl() {
       std::snprintf(
           retention_detail, sizeof(retention_detail),
           "Camera retention: created_total=%llu snapshot_bytes=%llu quarantined=%llu prewarm=%s patch_requests=%u patch_draws=%llu "
+          "waiting_pages=%llu "
           "retirement_deferrals=%llu retirement_waiting=%u retirement_status=%s retirement_queues=%u/%u "
           "flags=%llx:%llx/%llx:%llx aa_restores=%llu aa_restore_failures=%llu aa_cleared_pending=%u rt=%03x/%03x rt_refusals=%u "
           "rt_holds=%llu",
           static_cast<unsigned long long>(scene.created_total), static_cast<unsigned long long>(output.capture.bytes),
           static_cast<unsigned long long>(output.capture.quarantined), prewarm.name(), output.patch_requests,
-          static_cast<unsigned long long>(output.patch_draws), static_cast<unsigned long long>(scene.retirement_deferrals),
+          static_cast<unsigned long long>(output.patch_draws), static_cast<unsigned long long>(output.waiting_pages),
+          static_cast<unsigned long long>(scene.retirement_deferrals),
           scene.retirement_waiting, scene.retirement_status, scene.retirement_queue_counts[0], scene.retirement_queue_counts[1],
           static_cast<unsigned long long>(scene.flags[0][0]), static_cast<unsigned long long>(scene.flags[0][1]),
           static_cast<unsigned long long>(scene.flags[1][0]), static_cast<unsigned long long>(scene.flags[1][1]),

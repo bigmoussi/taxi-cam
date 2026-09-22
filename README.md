@@ -51,6 +51,8 @@ On its first launch, **Settings** opens so you can explore the controls. Close t
 2. Allow a few seconds for the cameras to become ready.
 3. Press the left or right EFIS **TAXI** button to show the cameras on that side's PFD. On the iniBuilds A380 and the PMDG 777, use **Ctrl + Shift + L**, **R** or **B**. Repeat the control to turn them off.
 
+On the Airbus aircraft, each display first shows a black **PLEASE WAIT** page for two seconds, in the ground-speed colour, and then the cameras. The page also returns while the camera image is missing or more than a second old. The PMDG 777 does not use it.
+
 The cameras switch off above **60 knots**. If a view appears on the wrong display, use **PFD routing** in Settings to correct it.
 
 Keyboard controls work while Taxi Cam is hidden: **Ctrl + Shift + L** toggles the left display, **Ctrl + Shift + R** the right and **Ctrl + Shift + B** both. In **Settings → Overview → Flight-deck control**, select **Keyboard shortcuts…** to configure or disable them. On aircraft with working TAXI buttons, shortcuts also update the cockpit button state and preserve the **TAXI buttons** setting. See [Keyboard controls](docs/keyboard-shortcuts.md) for details.

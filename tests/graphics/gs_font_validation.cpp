@@ -6,15 +6,114 @@
 #undef wmain
 #include <set>
 
+// The PLEASE WAIT page from a compositor that never had camera inputs: black
+// everywhere except the centred text, drawn in the configured GS colour.
+unsigned waiting_page_case(ID3D12Device* device, const wchar_t* preview) {
+  constexpr unsigned Width = 768, Height = 763, Pitch = 768 * 4, Scale = 2, Advance = 16 * Scale, CellWidth = 12 * Scale;
+  constexpr unsigned TextWidth = (16 * 10 + 12) * Scale, TextHeight = 20 * Scale;
+  constexpr unsigned Left = (Width - TextWidth) / 2, Top = (Height - TextHeight) / 2;
+  constexpr std::array<std::array<float, 3>, 2> colours{{{22.f / 255, 109.f / 255, 19.f / 255}, {1.f, .5f, .25f}}};
+  constexpr UINT64 FrameBytes = UINT64(Pitch) * Height;
+  Compositor compositor;
+  check(compositor.initialize(device), compositor.last_error());
+  const auto initial_writes = compositor.statistics().descriptor_writes;
+  D3D12_RESOURCE_DESC bd{};
+  bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+  bd.Width = colours.size() * FrameBytes;
+  bd.Height = bd.DepthOrArraySize = bd.MipLevels = 1;
+  bd.SampleDesc.Count = 1;
+  bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+  Reference<ID3D12Resource> readback;
+  const auto rh = heap_properties(D3D12_HEAP_TYPE_READBACK);
+  check(device->CreateCommittedResource(&rh, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                        IID_PPV_ARGS(readback.put())),
+        "Waiting page readback");
+  PrivateSubmission submission(device);
+  for (unsigned c = 0; c < colours.size(); ++c) {
+    auto layout = taxi_camera::profiles::A359.composition;
+    layout.speed_color = colours[c];
+    compositor.set_composition(layout);
+    check(compositor.record_waiting(submission.list()), compositor.last_error());
+    D3D12_TEXTURE_COPY_LOCATION from{}, to{};
+    from.pResource = compositor.output();
+    from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    to.pResource = readback.get();
+    to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    to.PlacedFootprint = {c * FrameBytes, {DXGI_FORMAT_R8G8B8A8_UNORM, Width, Height, 1, Pitch}};
+    submission.list()->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+  }
+  submission.finish(compositor);
+  require(compositor.statistics().descriptor_writes == initial_writes && !compositor.statistics().input_changes,
+          "Waiting page binds no camera feed");
+  void* mapped{};
+  const D3D12_RANGE range{0, static_cast<SIZE_T>(bd.Width)};
+  check(readback->Map(0, &range, &mapped), "Waiting page pixels");
+  const auto* data = static_cast<const unsigned char*>(mapped);
+  unsigned lit_total = 0;
+  for (unsigned c = 0; c < colours.size(); ++c) {
+    const auto* pixels = data + c * FrameBytes;
+    const auto& colour = colours[c];
+    const unsigned strongest = colour[0] >= colour[1] ? 0 : 1;
+    const unsigned full = unsigned(std::lround(255 * colour[strongest]));
+    std::array<unsigned, 11> lit{};
+    for (unsigned y = 0; y < Height; ++y)
+      for (unsigned x = 0; x < Width; ++x) {
+        const auto* p = pixels + y * Pitch + x * 4;
+        require(p[3] == 255, "Waiting page is opaque");
+        const bool text = x >= Left && x < Left + TextWidth && y >= Top && y < Top + TextHeight;
+        const unsigned cell = text ? (x - Left) / Advance : 0;
+        if (!text || (x - Left) % Advance >= CellWidth || cell == 6) {
+          require(p[0] == 0 && p[1] == 0 && p[2] == 0, "Waiting page is black outside its glyph cells and the space");
+          continue;
+        }
+        require(p[strongest] <= full, "Waiting text never exceeds the GS colour");
+        for (unsigned channel = 0; channel < 3; ++channel)
+          require(std::abs(int(p[channel]) - int(std::lround(p[strongest] * colour[channel] / colour[strongest]))) <= 1,
+                  "Waiting text uses the GS colour");
+        if (p[strongest] + 1 >= full)
+          ++lit[cell];
+      }
+    for (unsigned cell = 0; cell < lit.size(); ++cell) {
+      require(cell == 6 ? lit[cell] == 0 : lit[cell] > 60, "Every PLEASE WAIT letter is drawn at full colour");
+      lit_total += lit[cell];
+    }
+    const auto same_cells = [&](unsigned a, unsigned b) {
+      for (unsigned y = Top; y < Top + TextHeight; ++y)
+        if (std::memcmp(pixels + y * Pitch + (Left + a * Advance) * 4, pixels + y * Pitch + (Left + b * Advance) * 4, CellWidth * 4))
+          return false;
+      return true;
+    };
+    require(same_cells(2, 5) && same_cells(3, 8), "Repeated letters render identically");
+    require(!same_cells(0, 1) && !same_cells(2, 3) && !same_cells(7, 9) && !same_cells(9, 10) && !same_cells(4, 10),
+            "Distinct letters render distinct shapes");
+  }
+  if (preview) {
+    FILE* file = _wfopen(preview, L"wb");
+    require(file != nullptr, "Open waiting page preview");
+    std::fprintf(file, "P6\n%u %u\n255\n", Width, Height * unsigned(colours.size()));
+    for (unsigned c = 0; c < colours.size(); ++c)
+      for (unsigned y = 0; y < Height; ++y)
+        for (unsigned x = 0; x < Width; ++x)
+          require(std::fwrite(data + c * FrameBytes + y * Pitch + x * 4, 1, 3, file) == 3, "Write waiting page preview");
+    require(std::fclose(file) == 0, "Close waiting page preview");
+  }
+  const D3D12_RANGE none{0, 0};
+  readback->Unmap(0, &none);
+  return lit_total;
+}
+
 int wmain(int argc, wchar_t** argv) {
   try {
     bool warp = false;
     const wchar_t* preview = nullptr;
+    const wchar_t* waiting_preview = nullptr;
     for (int i = 1; i < argc; ++i) {
       if (!std::wcscmp(argv[i], L"--warp"))
         warp = true;
       else if (!std::wcscmp(argv[i], L"--preview") && i + 1 < argc)
         preview = argv[++i];
+      else if (!std::wcscmp(argv[i], L"--waiting-preview") && i + 1 < argc)
+        waiting_preview = argv[++i];
       else
         return 2;
     }
@@ -171,10 +270,11 @@ int wmain(int argc, wchar_t** argv) {
     }
     const D3D12_RANGE none{0, 0};
     readback->Unmap(0, &none);
+    const auto waiting_lit = waiting_page_case(device.get(), waiting_preview);
     std::printf(
         "PASS GS font %s: %u cases, 10 distinct digits, %llu two-space gap pixels, %llu antialiased pixels; all profiles and overflow "
-        "'--'.\n",
-        warp ? "WARP" : "hardware", Frames, gap_pixels, antialiased);
+        "'--'; PLEASE WAIT page %u full-colour pixels in two colours.\n",
+        warp ? "WARP" : "hardware", Frames, gap_pixels, antialiased, waiting_lit);
     return 0;
   } catch (const std::exception& e) {
     std::fprintf(stderr, "FAIL GS font: %s\n", e.what());

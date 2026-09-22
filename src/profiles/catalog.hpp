@@ -80,7 +80,14 @@ struct AircraftProfile {
   bool reference_guides = true;
   // False keeps ground speed out of the composed ND (PMDG 777).
   bool ground_speed = true;
+  // Airbus displays show a black PLEASE WAIT page, in the GS colour, while a
+  // side starts or its camera image is missing or stale.
+  bool waiting_page = true;
 };
+// Minimum PLEASE WAIT time after a side starts drawing, and the camera-image
+// age that brings the page back while the side stays on.
+inline constexpr std::uint64_t WaitingPageMinimumMs = 2000;
+inline constexpr std::uint64_t WaitingPageStaleMs = 1000;
 inline constexpr AircraftProfile A380{1,
                                       "fbw-a380x",
                                       L"FlyByWire A380X",
@@ -274,6 +281,7 @@ inline constexpr auto make_pmdg_777 = [](std::uint32_t id, std::string_view key,
   p.display_texture = Pmdg777Texture;
   p.reference_guides = false;
   p.ground_speed = false;
+  p.waiting_page = false;
   // Larger top ND inset moves the stamped page down without shortening the nose
   // picture. Bottom inset stays 0; leftover working-image rows under the squares
   // are black. L/R stay 0.
