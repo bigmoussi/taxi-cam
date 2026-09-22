@@ -286,7 +286,10 @@ int main() {
          profiles::Pmdg777300ER.id);
   assert(profiles::detect_aircraft("B77F", "Community/pmdg-aircraft-77f/SimObjects/Airplanes/PMDG 777F/aircraft.cfg") ==
          profiles::Pmdg777F.id);
-  assert(profiles::Pmdg777300ER.mounts[0] == profiles::Pmdg777.mounts[0]);
+  assert(profiles::Pmdg777300ER.mounts[0][0] == 0 && profiles::Pmdg777300ER.mounts[0][1] == -2 &&
+         profiles::Pmdg777300ER.mounts[0][2] == 22 && profiles::Pmdg777300ER.mounts[0][3] == -18 &&
+         profiles::Pmdg777300ER.mounts[0][4] == 0 && profiles::Pmdg777300ER.mounts[0][5] == 1);
+  assert(profiles::Pmdg777300ER.mounts[0] != profiles::Pmdg777.mounts[0]);
   assert(profiles::Pmdg777F.mounts[0] == profiles::Pmdg777.mounts[0]);
   assert(profiles::Pmdg777300ER.key != profiles::Pmdg777.key && profiles::Pmdg777F.key != profiles::Pmdg777.key);
   assert(!profiles::detect_aircraft("ATCCOM.ATC_NAME BOEING.0.text", "Community/pmdg-aircraft-77er/aircraft.cfg"));
@@ -305,7 +308,8 @@ int main() {
   Settings pmdg_300, pmdg_f;
   assert(load_settings(pmdg_300, L"missing", profiles::Pmdg777300ER.id));
   assert(load_settings(pmdg_f, L"missing", profiles::Pmdg777F.id));
-  assert(pmdg_300.mounts[0] == profiles::Pmdg777.mounts[0] && pmdg_f.mounts[0] == profiles::Pmdg777.mounts[0]);
+  assert(pmdg_300.mounts[0][2] == 22 && pmdg_f.mounts[0] == profiles::Pmdg777.mounts[0]);
+  assert(pmdg_300.exposure == -8.f && pmdg_f.exposure == -8.f && pmdg.exposure == -8.f);
   assert(settings_path(pmdg_300) != settings_path(pmdg) && settings_path(pmdg_f) != settings_path(pmdg));
   assert(settings_path(pmdg_300) != settings_path(pmdg_f));
   assert(profiles::matches_display(profiles::IniA380, 768, 1024, 1, 27));
@@ -325,12 +329,12 @@ int main() {
   assert(ini_a380.mounts == profiles::IniA380.mounts && ini_a380.mounts != a380.mounts);
   assert(settings_path(ini_a380) != settings_path(a380));
   assert(settings_path(pmdg) != settings_path(ini_a380));
-  assert(ini_a380.exposure == -11.5f);
+  assert(ini_a380.exposure == -8.f);
   // A partial saved profile inherits its own exposure; explicit calibration
   // continues to override the shipped default.
   const auto ini_path_settings = settings_path(ini_a380);
   assert(WritePrivateProfileStringW(L"service", L"enabled", L"1", ini_path_settings.c_str()));
-  assert(load_settings(ini_a380, L"missing", profiles::IniA380.id) && ini_a380.exposure == -11.5f);
+  assert(load_settings(ini_a380, L"missing", profiles::IniA380.id) && ini_a380.exposure == -8.f);
   assert(WritePrivateProfileStringW(L"display", L"exposure", L"-10.25", ini_path_settings.c_str()));
   assert(load_settings(ini_a380, L"missing", profiles::IniA380.id) && ini_a380.exposure == -10.25f);
   native_camera::AircraftIdentityCache identity;
@@ -397,8 +401,13 @@ int main() {
       assert(profile->composition.divider_top == 280.f && profile->composition.divider_bottom == 318.f);
       assert(profile->camera_padding.left == 0 && profile->camera_padding.top == 85 && profile->camera_padding.right == 0 &&
              profile->camera_padding.bottom == 0);
-      assert(profile->mounts[0][0] == 0 && profile->mounts[0][1] == -2 && profile->mounts[0][2] == 16);
-      assert(profile->mounts[0][3] == -18 && profile->mounts[0][4] == 0 && profile->mounts[0][5] == 1);
+      if (profile->id == profiles::Pmdg777300ER.id) {
+        assert(profile->mounts[0][0] == 0 && profile->mounts[0][1] == -2 && profile->mounts[0][2] == 22);
+        assert(profile->mounts[0][3] == -18 && profile->mounts[0][4] == 0 && profile->mounts[0][5] == 1);
+      } else {
+        assert(profile->mounts[0][0] == 0 && profile->mounts[0][1] == -2 && profile->mounts[0][2] == 16);
+        assert(profile->mounts[0][3] == -18 && profile->mounts[0][4] == 0 && profile->mounts[0][5] == 1);
+      }
       assert(profile->mounts[1][0] == -6 && profile->mounts[1][1] == 1.5 && profile->mounts[1][2] == -28);
       assert(profile->mounts[1][3] == -5 && profile->mounts[1][4] == -12 && profile->mounts[1][5] == 0.6);
       assert(profile->mounts[2][0] == 6 && profile->mounts[2][1] == 1.5 && profile->mounts[2][2] == -28);

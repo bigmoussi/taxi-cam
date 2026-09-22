@@ -63,7 +63,8 @@ Night-boost preference revision 1 sets `night_boost` to 8 once for each existing
 | `camera_rate_revision` | 2 after the one-shot install migrate | Installer migration marker on `settings.ini`; not a user control. Later installs skip the rate write when this is 2. Revision 1 (the earlier force-5 migrate) is migrated once to 10. |
 | `single_camera` | 0 | Render only the nose for a performance test |
 | `automatic_exposure` | 1 | Adjust exposure from ambient light |
-| `exposure` | −11.5 for all aircraft | Daytime EV, −16 to +4 |
+| `exposure` | −8 for all aircraft | Daytime EV, −16 to +4. Keep-install forces −8 once when `exposure_revision` is missing or below 1. |
+| `exposure_revision` | 1 after the one-shot install migrate | Installer migration marker on `settings.ini`; not a user control. Later installs skip the exposure write when this is 1. |
 | `speed_red`, `speed_green`, `speed_blue` | 22 / 255, 109 / 255, 19 / 255 for all aircraft (`#166D13`) | Normalized RGB, 0–1, edited with the colour picker |
 | `guide_red`, `guide_green`, `guide_blue` | 1, 0, 1 for all aircraft (`#FF00FF`) | Normalized RGB, 0–1, saved in `[guides]`; **Marking colour** changes all reference marks independently of GS |
 | `night_boost` | 8 | Maximum automatic boost, 0–8 EV; existing profiles migrate once |

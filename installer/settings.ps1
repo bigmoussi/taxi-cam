@@ -314,3 +314,80 @@ function Set-TaxiForcedCameraRate([object[]]$Snapshot, [int]$Rate = 10) {
     if (-not $settingsEntry.existed) { New-TaxiCameraRateMigrationStamp $settingsEntry }
     return $true
 }
+
+# One-shot install migrate for daytime exposure: write display exposure=-8 once
+# into existing settings.ini and known profile INIs, then leave later user
+# overrides alone. Stamp lives on settings.ini so a companion profile save
+# cannot clear it.
+$script:TaxiExposureMigrationRevision = '1'
+$script:TaxiForcedExposureEv = '-8'
+
+function Get-TaxiExposureSettingsPath {
+    return (@(Get-TaxiCameraRateTargets) | Select-Object -First 1).path
+}
+
+function Test-TaxiExposureMigrationApplied([string]$Path) {
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+    return (Get-TaxiIniKey $Path 'display' 'exposure_revision') -eq $script:TaxiExposureMigrationRevision
+}
+
+function New-TaxiExposureSnapshot([string]$BackupDirectory) {
+    $snapshot = @(); $index = 0
+    foreach ($target in @(Get-TaxiCameraRateTargets)) {
+        $priorHash = Get-TaxiSettingsHash $target
+        $backup = Join-Path $BackupDirectory ("exposure-$index.backup"); $index++
+        if ($priorHash) {
+            Copy-Item -LiteralPath $target.path -Destination $backup
+            if ((Get-FileHash -LiteralPath $backup).Hash -ne $priorHash -or (Get-TaxiSettingsHash $target) -ne $priorHash) {
+                throw "Settings changed while taking the exposure snapshot: $($target.path)"
+            }
+        }
+        $snapshot += [pscustomobject]@{
+            path=$target.path; root=$target.root; backup=$backup; existed=[bool]$priorHash
+            priorHash=$priorHash; owned=$false; installedHash=''
+        }
+    }
+    return $snapshot
+}
+
+function New-TaxiExposureMigrationStamp($Entry) {
+    Assert-TaxiSettingsPath $Entry.path $Entry.root
+    $expected = if ($Entry.owned) { $Entry.installedHash } else { $Entry.priorHash }
+    if ((Get-TaxiSettingsHash $Entry) -ne $expected) { throw "Settings changed before exposure migration stamp: $($Entry.path)" }
+    if ($expected) { throw "Refusing to create an exposure stamp over an existing settings file: $($Entry.path)" }
+    $parent = Split-Path -Parent $Entry.path
+    if (-not (Test-Path -LiteralPath $parent -PathType Container)) {
+        New-Item -ItemType Directory -Force -Path $parent | Out-Null
+    }
+    $temporary = Join-Path $parent ('taxi-exposure-' + [Guid]::NewGuid().ToString('N') + '.tmp')
+    try {
+        Write-TaxiIniFile $temporary 'ansi' ("[display]`r`nexposure_revision=$script:TaxiExposureMigrationRevision`r`n")
+        $sourceHash = (Get-FileHash -LiteralPath $temporary -Algorithm SHA256).Hash
+        if ((Get-TaxiSettingsHash $Entry) -ne $expected) { throw "Settings changed while preparing exposure migration stamp: $($Entry.path)" }
+        [IO.File]::Move($temporary, $Entry.path)
+        $Entry.owned = $true
+        $Entry.installedHash = $sourceHash
+    } finally {
+        if (Test-Path -LiteralPath $temporary -PathType Leaf) { Remove-Item -LiteralPath $temporary }
+    }
+}
+
+function Set-TaxiForcedExposure([object[]]$Snapshot, [string]$Exposure = $script:TaxiForcedExposureEv) {
+    if ($Exposure -ne '-8') { throw "Forced exposure $Exposure is not the published -8 default." }
+    $settingsPath = Get-TaxiExposureSettingsPath
+    $settingsEntry = @($Snapshot | Where-Object { $_.path -eq $settingsPath })[0]
+    if ($null -eq $settingsEntry) { throw 'Exposure snapshot omitted settings.ini.' }
+    if (Test-TaxiExposureMigrationApplied $settingsEntry.path) { return $false }
+
+    foreach ($entry in $Snapshot) {
+        if (-not $entry.existed) { continue }
+        $assignments = [System.Collections.Generic.List[hashtable]]::new()
+        $assignments.Add(@{Section='display'; Key='exposure'; Value=[string]$Exposure})
+        if ($entry.path -eq $settingsPath) {
+            $assignments.Add(@{Section='display'; Key='exposure_revision'; Value=$script:TaxiExposureMigrationRevision})
+        }
+        Set-TaxiSnapshotIniKeys $entry @($assignments)
+    }
+    if (-not $settingsEntry.existed) { New-TaxiExposureMigrationStamp $settingsEntry }
+    return $true
+}

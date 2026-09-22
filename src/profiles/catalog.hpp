@@ -69,7 +69,7 @@ struct AircraftProfile {
   // Target pixels: the outer display region is black around this camera inset.
   DisplayInsets camera_padding{16, 12, 16, 0};
   PfdDetectionPolicy pfd_detection = PfdDetectionPolicy::dominant_activity;
-  float exposure = -11.5f;
+  float exposure = -8.f;
   // Measured PFD redraws per second per side (bridge stamps/s ÷ 2). Composing
   // faster than this cannot reach the screen. 0 = not measured: only the
   // camera-manager ceiling caps the useful camera_rate.
@@ -233,13 +233,13 @@ inline constexpr Composition Pmdg777Composition = [] {
 }();
 // Nose: forward/down over the nose gear. Bottom-left/right: outside each side of
 // the fuselage looking at that wing (own Right offset and yaw; not a mirrored
-// single tail capture). Published defaults from Robert's live 777-200ER
-// calibration. 300ER and 777F copy that nose mount; wing mounts stay these
-// published values until those types are calibrated separately.
+// single tail capture). 200ER/777F published nose from Robert's live 777-200ER
+// calibration. 300ER nose from his live longer-fuselage capture (forward 22 m);
+// wing mounts stay the published shared defaults until calibrated separately.
 inline constexpr std::array<std::array<double, 6>, 3> Pmdg777Mounts{
     {{0, -2, 16, -18, 0, 1}, {-6, 1.5, -28, -5, -12, 0.6}, {6, 1.5, -28, -5, 12, 0.6}}};
 inline constexpr std::array<std::array<double, 6>, 3> Pmdg777300Mounts{
-    {Pmdg777Mounts[0], Pmdg777Mounts[1], Pmdg777Mounts[2]}};
+    {{0, -2, 22, -18, 0, 1}, Pmdg777Mounts[1], Pmdg777Mounts[2]}};
 inline constexpr std::array<std::array<double, 6>, 3> Pmdg777FMounts{
     {Pmdg777Mounts[0], Pmdg777Mounts[1], Pmdg777Mounts[2]}};
 // Nose matches the 280 px picture; each bottom feed is a square half-pane.
@@ -286,7 +286,8 @@ inline constexpr AircraftProfile Pmdg777300ER =
     make_pmdg_777(6, "pmdg-777-300er", L"PMDG 777-300ER", "PMDG 777-300ER", Pmdg777300Mounts);
 inline constexpr AircraftProfile Pmdg777F =
     make_pmdg_777(7, "pmdg-777f", L"PMDG 777F", "PMDG 777F", Pmdg777FMounts);
-static_assert(Pmdg777300ER.mounts[0] == Pmdg777Mounts[0]);
+static_assert(Pmdg777300ER.mounts[0][2] == 22);
+static_assert(Pmdg777300ER.mounts[0] != Pmdg777Mounts[0]);
 static_assert(Pmdg777F.mounts[0] == Pmdg777Mounts[0]);
 inline constexpr std::array<const AircraftProfile*, 7> Catalog{&A380, &A359, &A35K, &IniA380, &Pmdg777, &Pmdg777300ER,
                                                               &Pmdg777F};
