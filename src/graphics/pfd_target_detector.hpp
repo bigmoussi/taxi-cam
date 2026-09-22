@@ -66,7 +66,9 @@ class PfdTargetDetector {
       clear(count > capacity ? "capacity_exceeded" : "invalid_input", true);
       return detection_;
     }
-    if (profile_->pfd_detection == profiles::PfdDetectionPolicy::ini_a380_allocation_group && !inventory_complete) {
+    if ((profile_->pfd_detection == profiles::PfdDetectionPolicy::ini_a380_allocation_group ||
+         profile_->pfd_detection == profiles::PfdDetectionPolicy::single_display) &&
+        !inventory_complete) {
       reset();
       clear("incomplete_inventory", true);
       return detection_;
@@ -149,6 +151,8 @@ class PfdTargetDetector {
     }
     if (profile_->pfd_detection == profiles::PfdDetectionPolicy::ini_a380_allocation_group)
       return observe_allocation_group(current_count, now_ms);
+    if (profile_->pfd_detection == profiles::PfdDetectionPolicy::single_display)
+      return observe_single_display(current_count, now_ms);
     if (current_count < 2) {
       clear(current_count == 0 ? "no_candidates" : "insufficient_candidates");
       seed(current_count, now_ms);
@@ -274,6 +278,34 @@ class PfdTargetDetector {
       return detection_;
     }
     return confirm({current_[count - 1].id, current_[count - 3].id});
+  }
+
+  // One destination texture. observe() already ordered matches by resource id,
+  // which is the routing dropdown order. The last entry is the navigation
+  // display for this profile; the first entry is not. The confirmed pair is
+  // {id, 0}; routing copies that id onto both inboard rectangles.
+  // A changed last id starts a new baseline. Draw count does not rank them.
+  const PfdTargetDetection& observe_single_display(std::size_t count, std::uint64_t now_ms) noexcept {
+    if (count == 0) {
+      clear("no_candidates");
+      seed(count, now_ms);
+      return detection_;
+    }
+    const auto chosen = current_[count - 1].id;
+    if (!baseline_valid_ || now_ms < baseline_ms_ || now_ms - baseline_ms_ > maximum_window_ms) {
+      clear(!baseline_valid_ ? "warming_up" : now_ms < baseline_ms_ ? "clock_reset" : "stale_window");
+      seed(count, now_ms);
+      return detection_;
+    }
+    if (previous_count_ == 0 || previous_[previous_count_ - 1].id != chosen) {
+      clear("candidate_disappeared");
+      seed(count, now_ms);
+      return detection_;
+    }
+    if (now_ms - baseline_ms_ < window_ms)
+      return detection_;
+    seed(count, now_ms);
+    return confirm({chosen, 0});
   }
 
   bool contains(std::size_t count, std::uint64_t id) const noexcept {

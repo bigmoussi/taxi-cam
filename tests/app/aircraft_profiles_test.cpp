@@ -1,6 +1,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <limits>
 #include "../../src/app/settings_store.hpp"
@@ -275,6 +276,42 @@ int main() {
   assert(!profiles::detect_aircraft("Airbus", "SimObjects/Airplanes/Other_A380/presets/inibuilds/aircraft.cfg"));
   assert(!profiles::detect_aircraft("A359", ini_a380_path));
   assert(profiles::IniA380.taxi_control == profiles::TaxiControl::manual_only);
+  assert(profiles::Pmdg777.taxi_control == profiles::TaxiControl::manual_only);
+  assert(profiles::detect_aircraft("ATCCOM.ATC_NAME BOEING.0.text",
+                                   "SimObjects\\Airplanes\\PMDG 777-200ER\\presets\\pmdg\\PMDG 777-200ER RR\\config\\aircraft.CFG") ==
+         profiles::Pmdg777.id);
+  assert(profiles::detect_aircraft("777-200ER GE", "Community/pmdg-aircraft-77er/SimObjects/Airplanes/PMDG 777-200ER/aircraft.cfg") ==
+         profiles::Pmdg777.id);
+  assert(profiles::detect_aircraft("", "Community\\pmdg-aircraft-77w\\SimObjects\\Airplanes\\PMDG 777-300ER\\aircraft.cfg") ==
+         profiles::Pmdg777300ER.id);
+  assert(profiles::detect_aircraft("B77F", "Community/pmdg-aircraft-77f/SimObjects/Airplanes/PMDG 777F/aircraft.cfg") ==
+         profiles::Pmdg777F.id);
+  assert(profiles::Pmdg777300ER.mounts[0][0] == 0 && profiles::Pmdg777300ER.mounts[0][1] == -2 &&
+         profiles::Pmdg777300ER.mounts[0][2] == 22 && profiles::Pmdg777300ER.mounts[0][3] == -18 &&
+         profiles::Pmdg777300ER.mounts[0][4] == 0 && profiles::Pmdg777300ER.mounts[0][5] == 1);
+  assert(profiles::Pmdg777300ER.mounts[0] != profiles::Pmdg777.mounts[0]);
+  assert(profiles::Pmdg777F.mounts[0] == profiles::Pmdg777.mounts[0]);
+  assert(profiles::Pmdg777300ER.key != profiles::Pmdg777.key && profiles::Pmdg777F.key != profiles::Pmdg777.key);
+  assert(!profiles::detect_aircraft("ATCCOM.ATC_NAME BOEING.0.text", "Community/pmdg-aircraft-77er/aircraft.cfg"));
+  assert(!profiles::detect_aircraft("ATCCOM.ATC_NAME BOEING.0.text",
+                                    "SimObjects\\Airplanes\\Other\\presets\\pmdg\\PMDG 777-200ER RR\\config\\aircraft.CFG"));
+  assert(!profiles::detect_aircraft("777", "Community/pmdg-aircraft-77er-copy/aircraft.cfg"));
+  assert(!profiles::detect_aircraft("777", "SimObjects/Airplanes/PMDG 777-200ER-copy/aircraft.cfg"));
+  assert(!profiles::detect_aircraft("777", "Community/not-pmdg-aircraft-77f/aircraft.cfg"));
+  assert(profiles::detect_aircraft(
+             "ATCCOM.ATC_NAME AIRBUS.0.text",
+             "SimObjects\\Airplanes\\FlyByWire_A380X\\presets\\flybywire\\FlyByWire_A380_842\\config\\aircraft.CFG") == 1);
+  Settings pmdg;
+  assert(load_settings(pmdg, L"missing", profiles::Pmdg777.id));
+  assert(pmdg.profile == profiles::Pmdg777.id && !pmdg.follow_taxi && pmdg.mounts == profiles::Pmdg777.mounts);
+  assert(settings_path(pmdg) != settings_path(a380));
+  Settings pmdg_300, pmdg_f;
+  assert(load_settings(pmdg_300, L"missing", profiles::Pmdg777300ER.id));
+  assert(load_settings(pmdg_f, L"missing", profiles::Pmdg777F.id));
+  assert(pmdg_300.mounts[0][2] == 22 && pmdg_f.mounts[0] == profiles::Pmdg777.mounts[0]);
+  assert(pmdg_300.exposure == -8.f && pmdg_f.exposure == -8.f && pmdg.exposure == -8.f);
+  assert(settings_path(pmdg_300) != settings_path(pmdg) && settings_path(pmdg_f) != settings_path(pmdg));
+  assert(settings_path(pmdg_300) != settings_path(pmdg_f));
   assert(profiles::matches_display(profiles::IniA380, 768, 1024, 1, 27));
   assert(profiles::matches_display(profiles::IniA380, 768, 1024, 1, 28));
   assert(profiles::matches_display(profiles::IniA380, 768, 1024, 1, 87));
@@ -291,12 +328,13 @@ int main() {
   assert(ini_a380.profile == profiles::IniA380.id && !ini_a380.follow_taxi && !ini_a380.manual_mask && !ini_a380.calibration_mask);
   assert(ini_a380.mounts == profiles::IniA380.mounts && ini_a380.mounts != a380.mounts);
   assert(settings_path(ini_a380) != settings_path(a380));
-  assert(ini_a380.exposure == -11.5f);
+  assert(settings_path(pmdg) != settings_path(ini_a380));
+  assert(ini_a380.exposure == -8.f);
   // A partial saved profile inherits its own exposure; explicit calibration
   // continues to override the shipped default.
   const auto ini_path_settings = settings_path(ini_a380);
   assert(WritePrivateProfileStringW(L"service", L"enabled", L"1", ini_path_settings.c_str()));
-  assert(load_settings(ini_a380, L"missing", profiles::IniA380.id) && ini_a380.exposure == -11.5f);
+  assert(load_settings(ini_a380, L"missing", profiles::IniA380.id) && ini_a380.exposure == -8.f);
   assert(WritePrivateProfileStringW(L"display", L"exposure", L"-10.25", ini_path_settings.c_str()));
   assert(load_settings(ini_a380, L"missing", profiles::IniA380.id) && ini_a380.exposure == -10.25f);
   native_camera::AircraftIdentityCache identity;
@@ -333,6 +371,68 @@ int main() {
     s.profile = profile->id;
     s.mounts = profile->mounts;
     assert(valid_settings(s));
+    assert((profile->pfd_detection == profiles::PfdDetectionPolicy::single_display) != profile->reference_guides);
+    assert((profile->pfd_detection == profiles::PfdDetectionPolicy::single_display) != profile->ground_speed);
+    assert((profile->pfd_detection == profiles::PfdDetectionPolicy::single_display) == (profile->display_texture[0] != '\0'));
+    if (profile->pfd_detection == profiles::PfdDetectionPolicy::single_display) {
+      const auto left = profiles::display_rect(*profile, 0);
+      const auto right = profiles::display_rect(*profile, 1);
+      assert(profile->width == 2048 && profile->height == 2048 && profile->mips == 0);
+      assert(left.left == profiles::Pmdg777LeftNdX && left.top == profiles::Pmdg777LeftNdY);
+      assert(left.right == profiles::Pmdg777LeftNdX + profiles::Pmdg777NdWidth &&
+             left.bottom == profiles::Pmdg777LeftNdY + profiles::Pmdg777NdHeight);
+      assert(right.left == profiles::Pmdg777RightNdX && right.top == profiles::Pmdg777RightNdY);
+      assert(right.right == profiles::Pmdg777RightNdX + profiles::Pmdg777NdWidth &&
+             right.bottom == profiles::Pmdg777RightNdY + profiles::Pmdg777NdHeight);
+      assert(left.right <= profile->width && right.bottom <= profile->height);
+      for (unsigned side = 0; side < 2; ++side) {
+        const auto outer = profiles::display_rect(*profile, side);
+        const auto content = profiles::display_content_rect(*profile, side);
+        assert(content.left == outer.left && content.right == outer.right);
+        assert(content.top == outer.top + 85 && content.bottom == outer.bottom);
+        assert(outer.right - outer.left == 958 && outer.bottom - outer.top == 971);
+        assert(content.bottom - content.top == 886);
+      }
+      assert(profile->camera_panes[0][0] == 736 && profile->camera_panes[0][1] == 268);
+      assert(profile->camera_panes[1][0] == 360 && profile->camera_panes[1][1] == 360);
+      assert(profile->camera_panes[2][0] == 360 && profile->camera_panes[2][1] == 360);
+      assert(profile->composition.split_bottom == 1.f && profile->composition.bottom_gap == 48.f);
+      assert(profile->composition.nose_height == 280.f && profile->composition.tail_top == 318.f);
+      assert(profile->composition.divider_top == 280.f && profile->composition.divider_bottom == 318.f);
+      assert(profile->camera_padding.left == 0 && profile->camera_padding.top == 85 && profile->camera_padding.right == 0 &&
+             profile->camera_padding.bottom == 0);
+      if (profile->id == profiles::Pmdg777300ER.id) {
+        assert(profile->mounts[0][0] == 0 && profile->mounts[0][1] == -2 && profile->mounts[0][2] == 22);
+        assert(profile->mounts[0][3] == -18 && profile->mounts[0][4] == 0 && profile->mounts[0][5] == 1);
+      } else {
+        assert(profile->mounts[0][0] == 0 && profile->mounts[0][1] == -2 && profile->mounts[0][2] == 16);
+        assert(profile->mounts[0][3] == -18 && profile->mounts[0][4] == 0 && profile->mounts[0][5] == 1);
+      }
+      assert(profile->mounts[1][0] == -6 && profile->mounts[1][1] == 1.5 && profile->mounts[1][2] == -28);
+      assert(profile->mounts[1][3] == -5 && profile->mounts[1][4] == -12 && profile->mounts[1][5] == 0.6);
+      assert(profile->mounts[2][0] == 6 && profile->mounts[2][1] == 1.5 && profile->mounts[2][2] == -28);
+      assert(profile->mounts[2][3] == -5 && profile->mounts[2][4] == 12 && profile->mounts[2][5] == 0.6);
+      assert(profile->formats[0] == 0);
+      assert(profiles::matches_display(*profile, profile->width, profile->height, 1, 28));
+      assert(profiles::matches_display(*profile, profile->width, profile->height, 12, 87));
+      assert(!profiles::matches_display(*profile, profile->width, profile->height, 1, 0));
+      assert(!profiles::matches_display(*profile, profile->width, profile->height, 0, 28));
+      assert(!profiles::matches_display(*profile, profile->width, profile->height, 13, 28));
+      assert(!profiles::matches_display(*profile, 768, 1024, 1, 28));
+      assert(profile->taxi_lvars[0][0] == '\0' && profile->taxi_events[0][0] == '\0');
+      assert(std::strcmp(profile->display_texture, "DUS") == 0);
+      assert(std::strcmp(profile->pfd_labels[0], "DU_LeftInboard") == 0);
+      assert(std::strcmp(profile->pfd_labels[1], "DU_RightInboard") == 0);
+      assert(!profile->reference_guides);
+      assert(!profile->ground_speed);
+      for (unsigned side = 0; side < 3; ++side) {
+        native_camera::ViewDimensions desired, original{{{3413, 913}, {3413, 913}, {3413, 913}}};
+        assert(native_camera::plan_view_resize(original, side, desired, profile->camera_panes));
+        assert(desired[0] == profile->camera_panes[side] && desired[1] == desired[0] && desired[2] == desired[0]);
+        assert(profiles::camera_candidate(desired[0][0], desired[0][1]));
+      }
+      continue;
+    }
     for (unsigned side = 0; side < 2; ++side) {
       const auto rect = profiles::display_rect(*profile, side);
       assert(rect.left < rect.right && rect.right <= profile->width && rect.bottom <= profile->height);
@@ -388,6 +488,11 @@ int main() {
   // projections do not establish visible tyre alignment for these overlays.
 
   for (const auto* profile : profiles::Catalog) {
+    if (profile->pfd_detection == profiles::PfdDetectionPolicy::single_display) {
+      assert(profile->composition.divider_top == 280 && profile->composition.divider_bottom == 318);
+      assert(profile->composition.nose_height == 280 && profile->composition.tail_top == 318);
+      continue;
+    }
     assert(profile->composition.divider_top == 251 && profile->composition.divider_bottom == 263);
     assert(profile->composition.nose_height == 255 && profile->composition.tail_top == 259);
   }

@@ -14,8 +14,8 @@ namespace taxi_camera::native_camera {
 class ViewResizeRecovery {
  public:
   enum class Action { wait, close_gates, resize, blocked };
-  using Ids = std::array<engine_camera::EntryId, 2>;
-  using Views = std::array<engine_camera::OwnedViewSnapshot, 2>;
+  using Ids = std::array<engine_camera::EntryId, 3>;
+  using Views = std::array<engine_camera::OwnedViewSnapshot, 3>;
 
   bool begin(engine_camera::ManagerToken owner, const Ids& ids) noexcept {
     if (failed_)
@@ -59,15 +59,23 @@ class ViewResizeRecovery {
       closed_seen_ = false;
       return Action::wait;
     }
-    if (views[0].view_address == views[1].view_address || views[0].view_index == views[1].view_index) {
-      mark_failed();
-      return Action::blocked;
+    const unsigned feeds = ids[2] ? 3u : 2u;
+    for (unsigned i = 0; i < feeds; ++i) {
+      for (unsigned j = i + 1; j < feeds; ++j) {
+        if (views[i].view_address == views[j].view_address || views[i].view_index == views[j].view_index) {
+          mark_failed();
+          return Action::blocked;
+        }
+      }
     }
     // A native attempt consumes this authorization. The caller must finish on
     // complete success or mark_failed on ANY refused/partial mutation.
     if (resize_issued_)
       return Action::wait;
-    if (!(views[0].flags[0] & 1u) || !(views[1].flags[0] & 1u)) {
+    bool all_closed = true;
+    for (unsigned i = 0; i < feeds; ++i)
+      all_closed = all_closed && (views[i].flags[0] & 1u);
+    if (!all_closed) {
       closed_seen_ = false;
       return Action::close_gates;
     }
@@ -111,7 +119,11 @@ class ViewResizeRecovery {
 
  private:
   static bool valid_identity(engine_camera::ManagerToken owner, const Ids& ids) noexcept {
-    return owner.valid() && ids[0] && ids[1] && ids[0] != ids[1];
+    if (!owner.valid() || !ids[0] || !ids[1] || ids[0] == ids[1])
+      return false;
+    if (ids[2] && (ids[2] == ids[0] || ids[2] == ids[1]))
+      return false;
+    return true;
   }
   bool matches(engine_camera::ManagerToken owner, const Ids& ids) const noexcept { return owner == owner_ && ids == ids_; }
   static bool ready_chain(const engine_camera::OwnedViewSnapshot& view) noexcept {

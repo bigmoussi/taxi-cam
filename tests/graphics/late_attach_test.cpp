@@ -553,6 +553,25 @@ void ini_explicit_discovery_case() {
   expect("recovered automatic pair retains detected provenance", win::target_ids() == std::array<std::uint64_t, 2>{}, true);
   clear_fixture(r);
 }
+void recovered_output_encoding_case() {
+  auto& r = win::registry();
+  clear_fixture(r);
+  const auto item = display(0);
+  seed_observed_display(r, item);
+  win::View recovered{item, DXGI_FORMAT_UNKNOWN, 0, 0};
+  recovered.recovered = true;
+  expect("typeless recovered encoding defaults to UNORM without typed proof",
+         static_cast<unsigned>(win::output_format(recovered)), static_cast<unsigned>(DXGI_FORMAT_R8G8B8A8_UNORM));
+  // Account a live application sRGB RTV the same way OM bind does.
+  win::replace_view(r, 0x70000, {item, DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, 0, 0x70000});
+  expect("sRGB application RTV is remembered on the typeless resource", item->typed_rtv_refs[1], 1);
+  expect("recovered encoding follows the sole observed sRGB RTV", static_cast<unsigned>(win::output_format(recovered)),
+         static_cast<unsigned>(DXGI_FORMAT_R8G8B8A8_UNORM_SRGB));
+  win::replace_view(r, 0x70020, {item, DXGI_FORMAT_R8G8B8A8_UNORM, 0, 0x70020});
+  expect("UNORM+sRGB conflict refuses a recovered encoding guess", static_cast<unsigned>(win::output_format(recovered)),
+         static_cast<unsigned>(DXGI_FORMAT_UNKNOWN));
+  clear_fixture(r);
+}
 }  // namespace
 
 int main() {
@@ -560,6 +579,7 @@ int main() {
   hint_lifetimes_case();
   distinct_associations_case();
   recovered_view_case();
+  recovered_output_encoding_case();
   rt_exit_case();
   reconnect_discovery_case();
   a350_power_up_discovery_case();

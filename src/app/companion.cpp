@@ -319,18 +319,21 @@ bool read_fields(win::Settings& settings, const wchar_t** error = nullptr) {
     settings.calibration_budget = static_cast<UINT>(budget);
   settings.exposure = static_cast<float>(number(201, settings.exposure, ok));
   settings.night_boost = static_cast<float>(number(202, settings.night_boost, ok));
-  for (unsigned i = 0; i < 2; ++i)
+  for (unsigned i = 0; i < 3; ++i)
     for (unsigned j = 0; j < 6; ++j)
       settings.mounts[i][j] = number(300 + static_cast<int>(i * 10 + j), settings.mounts[i][j], ok);
-  std::array<float, 2>* guides[]{&settings.nose_dot, &settings.tail_upper, &settings.tail_corner, &settings.tail_inner};
-  for (unsigned i = 0; i < 4; ++i)
-    for (unsigned axis = 0; axis < 2; ++axis) {
-      const auto value = number(360 + static_cast<int>(i * 2 + axis), (*guides[i])[axis] * 100., ok);
-      if (value < 0 || value > (axis ? 100 : 50))
-        ok = false;
-      else
-        (*guides[i])[axis] = static_cast<float>(value / 100.);
-    }
+  const auto* guide_profile = profiles::find(settings.profile);
+  if (!guide_profile || guide_profile->reference_guides) {
+    std::array<float, 2>* guides[]{&settings.nose_dot, &settings.tail_upper, &settings.tail_corner, &settings.tail_inner};
+    for (unsigned i = 0; i < 4; ++i)
+      for (unsigned axis = 0; axis < 2; ++axis) {
+        const auto value = number(360 + static_cast<int>(i * 2 + axis), (*guides[i])[axis] * 100., ok);
+        if (value < 0 || value > (axis ? 100 : 50))
+          ok = false;
+        else
+          (*guides[i])[axis] = static_cast<float>(value / 100.);
+      }
+  }
   if (page == 3) {
     std::array<std::uint64_t, 2> selected_ids{settings.left_id, settings.right_id};
     for (unsigned i = 0; i < 2; ++i) {
@@ -356,7 +359,7 @@ void build_controls();
 void refresh_shortcut_status() {
   if (!shortcut_window)
     return;
-  for (unsigned i = 0; i < 3; ++i) {
+  for (unsigned i = 0; i < win::CameraHotkeyNames.size(); ++i) {
     const auto state = hotkey_draft[i] != hotkey_saved[i] ? std::wstring(L"Unsaved — select Save changes to apply")
                        : hotkey_editor_focused            ? std::wstring(L"Editing — shortcuts paused until you leave the field")
                                                           : hotkey_registration.status(i);
@@ -379,7 +382,7 @@ LRESULT CALLBACK shortcut_editor(HWND control, UINT message, WPARAM w, LPARAM l,
   } else if (message == WM_KILLFOCUS) {
     const auto next = reinterpret_cast<HWND>(w);
     const int next_id = next && GetParent(next) == shortcut_window ? GetDlgCtrlID(next) : 0;
-    hotkey_editor_focused = next_id >= 620 && next_id <= 622;
+    hotkey_editor_focused = next_id >= 620 && next_id < 620 + static_cast<int>(win::CameraHotkeyNames.size());
     register_camera_hotkeys();
     refresh_shortcut_status();
   } else if (message == WM_NCDESTROY) {
@@ -414,7 +417,7 @@ INT_PTR CALLBACK shortcut_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM) {
     };
     make(L"STATIC", L"Flight-deck keyboard shortcuts", -1, 20, 17, 640, 28, 0, heading);
     make(L"STATIC", L"Use Ctrl or Alt with a letter, number or function key. Clear disables a shortcut.", -1, 20, 51, 640, 27, 0, small);
-    for (unsigned i = 0; i < 3; ++i) {
+    for (unsigned i = 0; i < win::CameraHotkeyNames.size(); ++i) {
       const int y = 90 + static_cast<int>(i) * 90;
       make(L"STATIC", win::CameraHotkeyNames[i], -1, 20, y + 5, 190, 26);
       auto field = make(HOTKEY_CLASSW, L"", 620 + i, 220, y, 330, 32, WS_TABSTOP | WS_BORDER);
@@ -440,17 +443,17 @@ INT_PTR CALLBACK shortcut_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM) {
   }
   if (message == WM_COMMAND) {
     const int id = LOWORD(w);
-    if (id >= 620 && id <= 622 && HIWORD(w) == EN_CHANGE) {
+    if (id >= 620 && id < 620 + static_cast<int>(win::CameraHotkeyNames.size()) && HIWORD(w) == EN_CHANGE) {
       hotkey_draft[id - 620] = win::hotkey_from_control(static_cast<WORD>(SendDlgItemMessageW(hwnd, id, HKM_GETHOTKEY, 0, 0)));
       refresh_shortcut_status();
       return TRUE;
     }
-    if ((id >= 630 && id <= 632) || id == 640) {
+    if ((id >= 630 && id < 630 + static_cast<int>(win::CameraHotkeyNames.size())) || id == 640) {
       if (id == 640)
         hotkey_draft = win::DefaultCameraHotkeys;
       else
         hotkey_draft[id - 630] = {};
-      for (unsigned i = 0; i < 3; ++i)
+      for (unsigned i = 0; i < win::CameraHotkeyNames.size(); ++i)
         SendDlgItemMessageW(hwnd, 620 + i, HKM_SETHOTKEY, win::hotkey_control_value(hotkey_draft[i]), 0);
       refresh_shortcut_status();
       return TRUE;
@@ -677,6 +680,11 @@ void build_controls() {
   const wchar_t* names[]{L"Overview", L"Camera views", L"Display", L"PFD routing", L"Diagnostics", L"Reference guides"};
   for (int i = 0; i < 6; ++i)
     navigation.push_back(button(names[i], 100 + i, 20, 156 + i * 49, 166, 40));
+  const auto* nav_profile = profiles::find(s.profile);
+  HWND guides_nav = GetDlgItem(window, 105);
+  const bool guides_enabled = !nav_profile || nav_profile->reference_guides;
+  EnableWindow(guides_nav, guides_enabled);
+  InvalidateRect(guides_nav, nullptr, FALSE);
   const auto donate_button = button(L"Donate", 513, 24, 590, 110, 40);
   const auto report_button = button(L"Report a bug", 512, 24, 638, 40, 40);
   const auto version_link = button(L"v" TAXI_CAM_VERSION_WIDE, 514, 24, 692, 155, 22);
@@ -718,22 +726,27 @@ void build_controls() {
     button(L"Keyboard shortcuts…", 645, 580, 412, 205);
     edit(s.camera_rate, 200, 855, 528, 100);
   } else if (page == 1) {
-    for (int i = 0; i < 2; ++i) {
-      const int x = 260 + i * 375;
+    const auto* profile = profiles::find(s.profile);
+    const int feed_count = profile && profile->composition.split_bottom != 0 ? 3 : 2;
+    for (int i = 0; i < feed_count; ++i) {
+      const int x = feed_count == 3 ? (244 + i * 252) : (260 + i * 375);
       for (int j = 0; j < 6; ++j)
-        edit(s.mounts[i][j], 300 + i * 10 + j, x + (j % 3) * 106, 245 + (j / 3) * 108, 88);
-      button(L"Lower 0.25 m", 330 + i * 10, x, 439, 146);
-      button(L"Raise 0.25 m", 331 + i * 10, x + 160, 439, 146);
-      button(L"Aft 1 m", 332 + i * 10, x, 488, 146);
-      button(L"Forward 1 m", 333 + i * 10, x + 160, 488, 146);
+        edit(s.mounts[i][j], 300 + i * 10 + j, x + (j % 3) * (feed_count == 3 ? 72 : 106), 245 + (j / 3) * 108,
+             feed_count == 3 ? 64 : 88);
+      button(L"Lower 0.25 m", 330 + i * 10, x, 439, feed_count == 3 ? 110 : 146);
+      button(L"Raise 0.25 m", 331 + i * 10, x + (feed_count == 3 ? 120 : 160), 439, feed_count == 3 ? 110 : 146);
+      button(L"Aft 1 m", 332 + i * 10, x, 488, feed_count == 3 ? 110 : 146);
+      button(L"Forward 1 m", 333 + i * 10, x + (feed_count == 3 ? 120 : 160), 488, feed_count == 3 ? 110 : 146);
     }
-    button(L"Reset camera mounts", 350, 260, 594, 240);
+    button(L"Reset camera mounts", 359, 260, 594, 240);
   } else if (page == 2) {
     edit(s.exposure, 201, 840, 210, 120);
     toggle(L"Auto exposure", 222, s.automatic_exposure, 785, 318, 190);
     edit(s.night_boost, 202, 840, 430, 120);
     edit(s.camera_rate, 200, 840, 547, 120);
     button(L"Ground-speed colour", 231, 740, 630, 235);
+    const auto* display_profile = profiles::find(s.profile);
+    EnableWindow(GetDlgItem(window, 231), !display_profile || display_profile->ground_speed);
   } else if (page == 3) {
     toggle(L"Auto detect", 223, s.auto_detect, 795, 126, 180);
     target_combos(s);
@@ -750,15 +763,22 @@ void build_controls() {
     button(L"Open log folder", 510, 260, 591, 210);
     button(L"Stop camera tests", 511, 500, 591, 210);
   } else if (page == 5) {
+    const auto* guide_profile = profiles::find(s.profile);
+    const bool draw_guides = !guide_profile || guide_profile->reference_guides;
     const std::array<float, 2> guides[]{s.nose_dot, s.tail_upper, s.tail_corner, s.tail_inner};
     for (unsigned i = 0; i < 4; ++i) {
       const int y = i ? 338 + static_cast<int>(i - 1) * 64 : 204;
       edit(guides[i][0] * 100., 360 + static_cast<int>(i * 2), 505, y, 113);
       edit(guides[i][1] * 100., 361 + static_cast<int>(i * 2), 655, y, 113);
+      EnableWindow(GetDlgItem(window, 360 + static_cast<int>(i * 2)), draw_guides);
+      EnableWindow(GetDlgItem(window, 361 + static_cast<int>(i * 2)), draw_guides);
     }
     button(L"Apply live", 370, 260, 608, 185);
     button(L"Reset guides", 371, 467, 608, 250);
     button(L"Marking colour", 372, 740, 608, 235);
+    EnableWindow(GetDlgItem(window, 370), draw_guides);
+    EnableWindow(GetDlgItem(window, 371), draw_guides);
+    EnableWindow(GetDlgItem(window, 372), draw_guides);
   }
   refreshing = false;
   InvalidateRect(window, nullptr, TRUE);
@@ -930,18 +950,23 @@ void draw_page(HDC dc) {
     text(dc, L"Cameras and TAXI buttons turn off above 60 knots.", 250, 630, 730, 24, small, Muted);
   } else if (page == 1) {
     constexpr const wchar_t* labels[]{L"Right (m)", L"Up (m)", L"Forward (m)", L"Pitch (deg)", L"Yaw (deg)", L"Lens (rad)"};
-    for (int i = 0; i < 2; ++i) {
-      const int x = 244 + i * 375;
-      panel(dc, x, 138, 354, 424);
-      text(dc, i ? L"Tail camera" : L"Nose-wheel camera", x + 16, 154, 324, 30, heading);
-      const auto* profile = profiles::find(draft().profile);
+    const auto* profile = profiles::find(draft().profile);
+    const bool split = profile && profile->composition.split_bottom != 0;
+    const int feed_count = split ? 3 : 2;
+    const wchar_t* titles[]{L"Nose-wheel camera", split ? L"Left wing camera" : L"Tail camera", L"Right wing camera"};
+    const wchar_t* views[]{L"UPPER VIEW", split ? L"LOWER LEFT" : L"LOWER VIEW", L"LOWER RIGHT"};
+    for (int i = 0; i < feed_count; ++i) {
+      const int x = split ? (244 + i * 252) : (244 + i * 375);
+      const int width = split ? 240 : 354;
+      panel(dc, x, 138, width, 424);
+      text(dc, titles[i], x + 12, 154, width - 24, 30, heading);
       const auto& dimensions = (profile ? *profile : profiles::A380).camera_panes[i];
       wchar_t view_label[96];
-      std::swprintf(view_label, 96, L"%ls · %d × %d", i ? L"LOWER VIEW" : L"UPPER VIEW", dimensions[0], dimensions[1]);
-      text(dc, view_label, x + 16, 190, 324, 22, small, Muted);
+      std::swprintf(view_label, 96, L"%ls · %d × %d", views[i], dimensions[0], dimensions[1]);
+      text(dc, view_label, x + 12, 190, width - 24, 22, small, Muted);
       for (int j = 0; j < 6; ++j)
-        text(dc, labels[j], x + 16 + (j % 3) * 106, 215 + (j / 3) * 108, 98, 24, small, Muted);
-      text(dc, L"Position relative to the aircraft datum", x + 16, 397, 324, 22, small, Muted);
+        text(dc, labels[j], x + 12 + (j % 3) * (split ? 72 : 106), 215 + (j / 3) * 108, split ? 68 : 98, 24, small, Muted);
+      text(dc, L"Position relative to the aircraft datum", x + 12, 397, width - 24, 22, small, Muted);
     }
     text(dc, L"Positive pitch looks up. Positive yaw looks right.", 530, 594, 462, 45, small, Muted, DT_LEFT | DT_WORDBREAK);
   } else if (page == 2) {
@@ -1011,6 +1036,7 @@ void draw_page(HDC dc) {
     panel(dc, 244, 278, 766, 259);
     text(dc, L"Nose-wheel view", 260, 150, 250, 30, heading);
     const auto* guide_profile = profiles::find(draft().profile);
+    const bool draw_guides = !guide_profile || guide_profile->reference_guides;
     const bool nose_squares = (guide_profile ? guide_profile : &profiles::A380)->composition.square_nose_markers != 0;
     text(dc, nose_squares ? L"Nose squares" : L"Nose dot", 260, 205, 225, 28, normal);
     text(dc, L"Tail view", 260, 289, 250, 30, heading);
@@ -1021,43 +1047,49 @@ void draw_page(HDC dc) {
       text(dc, L"X from left (%)", 505, y, 139, 23, small, Muted);
       text(dc, L"Y from top (%)", 655, y, 139, 23, small, Muted);
     }
-    text(dc, L"X: 0–50%. Y: 0–100% of each camera view. The right guide mirrors the left.", 260, 551, 732, 26, small, Muted);
-    text(dc, L"Preview is temporary until saved. Reset restores guide positions and colour.", 260, 578, 732, 23, small, Muted);
-    auto preview = draft();
-    if (!read_fields(preview))
-      preview = draft();
-    const auto color = preview.guide_color;
-    const auto brush = CreateSolidBrush(RGB(UINT(color[0] * 255), UINT(color[1] * 255), UINT(color[2] * 255)));
-    const auto pen = CreatePen(PS_SOLID, scale(2), RGB(UINT(color[0] * 255), UINT(color[1] * 255), UINT(color[2] * 255)));
-    const auto old_brush = SelectObject(dc, brush), old_pen = SelectObject(dc, pen);
-    const auto point = [&](const std::array<float, 2>& value, bool right, int y, int height) {
-      return POINT{scale(817 + static_cast<int>(std::lround((right ? 1 - value[0] : value[0]) * 172))),
-                   scale(y + static_cast<int>(std::lround(value[1] * height)))};
-    };
-    const auto dot = [&](POINT p, int radius) {
-      Ellipse(dc, p.x - scale(radius), p.y - scale(radius), p.x + scale(radius), p.y + scale(radius));
-    };
-    text(dc, L"Mirrored preview", 811, 155, 183, 23, small, Muted);
-    for (const bool right : {false, true}) {
-      if (nose_squares) {
-        const auto nose = point(preview.nose_dot, right, 191, 45);
-        const RECT marker{nose.x - scale(7), nose.y - scale(7), nose.x + scale(7), nose.y + scale(7)};
-        FillRect(dc, &marker, brush);
-      } else {
-        dot(point(preview.nose_dot, right, 191, 45), 6);
+    text(dc, draw_guides ? L"X: 0–50%. Y: 0–100% of each camera view. The right guide mirrors the left."
+                         : L"This aircraft does not use alignment markers.",
+         260, 551, 732, 26, small, Muted);
+    text(dc, draw_guides ? L"Preview is temporary until saved. Reset restores guide positions and colour."
+                         : L"No marker calibration is required for this profile.",
+         260, 578, 732, 23, small, Muted);
+    if (draw_guides) {
+      auto preview = draft();
+      if (!read_fields(preview))
+        preview = draft();
+      const auto color = preview.guide_color;
+      const auto brush = CreateSolidBrush(RGB(UINT(color[0] * 255), UINT(color[1] * 255), UINT(color[2] * 255)));
+      const auto pen = CreatePen(PS_SOLID, scale(2), RGB(UINT(color[0] * 255), UINT(color[1] * 255), UINT(color[2] * 255)));
+      const auto old_brush = SelectObject(dc, brush), old_pen = SelectObject(dc, pen);
+      const auto point = [&](const std::array<float, 2>& value, bool right, int y, int height) {
+        return POINT{scale(817 + static_cast<int>(std::lround((right ? 1 - value[0] : value[0]) * 172))),
+                     scale(y + static_cast<int>(std::lround(value[1] * height)))};
+      };
+      const auto dot = [&](POINT p, int radius) {
+        Ellipse(dc, p.x - scale(radius), p.y - scale(radius), p.x + scale(radius), p.y + scale(radius));
+      };
+      text(dc, L"Mirrored preview", 811, 155, 183, 23, small, Muted);
+      for (const bool right : {false, true}) {
+        if (nose_squares) {
+          const auto nose = point(preview.nose_dot, right, 191, 45);
+          const RECT marker{nose.x - scale(7), nose.y - scale(7), nose.x + scale(7), nose.y + scale(7)};
+          FillRect(dc, &marker, brush);
+        } else {
+          dot(point(preview.nose_dot, right, 191, 45), 6);
+        }
+        const auto a = point(preview.tail_upper, right, 334, 158), b = point(preview.tail_corner, right, 334, 158),
+                   c = point(preview.tail_inner, right, 334, 158);
+        const POINT points[]{a, b, c};
+        Polyline(dc, points, 3);
+        dot(a, 3);
+        dot(b, 3);
+        dot(c, 3);
       }
-      const auto a = point(preview.tail_upper, right, 334, 158), b = point(preview.tail_corner, right, 334, 158),
-                 c = point(preview.tail_inner, right, 334, 158);
-      const POINT points[]{a, b, c};
-      Polyline(dc, points, 3);
-      dot(a, 3);
-      dot(b, 3);
-      dot(c, 3);
+      SelectObject(dc, old_brush);
+      SelectObject(dc, old_pen);
+      DeleteObject(brush);
+      DeleteObject(pen);
     }
-    SelectObject(dc, old_brush);
-    SelectObject(dc, old_pen);
-    DeleteObject(brush);
-    DeleteObject(pen);
   }
   text(dc, notice.c_str(), 248, 687, 382, 43, small, dirty ? Accent : Muted, DT_LEFT | DT_WORDBREAK);
 }
@@ -1432,7 +1464,8 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       const int action = hotkey_registration.action(w, l);
       const auto focus = GetFocus();
       const auto focused_id = focus && GetParent(focus) == hwnd ? GetDlgCtrlID(focus) : 0;
-      if (action >= 0 && !preview_ui && !(focused_id >= 620 && focused_id <= 622))
+      if (action >= 0 && !preview_ui &&
+          !(focused_id >= 620 && focused_id < 620 + static_cast<int>(win::CameraHotkeyNames.size())))
         toggle_camera_from_hotkey(static_cast<unsigned>(action));
       return 0;
     }
@@ -1486,7 +1519,8 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       if (item->CtlType != ODT_BUTTON)
         break;
       const int id = static_cast<int>(item->CtlID);
-      const bool selected = (id >= 100 && id < 106 && id - 100 == page) || is_on(id, draft());
+      const bool disabled = (item->itemState & ODS_DISABLED) != 0;
+      const bool selected = !disabled && ((id >= 100 && id < 106 && id - 100 == page) || is_on(id, draft()));
       HBRUSH surround = CreateSolidBrush((id >= 100 && id < 106) || id == 512 || id == 513 || id == 514 ? Sidebar : Background);
       FillRect(item->hDC, &item->rcItem, surround);
       DeleteObject(surround);
@@ -1495,11 +1529,11 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         wchar_t label[64]{};
         GetWindowTextW(item->hwndItem, label, 64);
         SelectObject(item->hDC, version_font);
-        SetTextColor(item->hDC, item->itemState & ODS_SELECTED ? Text : Accent);
+        SetTextColor(item->hDC, disabled ? Muted : (item->itemState & ODS_SELECTED ? Text : Accent));
         SetBkMode(item->hDC, TRANSPARENT);
         auto bounds = item->rcItem;
         DrawTextW(item->hDC, label, -1, &bounds, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-        if (item->itemState & ODS_FOCUS) {
+        if (!disabled && (item->itemState & ODS_FOCUS)) {
           InflateRect(&bounds, -1, -1);
           DrawFocusRect(item->hDC, &bounds);
         }
@@ -1507,10 +1541,13 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         return TRUE;
       }
       const bool primary = id == 500;
-      const bool down = (item->itemState & ODS_SELECTED) != 0;
-      const COLORREF fill = primary ? Accent : selected ? RGB(30, 64, 63) : down ? Border : Card;
+      const bool down = !disabled && (item->itemState & ODS_SELECTED) != 0;
+      // Disabled owner-draw buttons need an explicit muted fill/label; EnableWindow
+      // alone leaves them looking enabled because this path paints every button.
+      const COLORREF fill = disabled ? RGB(20, 24, 31) : primary ? Accent : selected ? RGB(30, 64, 63) : down ? Border : Card;
+      const COLORREF outline = disabled ? RGB(36, 44, 54) : selected || primary ? Accent : Border;
       HBRUSH brush = CreateSolidBrush(fill);
-      HPEN pen = CreatePen(PS_SOLID, scale(1), selected || primary ? Accent : Border);
+      HPEN pen = CreatePen(PS_SOLID, scale(1), outline);
       const auto oldb = SelectObject(item->hDC, brush), oldp = SelectObject(item->hDC, pen);
       RoundRect(item->hDC, item->rcItem.left, item->rcItem.top, item->rcItem.right, item->rcItem.bottom, scale(9), scale(9));
       SelectObject(item->hDC, oldb);
@@ -1519,18 +1556,18 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       DeleteObject(pen);
       RECT r = item->rcItem;
       if (id == 512) {
-        draw_bug_icon(item->hDC, r, Accent);
+        draw_bug_icon(item->hDC, r, disabled ? Muted : Accent);
         InflateRect(&r, -scale(4), -scale(4));
       } else {
         wchar_t label[160];
         GetWindowTextW(item->hwndItem, label, 160);
         SelectObject(item->hDC, normal);
-        SetTextColor(item->hDC, primary ? Background : selected ? Accent : Text);
+        SetTextColor(item->hDC, disabled ? Muted : primary ? Background : selected ? Accent : Text);
         SetBkMode(item->hDC, TRANSPARENT);
         InflateRect(&r, -scale(10), 0);
         DrawTextW(item->hDC, label, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
       }
-      if (item->itemState & ODS_FOCUS) {
+      if (!disabled && (item->itemState & ODS_FOCUS)) {
         if (id != 512)
           InflateRect(&r, -2, -4);
         DrawFocusRect(item->hDC, &r);
@@ -1613,6 +1650,11 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       }
       if (id >= 100 && id < 106) {
         auto s = draft();
+        if (id == 105) {
+          const auto* guide_profile = profiles::find(s.profile);
+          if (guide_profile && !guide_profile->reference_guides)
+            return 0;
+        }
         const wchar_t* field_error{};
         if (!read_fields(s, &field_error)) {
           notice = field_error ? field_error : L"Finish the current values before changing pages.";
@@ -1680,7 +1722,10 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         if (!apply(false))
           return 0;
         const auto s = draft();
+        const auto* color_profile = profiles::find(s.profile);
         const bool markings = id == 372;
+        if ((!markings && color_profile && !color_profile->ground_speed) || (markings && color_profile && !color_profile->reference_guides))
+          return 0;
         const auto& color = markings ? s.guide_color : s.speed_color;
         static COLORREF custom[16]{};
         CHOOSECOLORW choice{};
@@ -1754,11 +1799,11 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         build_controls();
         return 0;
       }
-      if ((id >= 330 && id <= 333) || (id >= 340 && id <= 343)) {
+      if ((id >= 330 && id <= 333) || (id >= 340 && id <= 343) || (id >= 350 && id <= 353)) {
         if (!apply(false))
           return 0;
         auto s = draft();
-        const unsigned side = id >= 340 ? 1u : 0u;
+        const unsigned side = static_cast<unsigned>((id - 330) / 10);
         const int action = (id - 330) % 10;
         if (action == 0)
           s.mounts[side][1] -= 0.25;
@@ -1775,7 +1820,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         }
         return 0;
       }
-      if (id == 350) {
+      if (id == 359) {
         auto s = draft();
         s.mounts = profiles::find(s.profile)->mounts;
         publish(s);
@@ -1784,6 +1829,9 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         return 0;
       }
       if (id == 370) {
+        const auto* guide_profile = profiles::find(draft().profile);
+        if (guide_profile && !guide_profile->reference_guides)
+          return 0;
         if (apply(false)) {
           dirty_notice();
           notice = L"Preview applied. Save changes to keep these guides.";
@@ -1793,6 +1841,8 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       if (id == 371) {
         auto s = draft();
         if (const auto* profile = profiles::find(s.profile)) {
+          if (!profile->reference_guides)
+            return 0;
           win::reset_guide_settings(s, *profile);
           publish(s);
           dirty_notice();

@@ -174,6 +174,11 @@ try {
         foreach ($entry in $rateSnapshot) {
             if ($entry.owned) { $writtenHashes[$entry.path] = $entry.installedHash }
         }
+        $exposureSnapshot = @(New-TaxiExposureSnapshot -BackupDirectory $staging)
+        $exposureMigrated = [bool](Set-TaxiForcedExposure $exposureSnapshot)
+        foreach ($entry in $exposureSnapshot) {
+            if ($entry.owned) { $writtenHashes[$entry.path] = $entry.installedHash }
+        }
     }
     if (Test-Path -LiteralPath $oldExe -PathType Leaf) {
         $oldBackup = Join-Path $staging '380-taxi-cam.exe.backup'

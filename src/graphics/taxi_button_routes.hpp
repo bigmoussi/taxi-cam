@@ -100,6 +100,25 @@ class TaxiButtonRoutes {
     return true;
   }
 
+  // Single-display profiles confirm one texture. Both navigation-display
+  // rectangles live on it, so both sides receive that id. Pair adoption still
+  // rejects a repeated id and is not used here.
+  // Both-zero after forget() can leave assigned_ set (same sticky ownership as
+  // dual-PFD both-lost). Unlike pair adoption, a lone navigation texture may
+  // be re-bound automatically: there is no left/right ambiguity to resolve.
+  bool adopt_single(std::uint64_t id) noexcept {
+    if (!id)
+      return false;
+    if (targets[0] == id && targets[1] == id)
+      return true;
+    if (targets[0] || targets[1])
+      return false;
+    targets = {id, id};
+    detected_targets_ = {id, id};
+    assigned_ = true;
+    return true;
+  }
+
   // A complete allocation group may replace stale automatic ranks, but never
   // a surviving explicit/semantic side. Keep the replacement marked detected
   // so a later group change can withdraw or replace it in the same way.

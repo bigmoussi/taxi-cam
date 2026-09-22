@@ -45,7 +45,9 @@ class SceneFrameOutput {
   // prepared recording must first be submitted or discarded.
   bool set_display_exposure(float ev) noexcept;
   bool set_ground_speed(float knots, bool valid) noexcept;
+  bool hide_ground_speed() noexcept;
   bool set_composition(const profiles::Composition& layout) noexcept;
+  bool set_reference_guides(bool enabled) noexcept;
   bool set_patch_profile(std::uint32_t profile) noexcept;
   // Metadata-only demand, admitted against the current profile's exact shape.
   // Requests never allocate or record GPU work. Every admitted slot remains
@@ -58,7 +60,11 @@ class SceneFrameOutput {
   // before every recorded copy. No allocation or CPU image access here.
   Patch patch(DXGI_FORMAT format, UINT width, UINT height, const D3D12_RECT& content) const noexcept;
   float display_exposure() const noexcept;
-  bool prepare(ID3D12Resource* nose, DXGI_FORMAT nose_format, ID3D12Resource* tail, DXGI_FORMAT tail_format) noexcept;
+  bool prepare(ID3D12Resource* nose, DXGI_FORMAT nose_format, ID3D12Resource* left, DXGI_FORMAT left_format,
+               ID3D12Resource* right, DXGI_FORMAT right_format) noexcept;
+  bool prepare(ID3D12Resource* nose, DXGI_FORMAT nose_format, ID3D12Resource* tail, DXGI_FORMAT tail_format) noexcept {
+    return prepare(nose, nose_format, tail, tail_format, tail, tail_format);
+  }
   // Separate retained output instance: no camera inputs or compositor shaders.
   // Uses the same private submission lifetime and manager timeline contract.
   bool prepare_calibration(std::uint64_t frame) noexcept;

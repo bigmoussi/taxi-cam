@@ -27,7 +27,10 @@ struct MountConfig {
   float fov_radians = 0.85f;
 };
 
-using MountPair = std::array<MountConfig, 2>;
+// Up to three feeds: nose, tail/bottom-left, bottom-right. Non-split profiles
+// keep a valid third mount equal to the second; only feeds 0 and 1 are used.
+inline constexpr unsigned kMaxCameraFeeds = 3;
+using MountPair = std::array<MountConfig, kMaxCameraFeeds>;
 
 struct MountedPose {
   Vector3 position{};
@@ -84,8 +87,12 @@ inline bool valid_mount(const MountConfig& mount) noexcept {
   return true;
 }
 
-inline bool valid_mounts(const MountPair& mounts) noexcept {
-  return valid_mount(mounts[0]) && valid_mount(mounts[1]);
+inline bool valid_mounts(const MountPair& mounts, unsigned feeds = 2) noexcept {
+  const unsigned count = feeds < 1 ? 1u : (feeds > kMaxCameraFeeds ? kMaxCameraFeeds : feeds);
+  for (unsigned i = 0; i < count; ++i)
+    if (!valid_mount(mounts[i]))
+      return false;
+  return true;
 }
 
 inline MountPair default_mounts() noexcept {
@@ -126,13 +133,21 @@ inline bool make_mounted_pose(const BodyPose& body, const MountConfig& mount, Mo
   return true;
 }
 
-inline bool make_mounted_pair(const BodyPose& body, const MountPair& mounts, std::array<MountedPose, 2>& output) noexcept {
+inline bool make_mounted_views(const BodyPose& body, const MountPair& mounts, std::array<MountedPose, kMaxCameraFeeds>& output,
+                               unsigned feeds = 2) noexcept {
   output = {};
-  std::array<MountedPose, 2> result{};
-  if (!make_mounted_pose(body, mounts[0], result[0]) || !make_mounted_pose(body, mounts[1], result[1]))
-    return false;
+  const unsigned count = feeds < 1 ? 1u : (feeds > kMaxCameraFeeds ? kMaxCameraFeeds : feeds);
+  std::array<MountedPose, kMaxCameraFeeds> result{};
+  for (unsigned i = 0; i < count; ++i)
+    if (!make_mounted_pose(body, mounts[i], result[i]))
+      return false;
   output = result;
   return true;
+}
+
+inline bool make_mounted_pair(const BodyPose& body, const MountPair& mounts, std::array<MountedPose, kMaxCameraFeeds>& output,
+                              unsigned feeds = 2) noexcept {
+  return make_mounted_views(body, mounts, output, feeds);
 }
 
 }  // namespace taxi_camera::native_camera

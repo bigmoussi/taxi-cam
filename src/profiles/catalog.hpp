@@ -9,7 +9,9 @@ struct DisplayRect {
 struct DisplayInsets {
   unsigned left, top, right, bottom;
 };
-using CameraPanes = std::array<std::array<std::int32_t, 2>, 2>;
+// Index 0 nose, 1 tail / bottom-left, 2 bottom-right (split_bottom profiles).
+// Non-split profiles leave [2] equal to [1]; only the first two feeds are used.
+using CameraPanes = std::array<std::array<std::int32_t, 2>, 3>;
 struct Composition {
   float nose_height = 255, tail_top = 259, divider_top = 251, divider_bottom = 263;
   std::array<float, 2> nose_dot{0.14f, 0.48f};
@@ -21,9 +23,14 @@ struct Composition {
   std::array<float, 2> speed_panel_min_size{0, 0};
   // Float 0/1 is passed directly in the compositor's GPU constants.
   float square_nose_markers = 1;
+  // 0 keeps the full-width second feed. 1 places distinct left and right bottom
+  // feeds with bottom_gap working-image pixels of black between them.
+  float split_bottom = 0;
+  float bottom_gap = 0;
 };
+static_assert(sizeof(Composition) == 27 * sizeof(float));
 enum class TaxiControl { push_event, lvar_off, manual_only };
-enum class PfdDetectionPolicy { dominant_activity, ini_a380_allocation_group };
+enum class PfdDetectionPolicy { dominant_activity, ini_a380_allocation_group, single_display };
 inline constexpr Composition A350Etacs = [] {
   Composition c;
   // A350-900 image-space guide defaults; live adjustments remain per profile.
@@ -47,12 +54,13 @@ struct AircraftProfile {
   std::array<const char*, 2> taxi_events;
   std::array<const char*, 2> pfd_labels;
   // right/up/forward metres, pitch/yaw degrees, lens radians.
-  std::array<std::array<double, 6>, 2> mounts;
+  // [0] nose, [1] tail or bottom-left, [2] bottom-right when split_bottom != 0.
+  std::array<std::array<double, 6>, 3> mounts;
   unsigned width, height, mips;
   TaxiControl taxi_control = TaxiControl::push_event;
   std::array<std::string_view, 3> aircraft_types{"A388"};
   std::array<DisplayRect, 2> display_regions{{{0, 0, 768, 763}, {0, 0, 768, 763}}};
-  CameraPanes camera_panes{{{736, 251}, {736, 496}}};
+  CameraPanes camera_panes{{{736, 251}, {736, 496}, {736, 496}}};
   bool higher_id_left = true;
   double speed_cutoff_knots = 60;
   Composition composition{};
@@ -61,11 +69,17 @@ struct AircraftProfile {
   // Target pixels: the outer display region is black around this camera inset.
   DisplayInsets camera_padding{16, 12, 16, 0};
   PfdDetectionPolicy pfd_detection = PfdDetectionPolicy::dominant_activity;
-  float exposure = -11.5f;
+  float exposure = -8.f;
   // Measured PFD redraws per second per side (bridge stamps/s ÷ 2). Composing
   // faster than this cannot reach the screen. 0 = not measured: only the
   // camera-manager ceiling caps the useful camera_rate.
   unsigned pfd_refresh_hz = 0;
+  // Scanned texture name, when the display is not named by pfd_labels alone.
+  const char* display_texture = "";
+  // Existing compositor guide switch. False draws no alignment markers.
+  bool reference_guides = true;
+  // False keeps ground speed out of the composed ND (PMDG 777).
+  bool ground_speed = true;
 };
 inline constexpr AircraftProfile A380{1,
                                       "fbw-a380x",
@@ -73,7 +87,9 @@ inline constexpr AircraftProfile A380{1,
                                       {"L:A32NX_FCU_EFIS_L_TAXI_LIGHT_ON", "L:A32NX_FCU_EFIS_R_TAXI_LIGHT_ON"},
                                       {"A32NX.FCU_EFIS_L_TAXI_PUSH", "A32NX.FCU_EFIS_R_TAXI_PUSH"},
                                       {"SCREEN_DU_PFDL", "SCREEN_DU_PFDR"},
-                                      {{{0, -1.75, 26.950668984, -17.5, 0, 1.24}, {0, 18, -25, -32, 0, 1.02}}},
+                                      {{{0, -1.75, 26.950668984, -17.5, 0, 1.24},
+                                        {0, 18, -25, -32, 0, 1.02},
+                                        {0, 18, -25, -32, 0, 1.02}}},
                                       768,
                                       1024,
                                       5};
@@ -94,14 +110,14 @@ inline constexpr AircraftProfile A359 = [] {
                     {"L:INI_TAXI_LEFT", "L:INI_TAXI_RIGHT"},
                     {"", ""},
                     {"$EFIS_LEFT", "$EFIS_RIGHT"},
-                    {{{0, -2, 16, -15, 0, 0.55}, {0, 10, -33.0, -15, 0, 0.62}}},
+                    {{{0, -2, 16, -15, 0, 0.55}, {0, 10, -33.0, -15, 0, 0.62}, {0, 10, -33.0, -15, 0, 0.62}}},
                     1644,
                     1024,
                     0,
                     TaxiControl::lvar_off,
                     {"A359", "A359 ULR"},
                     {{{0, 0, 806, 763}, {838, 0, 1644, 763}}},
-                    {{{774, 251}, {774, 496}}},
+                    {{{774, 251}, {774, 496}, {774, 496}}},
                     true,
                     60,
                     A350Etacs,
@@ -117,14 +133,14 @@ inline constexpr AircraftProfile A35K = [] {
                     {"L:INI_TAXI_LEFT", "L:INI_TAXI_RIGHT"},
                     {"", ""},
                     {"$EFIS_LEFT", "$EFIS_RIGHT"},
-                    {{{0, -2, 19.81, -15, 0, 0.55}, {0, 10, -36.17, -15, 0, 0.62}}},
+                    {{{0, -2, 19.81, -15, 0, 0.55}, {0, 10, -36.17, -15, 0, 0.62}, {0, 10, -36.17, -15, 0, 0.62}}},
                     1644,
                     1024,
                     0,
                     TaxiControl::lvar_off,
                     {"A35K"},
                     {{{0, 0, 806, 763}, {838, 0, 1644, 763}}},
-                    {{{774, 251}, {774, 496}}},
+                    {{{774, 251}, {774, 496}, {774, 496}}},
                     true,
                     60,
                     A350EtacsA35K,
@@ -148,7 +164,7 @@ inline constexpr AircraftProfile IniA380 = [] {
   p.taxi_control = TaxiControl::manual_only;
   p.aircraft_types = {"Airbus", "A388"};
   p.package_markers = {"simobjects/airplanes/inibuilds-a380", "fs24-inibuilds-aircraft-a380"};
-  p.mounts = {{{0, 2.2, 16, -17.5, 0, 1}, {0, 18, -34, -32, 0, 1}}};
+  p.mounts = {{{0, 2.2, 16, -17.5, 0, 1}, {0, 18, -34, -32, 0, 1}, {0, 18, -34, -32, 0, 1}}};
   p.composition.tail_upper = {0.34f, 0.52f};
   p.composition.tail_corner = {0.305f, 0.65f};
   p.composition.tail_inner = {0.355f, 0.65f};
@@ -162,7 +178,119 @@ inline constexpr AircraftProfile IniA380 = [] {
   p.pfd_refresh_hz = 16;
   return p;
 }();
-inline constexpr std::array<const AircraftProfile*, 4> Catalog{&A380, &A359, &A35K, &IniA380};
+// Scanned on the open 777-200ER RR. Both inboard gauges draw one shared texture.
+// There is no separate taxi-camera texture.
+inline constexpr const char* Pmdg777Texture = "DUS";
+inline constexpr const char* Pmdg777LeftGauge = "DU_LeftInboard";
+inline constexpr const char* Pmdg777RightGauge = "DU_RightInboard";
+inline constexpr unsigned Pmdg777DisplayWidth = 2048;
+inline constexpr unsigned Pmdg777DisplayHeight = 2048;
+// panel.cfg htmlgauge x, y, width, height on DUS. The same values are in the
+// 777-200ER, 777-300ER, and 777F files. The navigation display is the whole
+// inboard gauge, so these rectangles are not cropped further.
+inline constexpr unsigned Pmdg777LeftNdX = 1058;
+inline constexpr unsigned Pmdg777LeftNdY = 33;
+inline constexpr unsigned Pmdg777RightNdX = 30;
+inline constexpr unsigned Pmdg777RightNdY = 1058;
+inline constexpr unsigned Pmdg777NdWidth = 958;
+inline constexpr unsigned Pmdg777NdHeight = 971;
+// Mip count and DXGI format were not in the scan.
+inline constexpr unsigned Pmdg777DisplayMips = 0;
+inline constexpr std::array<unsigned, 6> Pmdg777Formats{};
+// Separate settings files per airplane folder (200ER / 300ER / 777F). They share
+// this cockpit layout on DUS. AircraftLoaded selects the airplane folder. ATC
+// TYPE is the Boeing brand string and is not required.
+// Both navigation displays are rectangles on one destination texture. Taxi Cam
+// owns three viewpoints: nose on top, and independent left/right wing cameras
+// on the split bottom. Pixels outside the two inboard gauges stay untouched.
+// Working-image layout matched to the reference ND photo on a nearly square
+// 958x971 gauge. Nose picture height stays 280 px from y=0 so the default GS
+// font sample rect still sees camera pixels (not layout chrome). Bottom panes
+// are equal 360 px squares seated directly under a 38 px T (~4/5 of the gap).
+// Leftover rows below the squares are black. Extra black above the stamped
+// block on the ND comes from camera_padding top. L/R padding stay 0.
+inline constexpr unsigned Pmdg777NosePictureHeight = 280;
+inline constexpr unsigned Pmdg777BottomGap = 48;
+inline constexpr unsigned Pmdg777BottomPane = (768 - Pmdg777BottomGap) / 2;
+inline constexpr unsigned Pmdg777DividerThickness = (Pmdg777BottomGap * 4 + 2) / 5;
+inline constexpr unsigned Pmdg777DividerTop = Pmdg777NosePictureHeight;
+inline constexpr unsigned Pmdg777DividerBottom = Pmdg777DividerTop + Pmdg777DividerThickness;
+inline constexpr unsigned Pmdg777TailTop = Pmdg777DividerBottom;
+inline constexpr unsigned Pmdg777TopPadding = 85;
+static_assert(Pmdg777BottomPane == 360);
+static_assert(Pmdg777DividerThickness == 38);
+static_assert(Pmdg777TailTop == 318);
+static_assert(Pmdg777TailTop + Pmdg777BottomPane + Pmdg777TopPadding == 763);
+inline constexpr Composition Pmdg777Composition = [] {
+  Composition c;
+  c.nose_height = static_cast<float>(Pmdg777NosePictureHeight);
+  c.divider_top = static_cast<float>(Pmdg777DividerTop);
+  c.divider_bottom = static_cast<float>(Pmdg777DividerBottom);
+  c.tail_top = static_cast<float>(Pmdg777TailTop);
+  c.split_bottom = 1;
+  c.bottom_gap = static_cast<float>(Pmdg777BottomGap);
+  return c;
+}();
+// Nose: forward/down over the nose gear. Bottom-left/right: outside each side of
+// the fuselage looking at that wing (own Right offset and yaw; not a mirrored
+// single tail capture). 200ER/777F published nose from Robert's live 777-200ER
+// calibration. 300ER nose from his live longer-fuselage capture (forward 22 m);
+// wing mounts stay the published shared defaults until calibrated separately.
+inline constexpr std::array<std::array<double, 6>, 3> Pmdg777Mounts{
+    {{0, -2, 16, -18, 0, 1}, {-6, 1.5, -28, -5, -12, 0.6}, {6, 1.5, -28, -5, 12, 0.6}}};
+inline constexpr std::array<std::array<double, 6>, 3> Pmdg777300Mounts{
+    {{0, -2, 22, -18, 0, 1}, Pmdg777Mounts[1], Pmdg777Mounts[2]}};
+inline constexpr std::array<std::array<double, 6>, 3> Pmdg777FMounts{
+    {Pmdg777Mounts[0], Pmdg777Mounts[1], Pmdg777Mounts[2]}};
+// Nose matches the 280 px picture; each bottom feed is a square half-pane.
+inline constexpr CameraPanes Pmdg777Panes{
+    {{736, static_cast<std::int32_t>((Pmdg777NosePictureHeight * 736 + 384) / 768)},
+     {static_cast<std::int32_t>(Pmdg777BottomPane), static_cast<std::int32_t>(Pmdg777BottomPane)},
+     {static_cast<std::int32_t>(Pmdg777BottomPane), static_cast<std::int32_t>(Pmdg777BottomPane)}}};
+inline constexpr auto make_pmdg_777 = [](std::uint32_t id, std::string_view key, const wchar_t* name,
+                                         std::string_view marker,
+                                         std::array<std::array<double, 6>, 3> mounts) {
+  AircraftProfile p{id,
+                    key,
+                    name,
+                    {"", ""},
+                    {"", ""},
+                    {Pmdg777LeftGauge, Pmdg777RightGauge},
+                    mounts,
+                    Pmdg777DisplayWidth,
+                    Pmdg777DisplayHeight,
+                    Pmdg777DisplayMips,
+                    TaxiControl::manual_only,
+                    {"", "", ""},
+                    {{{Pmdg777LeftNdX, Pmdg777LeftNdY, Pmdg777LeftNdX + Pmdg777NdWidth, Pmdg777LeftNdY + Pmdg777NdHeight},
+                      {Pmdg777RightNdX, Pmdg777RightNdY, Pmdg777RightNdX + Pmdg777NdWidth, Pmdg777RightNdY + Pmdg777NdHeight}}},
+                    Pmdg777Panes,
+                    true,
+                    60,
+                    Pmdg777Composition,
+                    Pmdg777Formats,
+                    {marker, "", ""}};
+  p.pfd_detection = PfdDetectionPolicy::single_display;
+  p.display_texture = Pmdg777Texture;
+  p.reference_guides = false;
+  p.ground_speed = false;
+  // Larger top ND inset moves the stamped page down without shortening the nose
+  // picture. Bottom inset stays 0; leftover working-image rows under the squares
+  // are black. L/R stay 0.
+  p.camera_padding = {0, Pmdg777TopPadding, 0, 0};
+  return p;
+};
+inline constexpr AircraftProfile Pmdg777 =
+    make_pmdg_777(5, "pmdg-777", L"PMDG 777-200ER", "PMDG 777-200ER", Pmdg777Mounts);
+inline constexpr AircraftProfile Pmdg777300ER =
+    make_pmdg_777(6, "pmdg-777-300er", L"PMDG 777-300ER", "PMDG 777-300ER", Pmdg777300Mounts);
+inline constexpr AircraftProfile Pmdg777F =
+    make_pmdg_777(7, "pmdg-777f", L"PMDG 777F", "PMDG 777F", Pmdg777FMounts);
+static_assert(Pmdg777300ER.mounts[0][2] == 22);
+static_assert(Pmdg777300ER.mounts[0] != Pmdg777Mounts[0]);
+static_assert(Pmdg777F.mounts[0] == Pmdg777Mounts[0]);
+inline constexpr std::array<const AircraftProfile*, 7> Catalog{&A380, &A359, &A35K, &IniA380, &Pmdg777, &Pmdg777300ER,
+                                                              &Pmdg777F};
 inline constexpr DisplayRect display_rect(const AircraftProfile& p, unsigned side) noexcept {
   return p.display_regions[side < 2 ? side : 0];
 }
@@ -186,10 +314,16 @@ inline bool camera_candidate(unsigned width, unsigned height) noexcept {
 inline constexpr bool matches_display(const AircraftProfile& p, unsigned width, unsigned height, unsigned mips, unsigned format) noexcept {
   if (width != p.width || height != p.height || !mips || mips > 12 || (p.mips && p.mips != mips) || !format)
     return false;
-  for (auto supported : p.formats)
+  bool listed = false;
+  for (auto supported : p.formats) {
+    if (!supported)
+      continue;
+    listed = true;
     if (supported == format)
       return true;
-  return false;
+  }
+  // No scanned format list: admit the known size and leave a shared size ambiguous.
+  return !listed;
 }
 inline bool matches_aircraft(const AircraftProfile& p, std::string_view type) noexcept {
   const auto equal = [](std::string_view a, std::string_view b) {
@@ -239,6 +373,16 @@ inline std::uint32_t detect_aircraft(std::string_view type, std::string_view pat
   for (const auto marker : IniA380.package_markers)
     if (!marker.empty() && path_contains(path, marker))
       return matches_aircraft(IniA380, type) ? IniA380.id : 0;
+  // PMDG ATC TYPE is the Boeing brand string, not a product id. The public
+  // AircraftLoaded path names the airplane folder. The open 777-200ER RR
+  // reported SimObjects\Airplanes\PMDG 777-200ER\... and did not contain
+  // pmdg-aircraft-77er. The 300ER and 777F use the same folder-component
+  // pattern; those two paths were not in this log.
+  for (const auto* profile : {&Pmdg777, &Pmdg777300ER, &Pmdg777F}) {
+    for (const auto marker : profile->package_markers)
+      if (!marker.empty() && path_contains(path, marker))
+        return profile->id;
+  }
   std::uint32_t match = 0;
   for (const auto* p : Catalog) {
     if (!matches_aircraft(*p, type))

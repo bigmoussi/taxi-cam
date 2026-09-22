@@ -30,7 +30,7 @@ struct OwnedEntryInventory {
   std::uint32_t bucket_count = 0;
   std::uint32_t nodes_visited = 0;
   // Published only after full traversal and every consistency reread succeeds.
-  std::array<OwnedEntry, 2> entries{};
+  std::array<OwnedEntry, 3> entries{};
 };
 
 // Build-specific fixed layout, no engine calls: T=manager+88 contains DWORD
@@ -50,6 +50,6 @@ struct OwnedEntryInventory {
 // is about96 KiB; it performs no dynamic allocation.
 OwnedEntryInventory inspect_owned_entries(MemoryReader& reader,
                                           std::uint64_t manager_address,
-                                          const std::array<std::uint64_t, 2>& owned_ids);
+                                          const std::array<std::uint64_t, 3>& owned_ids);
 
 }  // namespace taxi_camera::engine_camera

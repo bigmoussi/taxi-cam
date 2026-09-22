@@ -75,8 +75,16 @@ class CameraCompositorD3D12 {
   void set_reference_guides(bool enabled) noexcept { reference_guides_ = enabled; }
   void set_ground_speed(float knots, bool valid) noexcept {
     const auto display = ground_speed_display(knots, valid);
+    ground_speed_hidden_ = false;
     ground_speed_valid_ = display.valid;
     ground_speed_ = display.knots;
+  }
+  // Keep the default GS panel geometry for font fixtures. When hidden, the
+  // overlay is skipped entirely so no black rectangle appears on the ND.
+  void hide_ground_speed() noexcept {
+    ground_speed_hidden_ = true;
+    ground_speed_valid_ = false;
+    ground_speed_ = 0;
   }
   // Recorded root constants capture this value. No resource/descriptors change.
   bool set_display_exposure(float ev) noexcept {
@@ -100,11 +108,11 @@ class CameraCompositorD3D12 {
 
     D3D12_DESCRIPTOR_HEAP_DESC heap{};
     heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    heap.NumDescriptors = 2;
+    heap.NumDescriptors = 3;
     heap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     status = device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(srv_heap_.put()));
     if (FAILED(status))
-      return initialization_failed(status, "Creating the two-source SRV heap failed.");
+      return initialization_failed(status, "Creating the three-source SRV heap failed.");
     heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
     heap.NumDescriptors = 1;
     heap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
@@ -135,25 +143,37 @@ class CameraCompositorD3D12 {
     return S_OK;
   }
 
-  // Only single-layer, non-MSAA default-heap 2D textures are supported. Mip zero
-  // is sampled; other mips are not transitioned. Typed RGBA/BGRA UNORM, sRGB or
-  // RGBA16_FLOAT views must match a typed resource or its typeless family.
-  // R11G11B10_FLOAT requires an exact typed resource and view.
-  HRESULT set_inputs(ID3D12Resource* nose, DXGI_FORMAT nose_format, ID3D12Resource* tail, DXGI_FORMAT tail_format) noexcept {
+  // Nose, bottom-left (or full-width tail), and bottom-right. Non-split layouts
+  // may pass the same resource for both bottom inputs; split_bottom requires three
+  // distinct captures so each wing has its own mount.
+  // descriptor_writes counts feed bindings: exactly two when the bottoms alias
+  // (t2 still gets CreateShaderResourceView for the same tail so the three-SRV
+  // root table stays valid; that fill is not a third feed), exactly three when
+  // the bottoms are distinct. Never CopyDescriptorsSimple from this shader-visible
+  // heap — it is CPU-write-only as a copy source.
+  HRESULT set_inputs(ID3D12Resource* nose, DXGI_FORMAT nose_format, ID3D12Resource* tail_left, DXGI_FORMAT left_format,
+                     ID3D12Resource* tail_right, DXGI_FORMAT right_format) noexcept {
     if (!output_.get())
       return fail(E_UNEXPECTED, "Initialize the compositor before binding inputs.");
-    if (!nose || !tail || same_object(nose, tail) || same_object(nose, output_.get()) || same_object(tail, output_.get()))
-      return fail(E_INVALIDARG, "Two distinct non-null inputs must not alias the compositor output.");
-    if (same_object(nose, inputs_[0].get()) && same_object(tail, inputs_[1].get()) && nose_format == formats_[0] &&
-        tail_format == formats_[1]) {
+    if (!nose || !tail_left || !tail_right || same_object(nose, tail_left) || same_object(nose, tail_right) ||
+        same_object(nose, output_.get()) || same_object(tail_left, output_.get()) || same_object(tail_right, output_.get()))
+      return fail(E_INVALIDARG, "Nose and bottom inputs must be non-null and must not alias the compositor output.");
+    const bool shared_bottom = same_object(tail_left, tail_right);
+    if (composition_.split_bottom != 0 && shared_bottom)
+      return fail(E_INVALIDARG, "Split-bottom layouts need distinct left and right bottom captures.");
+    if (shared_bottom && left_format != right_format)
+      return fail(E_INVALIDARG, "Aliased bottom inputs must share the same typed SRV format.");
+    if (same_object(nose, inputs_[0].get()) && same_object(tail_left, inputs_[1].get()) && same_object(tail_right, inputs_[2].get()) &&
+        nose_format == formats_[0] && left_format == formats_[1] && right_format == formats_[2]) {
       error_[0] = '\0';
       return S_FALSE;
     }
-    std::array<D3D12_RESOURCE_DESC, 2> descriptions{};
-    if (!validate_input(nose, nose_format, descriptions[0]) || !validate_input(tail, tail_format, descriptions[1]))
+    std::array<D3D12_RESOURCE_DESC, 3> descriptions{};
+    if (!validate_input(nose, nose_format, descriptions[0]) || !validate_input(tail_left, left_format, descriptions[1]) ||
+        !validate_input(tail_right, right_format, descriptions[2]))
       return fail(E_INVALIDARG, "An input has an unsupported device, texture description, heap or typed SRV format.");
-    const std::array<ID3D12Resource*, 2> resources{nose, tail};
-    const std::array<DXGI_FORMAT, 2> formats{nose_format, tail_format};
+    const std::array<ID3D12Resource*, 3> resources{nose, tail_left, tail_right};
+    const std::array<DXGI_FORMAT, 3> formats{nose_format, left_format, right_format};
     auto handle = srv_heap_->GetCPUDescriptorHandleForHeapStart();
     const UINT stride = device_->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     for (std::size_t index = 0; index < resources.size(); ++index) {
@@ -168,23 +188,38 @@ class CameraCompositorD3D12 {
     }
     formats_ = formats;
     input_descriptions_ = descriptions;
-    statistics_.descriptor_writes += 2;
+    statistics_.descriptor_writes += shared_bottom ? 2u : 3u;
     ++statistics_.input_changes;
     error_[0] = '\0';
     return S_OK;
   }
 
+  // Convenience for full-width two-feed profiles: both bottom SRVs sample the same tail.
+  HRESULT set_inputs(ID3D12Resource* nose, DXGI_FORMAT nose_format, ID3D12Resource* tail, DXGI_FORMAT tail_format) noexcept {
+    return set_inputs(nose, nose_format, tail, tail_format, tail, tail_format);
+  }
+
   // Supported exact before states: COMMON, RENDER_TARGET, UNORDERED_ACCESS,
   // COPY_DEST, or any nonempty combination of PIXEL_SHADER_RESOURCE,
   // NON_PIXEL_SHADER_RESOURCE and COPY_SOURCE. Other state sets are refused.
-  HRESULT record(ID3D12GraphicsCommandList* private_list, D3D12_RESOURCE_STATES nose_before, D3D12_RESOURCE_STATES tail_before) noexcept {
-    if (!output_.get() || !inputs_[0].get() || !inputs_[1].get() || !private_list ||
+  // Non-split layouts may bind the same tail resource to both bottom SRVs; each
+  // distinct resource is transitioned once so aliased bottoms do not double-barrier.
+  HRESULT record(ID3D12GraphicsCommandList* private_list, D3D12_RESOURCE_STATES nose_before, D3D12_RESOURCE_STATES left_before,
+                 D3D12_RESOURCE_STATES right_before) noexcept {
+    if (!output_.get() || !inputs_[0].get() || !inputs_[1].get() || !inputs_[2].get() || !private_list ||
         private_list->GetType() != D3D12_COMMAND_LIST_TYPE_DIRECT || !same_device(private_list) ||
-        !valid_state(nose_before, input_descriptions_[0]) || !valid_state(tail_before, input_descriptions_[1]))
+        !valid_state(nose_before, input_descriptions_[0]) || !valid_state(left_before, input_descriptions_[1]) ||
+        !valid_state(right_before, input_descriptions_[2]))
       return fail(E_INVALIDARG, "A private direct list, bound inputs and supported exact mip-zero states are required.");
-    const std::array<D3D12_RESOURCE_STATES, 2> states{nose_before, tail_before};
-    for (std::size_t index = 0; index < inputs_.size(); ++index)
+    const bool shared_bottom = same_object(inputs_[1].get(), inputs_[2].get());
+    if (shared_bottom && left_before != right_before)
+      return fail(E_INVALIDARG, "Aliased bottom inputs must share the same before state.");
+    const std::array<D3D12_RESOURCE_STATES, 3> states{nose_before, left_before, right_before};
+    for (std::size_t index = 0; index < inputs_.size(); ++index) {
+      if (index == 2 && shared_bottom)
+        continue;
       transition(private_list, inputs_[index].get(), states[index], D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    }
     transition(private_list, output_.get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET);
 
     private_list->SetGraphicsRootSignature(root_signature_.get());
@@ -192,6 +227,8 @@ class CameraCompositorD3D12 {
     ID3D12DescriptorHeap* heaps[]{srv_heap_.get()};
     private_list->SetDescriptorHeaps(1, heaps);
     private_list->SetGraphicsRootDescriptorTable(0, srv_heap_->GetGPUDescriptorHandleForHeapStart());
+    UINT hdr = (formats_[0] == DXGI_FORMAT_R11G11B10_FLOAT ? 1u : 0u) | (formats_[1] == DXGI_FORMAT_R11G11B10_FLOAT ? 2u : 0u) |
+               (formats_[2] == DXGI_FORMAT_R11G11B10_FLOAT ? 4u : 0u);
     const struct {
       UINT hdr_mask;
       float exposure;
@@ -199,14 +236,14 @@ class CameraCompositorD3D12 {
       UINT ground_speed;
       UINT ground_speed_valid;
       profiles::Composition composition;
-    } display{(formats_[0] == DXGI_FORMAT_R11G11B10_FLOAT ? 1u : 0u) | (formats_[1] == DXGI_FORMAT_R11G11B10_FLOAT ? 2u : 0u),
+    } display{hdr,
               std::exp2(exposure_ev_),
               reference_guides_ ? 1u : 0u,
               ground_speed_,
-              ground_speed_valid_ ? 1u : 0u,
+              ground_speed_hidden_ ? 2u : (ground_speed_valid_ ? 1u : 0u),
               composition_};
-    static_assert(sizeof(display) == 30 * sizeof(UINT));
-    private_list->SetGraphicsRoot32BitConstants(1, 30, &display, 0);
+    static_assert(sizeof(display) == 32 * sizeof(UINT));
+    private_list->SetGraphicsRoot32BitConstants(1, 32, &display, 0);
     private_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     const D3D12_VIEWPORT viewport{0, 0, static_cast<float>(Width), static_cast<float>(Height), 0, 1};
     const D3D12_RECT scissor{0, 0, static_cast<LONG>(Width), static_cast<LONG>(Height)};
@@ -216,11 +253,18 @@ class CameraCompositorD3D12 {
     private_list->DrawInstanced(3, 1, 0, 0);
 
     transition(private_list, output_.get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
-    for (std::size_t index = 0; index < inputs_.size(); ++index)
+    for (std::size_t index = 0; index < inputs_.size(); ++index) {
+      if (index == 2 && shared_bottom)
+        continue;
       transition(private_list, inputs_[index].get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, states[index]);
+    }
     ++statistics_.recordings;
     error_[0] = '\0';
     return S_OK;
+  }
+
+  HRESULT record(ID3D12GraphicsCommandList* private_list, D3D12_RESOURCE_STATES nose_before, D3D12_RESOURCE_STATES tail_before) noexcept {
+    return record(private_list, nose_before, tail_before, tail_before);
   }
 
   // Call only after checked GPU completion, including downstream output copies.
@@ -399,7 +443,7 @@ class CameraCompositorD3D12 {
   HRESULT initialize_pipeline() noexcept {
     D3D12_DESCRIPTOR_RANGE range{};
     range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    range.NumDescriptors = 2;
+    range.NumDescriptors = 3;
     range.OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND;
     std::array<D3D12_ROOT_PARAMETER, 2> parameters{};
     parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
@@ -407,7 +451,7 @@ class CameraCompositorD3D12 {
     parameters[0].DescriptorTable.pDescriptorRanges = &range;
     parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    parameters[1].Constants.Num32BitValues = 30;
+    parameters[1].Constants.Num32BitValues = 32;
     parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
     D3D12_STATIC_SAMPLER_DESC sampler{};
     sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
@@ -467,7 +511,8 @@ class CameraCompositorD3D12 {
 
   static constexpr char Shader[] = R"(
 Texture2D<float4> Nose : register(t0);
-Texture2D<float4> Tail : register(t1);
+Texture2D<float4> TailLeft : register(t1);
+Texture2D<float4> TailRight : register(t2);
 SamplerState LinearClamp : register(s0);
 cbuffer Display : register(b0) { uint HdrMask; float Exposure; uint ReferenceGuides; uint GroundSpeed; uint GroundSpeedValid;
  float NoseHeight; float TailTop; float DividerTop; float DividerBottom;
@@ -476,7 +521,7 @@ cbuffer Display : register(b0) { uint HdrMask; float Exposure; uint ReferenceGui
  float GuideRed; float GuideGreen; float GuideBlue;
  float SpeedRed; float SpeedGreen; float SpeedBlue;
  float SpeedLeft; float SpeedTop; float SpeedPaddingX; float SpeedPaddingY; float SpeedMinimumWidth; float SpeedMinimumHeight;
- float SquareNoseMarkers; };
+ float SquareNoseMarkers; float SplitBottom; float BottomGap; };
 float segment_distance(float2 sample_position, float2 first, float2 last) {
   float2 delta = last - first;
   return length(sample_position - (first + saturate(dot(sample_position - first, delta) / dot(delta, delta)) * delta));
@@ -544,7 +589,8 @@ float glyph_coverage(float2 position, float2 origin, uint glyph) {
   return saturate(1.4 - distance);
 }
 uint ground_speed_digits() {
-  return GroundSpeedValid == 0 || GroundSpeed >= 10 ? 2 : 1;
+  // Mode 1 is a live reading. Unavailable (0) keeps the two-digit panel width.
+  return GroundSpeedValid == 1 && GroundSpeed < 10 ? 1 : 2;
 }
 float2 ground_speed_extent() {
   return float2(max(SpeedMinimumWidth, SpeedPaddingX * 2 + 64 + 16 * ground_speed_digits()), max(SpeedMinimumHeight, SpeedPaddingY * 2 + 20));
@@ -568,17 +614,28 @@ float4 ground_speed_pixel(float2 position) {
 // Screen-space references matched to the supplied ETACS photograph. These
 // marks do not claim metric clearance after mount, attitude or FOV changes.
 bool reference_guide(float2 position, bool nose) {
-  float2 local = float2(min(position.x, 768 - position.x), nose ? position.y : position.y - TailTop);
   if (nose) {
+    float2 local = float2(min(position.x, 768 - position.x), position.y);
     float2 delta = local - float2(NoseDotX * 768, NoseDotY * NoseHeight);
     // Profiles use 14px squares; retain 12px circle support for custom layouts.
     return SquareNoseMarkers != 0 ? all(abs(delta) < 7) : length(delta) <= 6;
   }
+  // Split panes mirror inside the pane. SplitBottom 0 keeps the 768-wide tail.
+  float span = 768;
+  float x = position.x;
+  if (SplitBottom != 0) {
+    float pane = (768 - BottomGap) * 0.5;
+    if (position.x >= pane && position.x < pane + BottomGap)
+      return false;
+    x = position.x < pane ? position.x : position.x - pane - BottomGap;
+    span = pane;
+  }
+  float2 local = float2(min(x, span - x), position.y - TailTop);
   // The reference bracket's bounding-box centre is near (0.335, 0.69);
   // its outside lower corner is farther out and below that centre.
-  float2 corner = float2(TailCornerX * 768, TailCornerY * (763 - TailTop));
-  float2 upper = float2(TailUpperX * 768, TailUpperY * (763 - TailTop));
-  float2 inner = float2(TailInnerX * 768, TailInnerY * (763 - TailTop));
+  float2 corner = float2(TailCornerX * span, TailCornerY * (763 - TailTop));
+  float2 upper = float2(TailUpperX * span, TailUpperY * (763 - TailTop));
+  float2 inner = float2(TailInnerX * span, TailInnerY * (763 - TailTop));
   return min(segment_distance(local, upper, corner), segment_distance(local, corner, inner)) <= 2;
 }
 float hdr_channel(float value) {
@@ -595,18 +652,102 @@ float4 vs_main(uint id : SV_VertexID) : SV_Position {
   float2 uv = float2((id << 1) & 2, id & 2);
   return float4(uv.x * 2 - 1, 1 - uv.y * 2, 0, 1);
 }
+// Signed distance to a rounded rect. y grows downward; radii are
+// top-right, bottom-right, bottom-left, top-left. Negative is inside.
+float sd_round_rect(float2 p, float2 bmin, float2 bmax, float4 radii) {
+  float2 center = 0.5 * (bmin + bmax);
+  float2 half_size = 0.5 * (bmax - bmin);
+  float2 q = p - center;
+  float r = q.x > 0 ? (q.y > 0 ? radii.y : radii.x) : (q.y > 0 ? radii.z : radii.w);
+  float2 d = abs(q) - half_size + r;
+  return length(max(d, 0.0)) + min(max(d.x, d.y), 0.0) - r;
+}
+float4 split_bottom_t() {
+  // Display-referred codes (same space as hdr_channel's final sRGB encode). The
+  // stamp writes these floats into the display's typed RTV; an sRGB RTV encodes
+  // them the same way aircraft UI does. Do not invent a brighter hex here.
+  return float4(28.0 / 255.0, 27.0 / 255.0, 34.0 / 255.0, 1);
+}
 float4 ps_main(float4 position : SV_Position) : SV_Target {
-  float2 speed_position = position.xy - float2(SpeedLeft, SpeedTop);
-  if (all(speed_position >= 0) && all(speed_position < ground_speed_extent())) return ground_speed_pixel(speed_position);
-  if (position.y >= DividerTop && position.y < DividerBottom) return float4(0, 0, 0, 1);
+  // Mode 2 hides the overlay entirely (no glyphs, no black panel). Modes 0/1
+  // keep the existing GS panel so font fixtures stay unchanged.
+  if (GroundSpeedValid != 2) {
+    float2 speed_position = position.xy - float2(SpeedLeft, SpeedTop);
+    if (all(speed_position >= 0) && all(speed_position < ground_speed_extent())) return ground_speed_pixel(speed_position);
+  }
+  if (position.y >= DividerTop && position.y < DividerBottom) {
+    if (SplitBottom != 0) {
+      // Horizontal T bar: same 10 px black as the other edges, only at the
+      // left and right ends — not a black strip along the whole bar.
+      const float edge = 10;
+      if (position.x < edge || position.x >= 768.0 - edge) return float4(0, 0, 0, 1);
+      return split_bottom_t();
+    }
+    return float4(0, 0, 0, 1);
+  }
+  if (SplitBottom != 0 && position.y >= TailTop) {
+    float pane = (768 - BottomGap) * 0.5;
+    // Square pane height matches half-width; leftover rows under the squares stay black.
+    float pane_h = pane;
+    if (position.y >= TailTop + pane_h) return float4(0, 0, 0, 1);
+    if (position.x >= pane && position.x < pane + BottomGap) return split_bottom_t();
+    // Black frame on top + sides only (no bottom border). One 24 px round:
+    // left pane top-right, right pane top-left. Other three corners stay square.
+    const float pane_border = 10;
+    const float radius = 24;
+    const float inner_radius = max(radius - pane_border, 0);
+    const bool left_pane = position.x < pane;
+    float local_x = left_pane ? position.x : position.x - pane - BottomGap;
+    float local_y = position.y - TailTop;
+    float2 local = float2(local_x, local_y);
+    float2 outer_min = float2(0, 0);
+    float2 outer_max = float2(pane, pane_h);
+    // No bottom inset: picture meets the lower edge of the square.
+    float2 inner_min = float2(pane_border, pane_border);
+    float2 inner_max = float2(pane - pane_border, pane_h);
+    // radii: TR, BR, BL, TL
+    float4 radii = left_pane ? float4(radius, 0, 0, 0) : float4(0, 0, 0, radius);
+    float4 inner_radii = left_pane ? float4(inner_radius, 0, 0, 0) : float4(0, 0, 0, inner_radius);
+    float d_outer = sd_round_rect(local, outer_min, outer_max, radii);
+    if (d_outer > 0) {
+      // Only the T-junction round can sit outside the outer shape → T grey.
+      return split_bottom_t();
+    }
+    if (sd_round_rect(local, inner_min, inner_max, inner_radii) > 0) return float4(0, 0, 0, 1);
+  }
   if (ReferenceGuides != 0 && reference_guide(position.xy, position.y < NoseHeight)) return float4(GuideRed, GuideGreen, GuideBlue, 1);
   if (position.y < NoseHeight) {
-    float2 uv = float2(position.x / 768, position.y / NoseHeight);
+    // Split-bottom nose frame: bottom edge always; left/right only when GS is
+    // hidden so the font fixture's padded-panel surroundings stay camera pixels.
+    const float nose_border = 10;
+    const bool side_borders = SplitBottom != 0 && GroundSpeedValid == 2;
+    if (SplitBottom != 0 && position.y >= NoseHeight - nose_border) return float4(0, 0, 0, 1);
+    if (side_borders && (position.x < nose_border || position.x >= 768.0 - nose_border))
+      return float4(0, 0, 0, 1);
+    float left = side_borders ? nose_border : 0;
+    float right = side_borders ? 768.0 - nose_border : 768.0;
+    float nose_h = SplitBottom != 0 ? max(NoseHeight - nose_border, 1) : NoseHeight;
+    float2 uv = float2((position.x - left) / max(right - left, 1), position.y / nose_h);
     return float4(display_rgb(Nose.SampleLevel(LinearClamp, uv, 0).rgb, 0), 1);
   }
   if (position.y < TailTop) return float4(0, 0, 0, 1);
+  if (SplitBottom != 0) {
+    float pane = (768 - BottomGap) * 0.5;
+    const float pane_border = 10;
+    float pane_h = pane;
+    if (position.y >= TailTop + pane_h) return float4(0, 0, 0, 1);
+    float local_x = position.x < pane ? position.x : position.x - pane - BottomGap;
+    float local_y = position.y - TailTop;
+    float2 content_min = float2(pane_border, pane_border);
+    float2 content_max = float2(pane - pane_border, pane_h);
+    float2 uv = float2((local_x - content_min.x) / (content_max.x - content_min.x),
+                       (local_y - content_min.y) / (content_max.y - content_min.y));
+    if (position.x < pane)
+      return float4(display_rgb(TailLeft.SampleLevel(LinearClamp, uv, 0).rgb, 1), 1);
+    return float4(display_rgb(TailRight.SampleLevel(LinearClamp, uv, 0).rgb, 2), 1);
+  }
   float2 uv = float2(position.x / 768, (position.y - TailTop) / (763 - TailTop));
-  return float4(display_rgb(Tail.SampleLevel(LinearClamp, uv, 0).rgb, 1), 1);
+  return float4(display_rgb(TailLeft.SampleLevel(LinearClamp, uv, 0).rgb, 1), 1);
 }
 )";
 
@@ -616,9 +757,9 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
   Reference<ID3D12DescriptorHeap> srv_heap_;
   Reference<ID3D12DescriptorHeap> rtv_heap_;
   Reference<ID3D12Resource> output_;
-  std::array<Reference<ID3D12Resource>, 2> inputs_;
-  std::array<DXGI_FORMAT, 2> formats_{};
-  std::array<D3D12_RESOURCE_DESC, 2> input_descriptions_{};
+  std::array<Reference<ID3D12Resource>, 3> inputs_;
+  std::array<DXGI_FORMAT, 3> formats_{};
+  std::array<D3D12_RESOURCE_DESC, 3> input_descriptions_{};
   D3D12_CPU_DESCRIPTOR_HANDLE rtv_{};
   Statistics statistics_;
   float exposure_ev_ = DefaultExposureEv;
@@ -626,6 +767,7 @@ float4 ps_main(float4 position : SV_Position) : SV_Target {
   profiles::Composition composition_{};
   UINT ground_speed_ = 0;
   bool ground_speed_valid_ = false;
+  bool ground_speed_hidden_ = false;
   std::array<char, 1024> error_{};
 };
 

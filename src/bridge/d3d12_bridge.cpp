@@ -408,13 +408,25 @@ DXGI_FORMAT output_format(const View& view) noexcept {
     return DXGI_FORMAT_UNKNOWN;
   if (!view.recovered)
     return std::find(TypedFormats.begin(), TypedFormats.end(), view.format) != TypedFormats.end() ? view.format : DXGI_FORMAT_UNKNOWN;
-  // This is the bridge's explicit output encoding. It is never entered in the
-  // application's typed-RTV evidence, and never used with its opaque descriptor.
+  // Recovered binds identify the resource, not the application's opaque RTV
+  // format. Prefer the single observed typed RTV encoding on typeless displays
+  // so display-referred compositor codes get the same HW sRGB encode as
+  // aircraft UI. With no typed evidence, keep UNORM (cannot invent sRGB).
   const auto format = view.resource->desc.Format;
+  const auto from_typed_refs = [&](unsigned first, unsigned last, DXGI_FORMAT fallback) noexcept {
+    unsigned count = 0;
+    DXGI_FORMAT found = fallback;
+    for (unsigned i = first; i <= last; ++i)
+      if (view.resource->typed_rtv_refs[i]) {
+        found = TypedFormats[i];
+        ++count;
+      }
+    return count == 1 ? found : count == 0 ? fallback : DXGI_FORMAT_UNKNOWN;
+  };
   if (format == DXGI_FORMAT_R8G8B8A8_TYPELESS)
-    return DXGI_FORMAT_R8G8B8A8_UNORM;
+    return from_typed_refs(0, 1, DXGI_FORMAT_R8G8B8A8_UNORM);
   if (format == DXGI_FORMAT_B8G8R8A8_TYPELESS)
-    return DXGI_FORMAT_B8G8R8A8_UNORM;
+    return from_typed_refs(2, 3, DXGI_FORMAT_B8G8R8A8_UNORM);
   return std::find(TypedFormats.begin(), TypedFormats.end(), format) != TypedFormats.end() ? format : DXGI_FORMAT_UNKNOWN;
 }
 void account_view(const View& view, bool add) noexcept {
@@ -657,6 +669,8 @@ bool backfill_resources_ready(const Registry& r) noexcept {
     return display_set_ready(r, 8, DXGI_FORMAT_R8G8B8A8_TYPELESS, 1);
   if (r.profile->id == profiles::A380.id)
     return display_set_ready(r, 2, static_cast<DXGI_FORMAT>(r.profile->formats[0]), r.profile->mips);
+  if (r.profile->pfd_detection == profiles::PfdDetectionPolicy::single_display)
+    return live_display_resources(r) >= 1;
   return false;
 }
 unsigned live_display_rtvs(const Registry& r) noexcept {
@@ -1502,10 +1516,13 @@ UINT selected_legacy_targets(void*, ID3D12GraphicsCommandList* native, std::uint
   UINT count = 0;
   for (unsigned side = 0; side < 2; ++side) {
     const auto& item = r.selected_resources[side];
-    if (((r.active_mask | r.calibration_mask) & (1u << side)) && item && item->alive &&
-        profiles::matches_display(*r.profile, static_cast<UINT>(item->desc.Width), item->desc.Height, item->desc.MipLevels,
-                                  static_cast<UINT>(item->desc.Format)))
-      targets[count++] = item->native;
+    if (!(((r.active_mask | r.calibration_mask) & (1u << side)) && item && item->alive &&
+          profiles::matches_display(*r.profile, static_cast<UINT>(item->desc.Width), item->desc.Height, item->desc.MipLevels,
+                                    static_cast<UINT>(item->desc.Format))))
+      continue;
+    if (count && targets[0] == item->native)
+      continue;  // Both navigation displays are regions of one texture.
+    targets[count++] = item->native;
   }
   return count;
 }
@@ -1522,16 +1539,21 @@ void copy_pending_pfd(ID3D12GraphicsCommandList* native,
     return;
   auto& r = registry();
   View pending;
-  for (auto& view : list->pending_pfds)
-    if (view.resource && view.resource->native == target) {
-      pending = view;
-      list->pending_rt[static_cast<unsigned>(&view - list->pending_pfds.data())] = false;
-      view = {};
-      break;
+  for (unsigned side = 0; side < list->pending_pfds.size(); ++side)
+    if (list->pending_pfds[side].resource && list->pending_pfds[side].resource->native == target) {
+      if (!pending.resource)
+        pending = list->pending_pfds[side];
+      list->pending_rt[side] = false;
+      list->pending_pfds[side] = {};
     }
   View view;
   bool selected = false;
-  profiles::DisplayRect area{}, content{};
+  struct PlacedRect {
+    profiles::DisplayRect area{};
+    profiles::DisplayRect content{};
+  };
+  std::array<PlacedRect, 2> placed{};
+  unsigned placed_count = 0;
   {
     const RegistryLock lock(r, wait_budget::close_us, ContentionSite::registry_close);
     if (!lock) {
@@ -1540,16 +1562,18 @@ void copy_pending_pfd(ID3D12GraphicsCommandList* native,
     }
     refresh_selected(r);
     std::shared_ptr<Resource> item;
-    unsigned side = 0;
     for (unsigned i = 0; i < 2; ++i)
       if (((r.active_mask | r.calibration_mask) & (1u << i)) && r.selected_resources[i] && r.selected_resources[i]->alive &&
           r.selected_resources[i]->native == target) {
-        item = r.selected_resources[i];
-        side = i;
-        break;
+        if (!item)
+          item = r.selected_resources[i];
+        if (r.selected_resources[i] != item)
+          continue;
+        placed[placed_count++] = {profiles::display_rect(*r.profile, i), profiles::display_content_rect(*r.profile, i)};
       }
-    if (!item || !profiles::matches_display(*r.profile, static_cast<UINT>(item->desc.Width), item->desc.Height, item->desc.MipLevels,
-                                            static_cast<UINT>(item->desc.Format)))
+    if (!item || !placed_count ||
+        !profiles::matches_display(*r.profile, static_cast<UINT>(item->desc.Width), item->desc.Height, item->desc.MipLevels,
+                                   static_cast<UINT>(item->desc.Format)))
       return;
     ++r.selected_rt_callbacks;
     const auto current = r.rtvs.find(pending.rtv);
@@ -1584,24 +1608,27 @@ void copy_pending_pfd(ID3D12GraphicsCommandList* native,
       }
     }
     ++r.selected_view_resolved;
-    area = profiles::display_rect(*r.profile, side);
-    content = profiles::display_content_rect(*r.profile, side);
     selected = r.routes.matches(item->id, r.active_mask);
   }
   // Calibration is delivered only from the retained descriptor snapshot in stage_pfd.
-  if (!selected)
+  if (!selected || !view.resource)
     return;
   const boundary::ScopedBypass bypass;
-  const D3D12_RECT destination{static_cast<LONG>(area.left), static_cast<LONG>(area.top), static_cast<LONG>(area.right),
-                               static_cast<LONG>(area.bottom)};
-  const D3D12_RECT inner{static_cast<LONG>(content.left), static_cast<LONG>(content.top), static_cast<LONG>(content.right),
-                         static_cast<LONG>(content.bottom)};
-  ++r.copy_attempts;
-  if (!runtime::copy_patch(native, r.key, view.resource->native, view.resource->desc, output_format(view), destination, inner, enhanced)) {
-    ++r.copy_rejected;
-    r.copy_error = "runtime_copy_rejected";
-  } else
-    r.copy_error = "copied";
+  for (unsigned i = 0; i < placed_count; ++i) {
+    const auto& area = placed[i].area;
+    const auto& content = placed[i].content;
+    const D3D12_RECT destination{static_cast<LONG>(area.left), static_cast<LONG>(area.top), static_cast<LONG>(area.right),
+                                 static_cast<LONG>(area.bottom)};
+    const D3D12_RECT inner{static_cast<LONG>(content.left), static_cast<LONG>(content.top), static_cast<LONG>(content.right),
+                           static_cast<LONG>(content.bottom)};
+    ++r.copy_attempts;
+    if (!runtime::copy_patch(native, r.key, view.resource->native, view.resource->desc, output_format(view), destination, inner,
+                             enhanced)) {
+      ++r.copy_rejected;
+      r.copy_error = "runtime_copy_rejected";
+    } else
+      r.copy_error = "copied";
+  }
 }
 void pass_targets(void*,
                   ID3D12GraphicsCommandList*,
@@ -3329,18 +3356,23 @@ void discover_pfds(std::uint64_t now) noexcept {
         ++i;
     }
     const bool ranked_group = r.profile->pfd_detection == profiles::PfdDetectionPolicy::ini_a380_allocation_group;
-    if (now && (ranked_group || !r.routes.targets[0] || !r.routes.targets[1])) {
+    const bool single_display = r.profile->pfd_detection == profiles::PfdDetectionPolicy::single_display;
+    const bool missing = single_display ? !r.routes.targets[0] : (!r.routes.targets[0] || !r.routes.targets[1]);
+    if (now && (ranked_group || missing)) {
       // Take the full inventory after retirement cleanup, under the same
       // registry lock used for detector configuration and target assignment.
       // The detector sorts by incarnation itself. Avoid the unrelated UI
       // draw-count sort while holding the registry lock.
       auto inventory = pfd_inventory_locked(r);
       const auto& detection = r.detector.observe(inventory.data(), inventory.size(), now, r.pfd_inventory_complete.load());
-      if (detection.valid)
-        r.routes.adopt_detected(detection.targets);
-      else if (ranked_group && detection.invalidates_targets)
+      if (detection.valid) {
+        if (single_display)
+          r.routes.adopt_single(detection.targets[0]);
+        else
+          r.routes.adopt_detected(detection.targets);
+      } else if (ranked_group && detection.invalidates_targets)
         r.routes.forget_detected();
-      if (!ranked_group && !r.routes.targets[0] && !r.routes.targets[1]) {
+      if (!ranked_group && !single_display && !r.routes.targets[0] && !r.routes.targets[1]) {
         if (const auto pair = dominant_activity_pair(*r.profile, inventory); pair[0])
           r.routes.adopt_detected(pair);
       } else if (ranked_group && (!r.routes.targets[0] || !r.routes.targets[1])) {

@@ -158,7 +158,7 @@ void success_and_requests() {
           "Request publication performed engine work");
   require(controller.process_update(manager, engine.callbacks()), "Update unexpectedly refused");
   auto snapshot = controller.snapshot();
-  require(snapshot.state == State::active && snapshot.owner == manager && snapshot.owned_ids == std::array<EntryId, 2>{100, 101} &&
+  require(snapshot.state == State::active && snapshot.owner == manager && snapshot.owned_ids == std::array<EntryId, 3>{100, 101, 0} &&
               !snapshot.request_pending && !snapshot.creation_pending && engine.created_keys == std::vector<PoseKey>{keys()[0], keys()[1]},
           "Successful pair did not preserve order, keys or ownership");
   for (unsigned i = 0; i < 50; ++i)
@@ -185,7 +185,7 @@ void success_and_requests() {
   require(engine.created_keys[2] == keys(7)[0] && engine.created_keys[3] == keys(7)[1], "Mailbox did not retain latest opaque keys");
   controller.request_enable(keys(9));
   controller.process_update(manager, engine.callbacks());
-  require(engine.erased == std::vector<EntryId>{101, 100, 103, 102} && controller.snapshot().owned_ids == std::array<EntryId, 2>{104, 105},
+  require(engine.erased == std::vector<EntryId>{101, 100, 103, 102} && controller.snapshot().owned_ids == std::array<EntryId, 3>{104, 105, 0},
           "Replacing an active pair failed to clean up old ownership first");
 }
 
@@ -210,7 +210,7 @@ void failures() {
     controller.request_enable(keys());
     controller.process_update(manager, engine.callbacks());
     const auto snapshot = controller.snapshot();
-    require(snapshot.state == State::failed && snapshot.failure == expected && snapshot.owned_ids == std::array<EntryId, 2>{} &&
+    require(snapshot.state == State::failed && snapshot.failure == expected && snapshot.owned_ids == std::array<EntryId, 3>{} &&
                 engine.live.empty() && !snapshot.creation_pending,
             "Failed pair retained successful state or leaked confirmed owned IDs");
     require(engine.erased.size() <= 1 && (engine.erased.empty() || engine.erased[0] == 100),
@@ -302,7 +302,7 @@ void context_and_lifetime() {
   controller.request_enable(keys(3));
   require(controller.acknowledge_manager_destroyed(manager), "Exact destroyed manager was not acknowledged");
   require(controller.snapshot().state == State::failed && controller.snapshot().failure == Failure::manager_destroyed &&
-              controller.snapshot().owned_ids == std::array<EntryId, 2>{} && !controller.snapshot().request_pending &&
+              controller.snapshot().owned_ids == std::array<EntryId, 3>{} && !controller.snapshot().request_pending &&
               engine.erased.empty(),
           "Destruction event called erase or kept queued automatic recreation");
   engine.live.clear();  // The simulated engine owner destroyed this manager.

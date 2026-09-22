@@ -274,6 +274,7 @@ std::string settings_json(const ipc::Settings& s) {
   array_json(out, s.mounts[0]);
   out << ',';
   array_json(out, s.mounts[1]);
+  array_json(out, s.mounts[2]);
   out << "]}";
   return out.str();
 }

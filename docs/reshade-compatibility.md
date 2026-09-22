@@ -2,7 +2,7 @@
 
 Issue [#21](https://github.com/rthoms334/taxi-cam/issues/21) exposed a graphics delivery failure with ReShade 6.8: capture/composition could succeed while every terminal PFD write was refused. ReShade's command-list `Close` is a proxy endpoint and can run add-on callbacks before forwarding. Treating it as the native recording boundary would permit later draws to overwrite the camera or consume its final bindings. ReShade compatibility remains experimental; device unwrapping does not establish compatibility with every preset, add-on or injector combination.
 
-The bridge resolves the bootstrap device through ReShade's optional reference-counted `IID_UnwrappedObject` extension before installing its existing device, command-list and queue hooks. The native layer receives descriptors and submitted lists after ReShade translates them, and its `Close` follows ReShade's callbacks. The native executable-image endpoint guard remains unchanged. The identifier comes from [ReShade 6.8's COM declarations](https://github.com/crosire/reshade/blob/v6.8.0/source/com_utils.hpp); no ReShade SDK or private object layout is required.
+The bridge resolves the bootstrap device through ReShade's optional reference-counted `IID_UnwrappedObject` COM extension before installing its existing device, command-list and queue hooks. Unwrapping is COM-only: Taxi Cam queries that GUID, retains canonical COM identities while traversing up to four proxy layers, and never walks private ReShade object layouts or links a ReShade SDK. The native layer receives descriptors and submitted lists after ReShade translates them, and its `Close` follows ReShade's callbacks. The native executable-image endpoint guard remains unchanged. The identifier comes from [ReShade 6.8's COM declarations](https://github.com/crosire/reshade/blob/v6.8.0/source/com_utils.hpp).
 
 Resolution is bounded to four proxy layers, retains canonical COM identities while traversing, and rejects cycles, malformed results and unexpected errors. Only `E_NOINTERFACE` terminates an absent extension. The endpoint must still expose the public device interface and meet the existing Device10 requirement. Device ownership checks also resolve the device returned by `GetDevice`, because ReShade can return its proxy even from a native resource.
 
@@ -46,6 +46,14 @@ When all matching display draw counts are zero, verified submitted RT completion
 The bridge does not bootstrap a D3D11On12 device or install native D3D11 draw detours. Native D3D12 vtable updates use atomic pointer replacement without process-wide thread suspension. Connect remains available in a loaded flight.
 
 Pure D3D12 pre-existing descriptors still require creation evidence or an unambiguous same-recording association; cross-list timing cannot authorize a guessed descriptor map. Overview says **waiting for cockpit displays** only while the PFD list is empty. A nonzero capture/composition count cannot establish successful PFD routing or presentation. See [PFD-copy diagnostics](runtime-reference.md#pfd-copy-diagnostics) for the separate delivery counters.
+
+## Presentation stall with ReShade's immediate list
+
+ReShade 6.8 stays enabled. Its injected `dxgi.dll` flushes an immediate command list on the native queue from inside proxy `ExecuteCommandLists`, then CPU-waits until ReShade's own fence is signaled. That fence is queued after Taxi Cam's `queue->Wait` on the bridge timeline. A presentation-watchdog trip (`presentation_and_sim_frame_stalled`) used to close the submission gate and release bridge resources while that GPU wait stayed queued, so the flush never returned and the simulator stayed frozen. `gated` stayed 0 because the stuck thread never reached another submit.
+
+Closing the gate now CPU-signals the timeline value already passed to that `Wait`, on the watchdog thread, without taking a bridge mutex (`released_waits` counts each Signal that runs). That is the submission-gate wait release: the ReShade flush can finish once the GPU passes the timeline point. A repeated close, or a close after the value has already completed, does not signal again. Opening the gate does not signal. Read-only depth and stencil render-pass flags (`D3D12_RENDER_PASS_FLAG_BIND_READ_ONLY_DEPTH`, `D3D12_RENDER_PASS_FLAG_BIND_READ_ONLY_STENCIL`) no longer mark the recording invalid. A second `EndRenderPass` of an ordinary pass that already closed is forwarded and is not `PassState`. Command-list pass identity follows `IID_UnwrappedObject`, so the proxy and the native list share one pass. `PRESERVE_LOCAL` access still invalidates the recording.
+
+These checks do not establish live MSFS behaviour. Shader output and PFD pixels with ReShade 6.8.0 still need a simulator session.
 
 ## Validation
 

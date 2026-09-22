@@ -72,10 +72,22 @@ bool SceneFrameOutput::set_composition(const profiles::Composition& layout) noex
   compositor_->set_composition(layout);
   return true;
 }
+bool SceneFrameOutput::set_reference_guides(bool enabled) noexcept {
+  if (!compositor_ || failed_)
+    return false;
+  compositor_->set_reference_guides(enabled);
+  return true;
+}
 bool SceneFrameOutput::set_ground_speed(float knots, bool valid) noexcept {
   if (!compositor_ || prepared_ || failed_)
     return false;
   compositor_->set_ground_speed(knots, valid);
+  return true;
+}
+bool SceneFrameOutput::hide_ground_speed() noexcept {
+  if (!compositor_ || prepared_ || failed_)
+    return false;
+  compositor_->hide_ground_speed();
   return true;
 }
 float SceneFrameOutput::display_exposure() const noexcept {
@@ -218,12 +230,13 @@ std::uint64_t SceneFrameOutput::completed_submissions() const noexcept {
   return completed <= submitted_ ? completed : 0;  // Device removal returns UINT64_MAX.
 }
 
-bool SceneFrameOutput::prepare(ID3D12Resource* nose, DXGI_FORMAT nose_format, ID3D12Resource* tail, DXGI_FORMAT tail_format) noexcept {
+bool SceneFrameOutput::prepare(ID3D12Resource* nose, DXGI_FORMAT nose_format, ID3D12Resource* left, DXGI_FORMAT left_format,
+                               ID3D12Resource* right, DXGI_FORMAT right_format) noexcept {
   if (calibration_only_ || !idle() || prepared_)
     return false;
   if (FAILED(device_->GetDeviceRemovedReason()))
     return fail("The PFD composition device was removed.");
-  if (FAILED(compositor_->set_inputs(nose, nose_format, tail, tail_format))) {
+  if (FAILED(compositor_->set_inputs(nose, nose_format, left, left_format, right, right_format))) {
     error_ = compositor_->last_error();
     return false;
   }
@@ -233,8 +246,9 @@ bool SceneFrameOutput::prepare(ID3D12Resource* nose, DXGI_FORMAT nose_format, ID
   const bool timed = gpu_timing_enabled_ && gpu_timing_.begin(device_, queue_, list_);
   if (timed)
     gpu_timing_.start(0);
-  if (FAILED(compositor_->record(list_, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_DEST)))
-    return fail("Recording the two-camera composition failed.");
+  if (FAILED(compositor_->record(list_, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COPY_DEST,
+                                 D3D12_RESOURCE_STATE_COPY_DEST)))
+    return fail("Recording the camera composition failed.");
   if (timed) {
     gpu_timing_.end(0);
     gpu_timing_.start(1);

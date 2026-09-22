@@ -45,11 +45,11 @@ function Invoke-Setup([string]$Executable,[string]$App,[string]$Log,[switch]$Pat
 }
 function Assert-That([bool]$Condition,[string]$Message) { if (-not $Condition) { throw $Message } }
 $knownSettings = @('Taxi Cam/settings.ini','Taxi Cam/hotkeys.ini','Taxi Cam/startup-state')
-foreach ($key in @('fbw-a380x','ini-a350-900','ini-a350-1000','ini-a380')) {
+foreach ($key in @('fbw-a380x','ini-a350-900','ini-a350-1000','ini-a380','pmdg-777','pmdg-777-300er','pmdg-777f')) {
     foreach ($folder in @('Taxi Cam','380 Taxi Cam')) { $knownSettings += "$folder/profiles/$key.ini" }
 }
 $rateSettings = @('Taxi Cam/settings.ini')
-foreach ($key in @('fbw-a380x','ini-a350-900','ini-a350-1000','ini-a380')) {
+foreach ($key in @('fbw-a380x','ini-a350-900','ini-a350-1000','ini-a380','pmdg-777','pmdg-777-300er','pmdg-777f')) {
     foreach ($folder in @('Taxi Cam','380 Taxi Cam')) { $rateSettings += "$folder/profiles/$key.ini" }
 }
 $unrelatedSettings = @('Taxi Cam/logs/history.log','Taxi Cam/profiles/custom-aircraft.ini','Taxi Cam/readme.txt','380 Taxi Cam/profiles/custom-aircraft.ini')
@@ -75,6 +75,11 @@ function Assert-Settings($Hashes,[switch]$Removed,[switch]$RateForced) {
             Assert-That (-not (Test-Path -LiteralPath $path)) "Opt-in settings removal retained $relative."
         } elseif ($RateForced -and $relative -in $rateSettings) {
             Assert-That ((Test-Path -LiteralPath $path -PathType Leaf) -and (Get-TaxiIniKey $path 'display' 'camera_rate') -eq '10') "Keep-install did not force camera_rate=10: $relative."
+            Assert-That ((Get-TaxiIniKey $path 'display' 'exposure') -eq '-8') "Keep-install did not force exposure=-8: $relative."
+            if ($relative -eq 'Taxi Cam/settings.ini') {
+                Assert-That ((Get-TaxiIniKey $path 'display' 'camera_rate_revision') -eq '2') "Keep-install omitted camera_rate_revision on settings.ini."
+                Assert-That ((Get-TaxiIniKey $path 'display' 'exposure_revision') -eq '1') "Keep-install omitted exposure_revision on settings.ini."
+            }
             Assert-That ([IO.File]::ReadAllText($path).Contains("settings fixture: $relative")) "Keep-install rate force dropped prior settings text: $relative."
         } else {
             Assert-That ((Test-Path -LiteralPath $path -PathType Leaf) -and (Get-FileHash -LiteralPath $path).Hash -eq $Hashes[$relative]) "Saved or unrelated settings changed: $relative."

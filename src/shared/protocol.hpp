@@ -12,7 +12,7 @@
 #include "version.hpp"
 
 namespace taxi_camera::standalone {
-constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 12;
+constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 13;
 constexpr const wchar_t* Version = TAXI_CAM_VERSION_WIDE;
 struct Settings {
   std::uint32_t enabled = 1, camera_rate = kDefaultCameraRate, automatic_exposure = 1;
@@ -37,7 +37,7 @@ struct Settings {
   std::array<float, 2> tail_inner = profiles::A380.composition.tail_inner;
   std::uint32_t profile = 1, follow_taxi = 1, auto_detect = 1, single_camera = 0, manual_mask = 0, calibration_mask = 0,
                 calibration_budget = 4096, scene_test = 0;
-  std::array<std::array<double, 6>, 2> mounts = profiles::A380.mounts;
+  std::array<std::array<double, 6>, 3> mounts = profiles::A380.mounts;
   // Protocol 11: schedule rate while ground speed stays at zero; 0 disables the floor.
   std::uint32_t parked_rate = kDefaultParkedCameraRate;
 };
@@ -71,6 +71,7 @@ struct Status {
   std::uint32_t effective_rate{}, useful_rate{}, rate_limits{}, parked{};
   // Protocol 12: events admitted by the bridge's notification limiter, one
   // self-describing slot each (serial, GetTickCount64 posted_ms, SimEvent).
+  // Protocol 13: Settings.mounts grew to three feeds for split-bottom profiles.
   NotificationLog notifications{};
 };
 struct Shared {

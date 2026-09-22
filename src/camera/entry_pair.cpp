@@ -15,6 +15,22 @@ bool zero_dword(const DescriptorStorage& descriptor, std::size_t offset) noexcep
                      [](std::uint8_t value) { return value == 0; });
 }
 
+unsigned clamp_feeds(unsigned feeds) noexcept {
+  if (feeds < 1)
+    return 1;
+  if (feeds > kMaxOwnedViews)
+    return kMaxOwnedViews;
+  return feeds;
+}
+
+Failure create_failure_for(unsigned index) noexcept {
+  if (index == 0)
+    return Failure::first_create_failed;
+  if (index == 1)
+    return Failure::second_create_failed;
+  return Failure::third_create_failed;
+}
+
 }  // namespace
 
 bool pack_mode_zero(DescriptorStorage& descriptor, const PoseKey& key) noexcept {
@@ -35,12 +51,12 @@ bool pack_independent_pose(DescriptorStorage& descriptor) noexcept {
 
 void PairController::request_enable(const PairKeys& keys) noexcept {
   const std::lock_guard lock(mailbox_mutex_);
-  mailbox_ = {Command::enable, keys};
+  mailbox_ = {Command::enable, keys, false, 2};
 }
 
-void PairController::request_independent_pose() noexcept {
+void PairController::request_independent_pose(unsigned feeds) noexcept {
   const std::lock_guard lock(mailbox_mutex_);
-  mailbox_ = {Command::enable, {}, true};
+  mailbox_ = {Command::enable, {}, true, clamp_feeds(feeds)};
 }
 
 void PairController::request_disable() noexcept {
@@ -72,7 +88,22 @@ EmptyPairCancel PairController::cancel_uncreated_request() noexcept {
 }
 
 bool PairController::has_owned_ids() const noexcept {
-  return ids_[0] != 0 || ids_[1] != 0;
+  for (auto id : ids_)
+    if (id != 0)
+      return true;
+  return false;
+}
+
+bool PairController::complete_owned_set() const noexcept {
+  if (owned_feeds_ < 1 || owned_feeds_ > kMaxOwnedViews)
+    return false;
+  for (unsigned i = 0; i < owned_feeds_; ++i)
+    if (ids_[i] == 0)
+      return false;
+  for (unsigned i = owned_feeds_; i < kMaxOwnedViews; ++i)
+    if (ids_[i] != 0)
+      return false;
+  return true;
 }
 
 void PairController::publish(State state, Blocked blocked) noexcept {
@@ -89,8 +120,10 @@ void PairController::cleanup(const EngineCallbacks& engine) noexcept {
     if (id != 0 && engine.erase(engine.context, owner_, id))
       id = 0;
   }
-  if (!has_owned_ids())
+  if (!has_owned_ids()) {
     owner_ = {};
+    owned_feeds_ = 0;
+  }
 }
 
 bool PairController::prepare(const EngineCallbacks& engine, DescriptorStorage& descriptor, const PoseKey& key) noexcept {
@@ -125,12 +158,13 @@ bool PairController::process_update(ManagerToken manager, const EngineCallbacks&
   if (request.command == Command::enable) {
     desired_keys_ = request.keys;
     desired_independent_pose_ = request.independent_pose;
+    desired_feeds_ = clamp_feeds(request.feeds);
     desired_enabled_ = true;
     creation_pending_ = true;
     failure_ = Failure::none;
-    if (active_pair_ && ids_[0] != 0 && ids_[1] != 0 && owned_keys_ == desired_keys_ &&
+    if (active_pair_ && complete_owned_set() && owned_feeds_ == desired_feeds_ && owned_keys_ == desired_keys_ &&
         owned_independent_pose_ == desired_independent_pose_)
-      creation_pending_ = false;  // Re-enabling the active pair is idempotent.
+      creation_pending_ = false;  // Re-enabling the active set is idempotent.
   } else if (request.command == Command::disable) {
     desired_enabled_ = false;
     creation_pending_ = false;
@@ -154,7 +188,7 @@ bool PairController::process_update(ManagerToken manager, const EngineCallbacks&
     return true;
   }
   if (has_owned_ids()) {
-    if (desired_enabled_ && active_pair_ && !creation_pending_ && failure_ == Failure::none && ids_[0] != 0 && ids_[1] != 0) {
+    if (desired_enabled_ && active_pair_ && !creation_pending_ && failure_ == Failure::none && complete_owned_set()) {
       publish(State::active);
       return true;
     }
@@ -170,32 +204,32 @@ bool PairController::process_update(ManagerToken manager, const EngineCallbacks&
   }
 
   creation_pending_ = false;  // Consume once, before any callback can reenter.
-  DescriptorStorage first{};
-  if (!prepare(engine, first, desired_keys_[0])) {
-    creation_failed(engine, failure_);
-    return true;
+  ids_ = {};
+  owned_feeds_ = 0;
+  for (unsigned index = 0; index < desired_feeds_; ++index) {
+    DescriptorStorage descriptor{};
+    if (!prepare(engine, descriptor, desired_keys_[index])) {
+      creation_failed(engine, failure_);
+      return true;
+    }
+    const auto id = engine.create(engine.context, manager, descriptor);
+    if (id == 0) {
+      creation_failed(engine, create_failure_for(index));
+      return true;
+    }
+    for (unsigned previous = 0; previous < index; ++previous) {
+      if (ids_[previous] == id) {
+        creation_failed(engine, Failure::duplicate_id);
+        return true;
+      }
+    }
+    if (index == 0)
+      owner_ = manager;
+    ids_[index] = id;
   }
-  const auto first_id = engine.create(engine.context, manager, first);
-  if (first_id == 0) {
-    creation_failed(engine, Failure::first_create_failed);
-    return true;
-  }
-  owner_ = manager;
-  ids_[0] = first_id;
-
-  DescriptorStorage second{};
-  if (!prepare(engine, second, desired_keys_[1])) {
-    creation_failed(engine, failure_);
-    return true;
-  }
-  const auto second_id = engine.create(engine.context, manager, second);
-  if (second_id == 0 || second_id == first_id) {
-    creation_failed(engine, second_id == 0 ? Failure::second_create_failed : Failure::duplicate_id);
-    return true;
-  }
-  ids_[1] = second_id;
   owned_keys_ = desired_keys_;
   owned_independent_pose_ = desired_independent_pose_;
+  owned_feeds_ = desired_feeds_;
   active_pair_ = true;
   publish(State::active);
   return true;
@@ -209,6 +243,7 @@ bool PairController::acknowledge_manager_destroyed(ManagerToken manager) noexcep
     return false;
   ids_ = {};
   owner_ = {};
+  owned_feeds_ = 0;
   desired_enabled_ = false;
   creation_pending_ = false;
   active_pair_ = false;

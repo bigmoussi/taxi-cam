@@ -13,12 +13,15 @@ class ViewReadinessWait {
   bool observe(std::uint64_t now,
                const engine_camera::Snapshot& pair,
                bool established,
-               const std::array<engine_camera::OwnedViewSnapshot, 2>& views) noexcept {
+               const std::array<engine_camera::OwnedViewSnapshot, 3>& views) noexcept {
     bool pending = false;
     bool valid = established && pair.state == engine_camera::State::active && pair.owner.valid() && pair.owned_ids[0] &&
                  pair.owned_ids[1] && pair.owned_ids[0] != pair.owned_ids[1] && !pair.request_pending && !pair.creation_pending &&
-                 pair.failure == engine_camera::Failure::none && pair.blocked == engine_camera::Blocked::none;
-    for (const auto& view : views) {
+                 pair.failure == engine_camera::Failure::none && pair.blocked == engine_camera::Blocked::none &&
+                 (!pair.owned_ids[2] || (pair.owned_ids[2] != pair.owned_ids[0] && pair.owned_ids[2] != pair.owned_ids[1]));
+    const unsigned feeds = pair.owned_ids[2] ? 3u : 2u;
+    for (unsigned vi = 0; vi < feeds; ++vi) {
+      const auto& view = views[vi];
       const bool stable_pending = view.complete && !view.ready && view.status == engine_camera::OwnedViewStatus::pending;
       const bool transient_read =
           !view.complete && !view.ready &&
@@ -53,7 +56,7 @@ class ViewReadinessWait {
  private:
   bool waiting_ = false;
   engine_camera::ManagerToken owner_{};
-  std::array<engine_camera::EntryId, 2> ids_{};
+  std::array<engine_camera::EntryId, 3> ids_{};
   std::uint64_t since_ = 0, episodes_ = 0;
 };
 

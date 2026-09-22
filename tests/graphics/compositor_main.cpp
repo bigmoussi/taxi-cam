@@ -184,6 +184,24 @@ void pixel_case(ID3D12Device* device,
                   S_FALSE &&
               compositor.statistics().descriptor_writes == writes_before + 2,
           "Unchanged inputs rewrote GPU descriptors");
+  if (check_refusals) {
+    Reference<ID3D12Resource> wing_right;
+    create_texture(device,
+                   texture_description(source_descriptions[1].width, source_descriptions[1].height, source_descriptions[1].resource_format),
+                   wing_right.put());
+    const auto writes_two_feed = compositor.statistics().descriptor_writes;
+    check(compositor.set_inputs(sources[0].get(), source_descriptions[0].srv_format, sources[1].get(), source_descriptions[1].srv_format,
+                                wing_right.get(), source_descriptions[1].srv_format),
+          compositor.last_error());
+    require(compositor.statistics().descriptor_writes == writes_two_feed + 3, "An input change did not write exactly three SRVs");
+    require(compositor.set_inputs(sources[0].get(), source_descriptions[0].srv_format, sources[1].get(), source_descriptions[1].srv_format,
+                                  wing_right.get(), source_descriptions[1].srv_format) == S_FALSE &&
+                compositor.statistics().descriptor_writes == writes_two_feed + 3,
+            "Unchanged three-feed inputs rewrote GPU descriptors");
+    check(compositor.set_inputs(sources[0].get(), source_descriptions[0].srv_format, sources[1].get(), source_descriptions[1].srv_format),
+          compositor.last_error());
+    require(compositor.statistics().descriptor_writes == writes_two_feed + 5, "Restoring two-feed inputs did not write exactly two SRVs");
+  }
 
   Reference<ID3D12Resource> pfd;
   const auto pfd_description = texture_description(768, 1024, DXGI_FORMAT_R8G8B8A8_UNORM);
@@ -488,7 +506,7 @@ Result run(bool force_warp) {
   pixel_case(device.get(), compositor, generator, night, false, result,
              {Compositor::DefaultExposureEv, Compositor::DefaultExposureEv + taxi_camera::DisplayExposureController::DefaultNightBoostEv});
   result.statistics = compositor.statistics();
-  require(result.statistics.shader_compiles == 2 && result.statistics.descriptor_writes == 23 && result.statistics.input_changes == 11 &&
+  require(result.statistics.shader_compiles == 2 && result.statistics.descriptor_writes == 28 && result.statistics.input_changes == 13 &&
               result.statistics.recordings == 22 && result.night_rgb_checks == 2 && result.float_pixels > 1000000 &&
               result.packed_float_pixels > 2900000 && result.magenta_pixels > 400 && result.recolored_guide_pixels > 400,
           "Unexpected compositor rebuild, descriptor update or recording count");

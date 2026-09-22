@@ -10,7 +10,8 @@ namespace taxi_camera::engine_camera {
 
 using EntryId = std::uint64_t;
 using PoseKey = std::array<std::uint8_t, 16>;
-using PairKeys = std::array<PoseKey, 2>;
+inline constexpr unsigned kMaxOwnedViews = 3;
+using PairKeys = std::array<PoseKey, kMaxOwnedViews>;
 
 // Opaque adapter identity, not a dereferenceable pointer. Generation must change
 // if an address/identity is reused for a different manager lifetime.
@@ -53,6 +54,7 @@ enum class Failure {
   initializer_contract,
   first_create_failed,
   second_create_failed,
+  third_create_failed,
   duplicate_id,
   manager_destroyed
 };
@@ -64,7 +66,8 @@ struct Snapshot {
   Failure failure = Failure::none;
   Blocked blocked = Blocked::none;
   ManagerToken owner{};
-  std::array<EntryId, 2> owned_ids{};
+  // Capacity three; when only two feeds are requested ids[2] stays 0.
+  std::array<EntryId, kMaxOwnedViews> owned_ids{};
   // Last-wins mailbox: querying/publishing requests never calls the engine.
   bool request_pending = false;
   bool creation_pending = false;
@@ -73,7 +76,8 @@ struct Snapshot {
 class PairController {
  public:
   void request_enable(const PairKeys& keys) noexcept;
-  void request_independent_pose() noexcept;
+  // feeds is clamped to 1..3. Existing two-feed callers keep the default.
+  void request_independent_pose(unsigned feeds = 2) noexcept;
   void request_disable() noexcept;
   Snapshot snapshot() const noexcept;
 
@@ -100,8 +104,10 @@ class PairController {
     Command command = Command::none;
     PairKeys keys{};
     bool independent_pose = false;
+    unsigned feeds = 2;
   };
   bool has_owned_ids() const noexcept;
+  bool complete_owned_set() const noexcept;
   void publish(State state, Blocked blocked = Blocked::none) noexcept;
   void cleanup(const EngineCallbacks& engine) noexcept;
   bool prepare(const EngineCallbacks& engine, DescriptorStorage& descriptor, const PoseKey& key) noexcept;
@@ -113,11 +119,13 @@ class PairController {
   std::atomic_flag processing_ = ATOMIC_FLAG_INIT;
   // Below: accessed only while processing_ is held by update/lifetime/cancel.
   ManagerToken owner_{};
-  std::array<EntryId, 2> ids_{};
+  std::array<EntryId, kMaxOwnedViews> ids_{};
   PairKeys desired_keys_{};
   PairKeys owned_keys_{};
   bool desired_independent_pose_ = false;
   bool owned_independent_pose_ = false;
+  unsigned desired_feeds_ = 2;
+  unsigned owned_feeds_ = 0;
   bool desired_enabled_ = false;
   bool creation_pending_ = false;
   bool active_pair_ = false;

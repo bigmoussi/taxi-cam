@@ -1,21 +1,21 @@
 # How the camera reaches the PFD
 
-Taxi Cam creates two additional camera views inside MSFS and draws their images into the aircraft's Primary Flight Display (PFD) screen texture. MSFS supplies the scene rendering: aircraft geometry, airport surfaces and lighting. Taxi Cam controls where the cameras look and how their images are presented.
+Taxi Cam creates additional camera views inside MSFS and draws their images into the aircraft's Primary Flight Display (PFD) or navigation-display screen texture. MSFS supplies the scene rendering: aircraft geometry, airport surfaces and lighting. Taxi Cam controls where the cameras look and how their images are presented.
 
-A texture is an image held in GPU memory. MSFS renders each camera into a texture, and the cockpit model displays its PFD using another texture. Taxi Cam connects them by combining the camera images and copying or drawing the result into the PFD texture.
+A texture is an image held in GPU memory. MSFS renders each camera into a texture, and the cockpit model displays its PFD or ND using another texture. Taxi Cam connects them by combining the camera images and copying or drawing the result into that display texture.
 
-The left and right PFDs share **one nose camera and one tail camera**. Each EFIS TAXI button or manual camera request controls whether its PFD receives the combined image.
+Most profiles share **one nose camera and one tail camera** across the left and right displays. The PMDG 777 profile instead uses **three** cameras (nose, left wing, right wing) on a split-bottom navigation-display layout. Each EFIS TAXI button or manual camera request controls whether that side's display receives the combined image.
 
 ## The complete path
 
 ~~~mermaid
 flowchart TD
-    Button["EFIS TAXI button state"] --> Control["Bridge selects the left or right PFD"]
+    Button["EFIS TAXI button state"] --> Control["Bridge selects the left or right display"]
     Manual["Keyboard shortcuts or manual previews"] --> Control
-    Control --> Cameras["MSFS renders nose and tail views"]
+    Control --> Cameras["MSFS renders profile camera views"]
     Cameras --> Capture["Bridge captures the GPU images"]
-    Capture --> Combine["GPU combines views, guides and ground speed"]
-    Combine --> Display["Bridge updates the enabled PFD texture"]
+    Capture --> Combine["GPU combines views, optional guides and ground speed"]
+    Combine --> Display["Bridge updates the enabled display texture"]
 ~~~
 
 There are three interfaces in this path:
@@ -34,7 +34,7 @@ SimConnect carries data and control events. The camera images come from MSFS's r
 
 **The bridge — `taxi-camera-bridge.dll`** runs inside `FlightSimulator2024.exe`. It needs this position because both the internal camera objects and the simulator's Direct3D resources belong to that process. It manages the camera views, reads SimConnect data and records the GPU work that places images on the PFD.
 
-**The GPU** renders the two MSFS scenes and carries out the bridge's copies and drawing commands. Camera pixels stay in GPU resources. The tray app receives counters and status, not image frames.
+**The GPU** renders the MSFS camera scenes and carries out the bridge's copies and drawing commands. Camera pixels stay in GPU resources. The tray app receives counters and status, not image frames.
 
 The EXE and DLL communicate through a small Windows shared-memory block protected by a mutex. It carries settings, a heartbeat and status. [IPC fields and timing](runtime-reference.md#ipc-and-timing) are documented separately.
 
@@ -66,7 +66,7 @@ The companion can select the aircraft profile automatically. SimConnect supplies
 
 Telemetry shutdown requests the worker to stop and polls for completion without waiting. If a SimConnect call is still running, its worker, event handles, cached state and selected profile remain owned until it exits. The bridge publishes a waiting status and continues servicing the connection; it neither starts a second worker nor commits the next profile while shutdown is pending. Closing camera render gates does not suspend simulator threads.
 
-FBW A380 and A350 profiles supply one TAXI-state variable for each EFIS panel. The bridge reads these through SimConnect. An ON state requests delivery to that side's PFD; a fresh OFF state clears that request. The iniBuilds A380 has INOP TAXI buttons and uses manual camera requests from configurable keyboard shortcuts or the companion's previews. All requests retain the aircraft, session, service and speed guards.
+FBW A380 and A350 profiles supply one TAXI-state variable for each EFIS panel. The bridge reads these through SimConnect. An ON state requests delivery to that side's PFD; a fresh OFF state clears that request. The iniBuilds A380 has INOP TAXI buttons and uses manual camera requests from configurable keyboard shortcuts or the companion's previews. The PMDG 777 matches the airplane folder `PMDG 777-200ER`, `PMDG 777-300ER` or `PMDG 777F` in the loaded-aircraft path. The open 777-200ER RR path was `SimObjects\Airplanes\PMDG 777-200ER\presets\pmdg\PMDG 777-200ER RR\config\aircraft.CFG`; it did not contain a `pmdg-aircraft-77er` component. There is no cockpit button. Camera on/off uses the same Left, Right and Both shortcuts as the other aircraft. The picture is the navigation display: the shared `DUS` texture drawn by `DU_LeftInboard` and `DU_RightInboard`. More than one size match selects the last texture-list entry (highest resource id), not the first. The composed page is stamped only in the two inboard gauge rectangles, `DU_LeftInboard` at 1058, 33, 958, 971 and `DU_RightInboard` at 30, 1058, 958, 971. The rest of `DUS` stays clear. The page uses three feeds (nose, left wing, right wing) in a split-bottom layout: full-width nose above a T divider and two equal square bottom panes. Ground speed and alignment markers are not drawn. All requests retain the aircraft, session, service and speed guards.
 
 The companion registers global left, right and both-display shortcuts, initially Ctrl + Shift + L / R / B. They preserve the TAXI-button follow setting and synchronize the selected cockpit buttons on FBW A380 and A350, including OFF requests. The iniBuilds A380 uses manual requests without guessed aircraft-variable writes. Pending aircraft commands require fresh acknowledgement; their state is session-only. See [Keyboard shortcuts](keyboard-shortcuts.md).
 
@@ -172,14 +172,16 @@ Source: [scene/resource matching](../src/graphics/scene_handoff.hpp), [capture m
 
 ## 5. Combine the views and display information
 
-Source dimensions come from the aircraft profile selected when the pair is created and remain fixed for that pair. The compositor takes a completed nose image and a completed tail image from the current camera pair. It draws a **768 × 763** output containing:
+Source dimensions come from the aircraft profile selected when the pair (or three-feed set) is created and remain fixed for that set. The compositor takes completed feed images from the current owned cameras. It draws a **768 × 763** output. Non-split profiles contain:
 
 - nose view above and tail view below;
 - a 12-pixel black horizontal divider in the composed image;
 - nose reference markers and mirrored tail brackets: 14-by-14-pixel nose squares for both A380 and A350, with magenta as the default marking colour;
 - an opaque ground-speed panel inset from the top-left camera edges, with internal padding and a width that fits the current value on both A380 and A350.
 
-Ground speed is read from SimConnect and rendered by Taxi Cam. Its fractional part is discarded: 12.9 knots displays as 12. Unavailable data displays `--`. The original PFD's GS text is covered by this panel. All profiles start with the same green speed colour, RGB 22 / 109 / 19, while saved colour choices remain specific to each profile.
+Split-bottom profiles (PMDG 777) instead place the nose across the full width, a T-shaped divider, and two equal square bottom panes for the left- and right-wing feeds. That profile ships with ground speed and reference guides disabled; the live path skips the GS overlay entirely so no black GS box appears. Other aircraft keep the GS panel and guides.
+
+Ground speed is read from SimConnect and rendered by Taxi Cam when the profile enables it. Its fractional part is discarded: 12.9 knots displays as 12. Unavailable data displays `--`. The original PFD's GS text is covered by this panel. Profiles that enable GS start with the same green speed colour, RGB 22 / 109 / 19, while saved colour choices remain specific to each profile.
 
 The guides use adjustable positions within each camera image. Changing the camera mount or field of view does not move them with the wheels; use the Reference guides page to realign them after changing the framing.
 

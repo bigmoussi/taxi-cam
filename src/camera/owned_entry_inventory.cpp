@@ -70,11 +70,17 @@ class BoundedReader {
 
 OwnedEntryInventory inspect_owned_entries(MemoryReader& reader,
                                           std::uint64_t manager_address,
-                                          const std::array<std::uint64_t, 2>& owned_ids) {
+                                          const std::array<std::uint64_t, 3>& owned_ids) {
   OwnedEntryInventory result;
-  if (owned_ids[0] != 0 && owned_ids[0] == owned_ids[1]) {
-    result.error = "Duplicate nonzero owned IDs are not a valid verification request.";
-    return result;
+  for (std::size_t i = 0; i < owned_ids.size(); ++i) {
+    if (!owned_ids[i])
+      continue;
+    for (std::size_t j = i + 1; j < owned_ids.size(); ++j) {
+      if (owned_ids[j] == owned_ids[i]) {
+        result.error = "Duplicate nonzero owned IDs are not a valid verification request.";
+        return result;
+      }
+    }
   }
   BoundedReader source(reader, result);
   std::array<std::uint8_t, 16> header{};
@@ -99,7 +105,7 @@ OwnedEntryInventory inspect_owned_entries(MemoryReader& reader,
 
   std::array<std::uint64_t, kOwnedEntryBucketLimit> heads{};
   std::array<Node, kOwnedEntryNodeLimit> nodes{};
-  std::array<OwnedEntry, 2> found{};
+  std::array<OwnedEntry, 3> found{};
   // This is one contiguous metadata field. Read all declared heads at once,
   // rather than issuing VirtualQuery/ReadProcessMemory for every eight bytes.
   // The same bytes and final full reread remain required.

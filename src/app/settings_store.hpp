@@ -125,7 +125,7 @@ inline bool load_settings(Settings& s, const std::wstring& installation, std::ui
         native_camera::MountPair mounts;
         const char* error{};
         if (native_camera::parse_mount_config(std::string_view(buffer.data(), n), mounts, error))
-          for (unsigned i = 0; i < 2; ++i) {
+          for (unsigned i = 0; i < mounts.size(); ++i) {
             const auto& m = mounts[i];
             value.mounts[i] = {m.position_m[0], m.position_m[1], m.position_m[2], m.pitch_degrees, m.yaw_degrees, m.fov_radians};
           }
@@ -178,9 +178,18 @@ inline bool load_settings(Settings& s, const std::wstring& installation, std::ui
       boost_revision < kNightBoostPreferenceRevision || boost_revision > UINT32_MAX || std::floor(boost_revision) != boost_revision;
   value.night_boost = migrate_boost ? kDefaultNightBoostEv : static_cast<float>(read(L"display", L"night_boost", kDefaultNightBoostEv));
   constexpr std::array<const wchar_t*, 6> names{L"right", L"up", L"forward", L"pitch", L"yaw", L"lens"};
-  for (unsigned i = 0; i < 2; ++i)
+  constexpr std::array<const wchar_t*, 3> sections{L"nose", L"tail", L"wing_right"};
+  for (unsigned i = 0; i < 3; ++i)
     for (unsigned j = 0; j < 6; ++j)
-      value.mounts[i][j] = read(i ? L"tail" : L"nose", names[j], value.mounts[i][j]);
+      value.mounts[i][j] = read(sections[i], names[j], value.mounts[i][j]);
+  // Pre-protocol-13 files only stored nose/tail. Keep the profile's third mount
+  // when wing_right keys are absent so split-bottom defaults remain valid.
+  {
+    wchar_t probe[8];
+    GetPrivateProfileStringW(L"wing_right", L"right", L"", probe, 8, path.c_str());
+    if (probe[0] == 0)
+      value.mounts[2] = profile->mounts[2];
+  }
   if (!valid_settings(value))
     return false;
   // A failed preference write must not discard valid calibration. Apply the
@@ -197,6 +206,7 @@ inline bool save_settings(const Settings& s) {
   wchar_t text[4096];
   const auto& n = s.mounts[0];
   const auto& t = s.mounts[1];
+  const auto& w = s.mounts[2];
   const int count = std::swprintf(
       text, 4096,
       L"[service]\r\nenabled=%u\r\nfollow_taxi=%u\r\nauto_detect=%u\r\n"
@@ -206,12 +216,13 @@ inline bool save_settings(const Settings& s) {
       L"nose_dot_x=%.9g\r\nnose_dot_y=%.9g\r\ntail_upper_x=%.9g\r\ntail_upper_y=%.9g\r\n"
       L"tail_corner_x=%.9g\r\ntail_corner_y=%.9g\r\ntail_inner_x=%.9g\r\ntail_inner_y=%.9g\r\n"
       L"[nose]\r\nright=%.12g\r\nup=%.12g\r\nforward=%.12g\r\npitch=%.12g\r\nyaw=%.12g\r\nlens=%.12g\r\n"
-      L"[tail]\r\nright=%.12g\r\nup=%.12g\r\nforward=%.12g\r\npitch=%.12g\r\nyaw=%.12g\r\nlens=%.12g\r\n",
+      L"[tail]\r\nright=%.12g\r\nup=%.12g\r\nforward=%.12g\r\npitch=%.12g\r\nyaw=%.12g\r\nlens=%.12g\r\n"
+      L"[wing_right]\r\nright=%.12g\r\nup=%.12g\r\nforward=%.12g\r\npitch=%.12g\r\nyaw=%.12g\r\nlens=%.12g\r\n",
       s.enabled, s.follow_taxi, s.auto_detect, s.camera_rate, s.parked_rate, s.single_camera, s.automatic_exposure, s.exposure,
       s.night_boost, kNightBoostPreferenceRevision, s.calibration_budget, s.speed_color[0], s.speed_color[1], s.speed_color[2],
       s.guide_color[0], s.guide_color[1], s.guide_color[2], s.nose_dot[0], s.nose_dot[1], s.tail_upper[0], s.tail_upper[1],
       s.tail_corner[0], s.tail_corner[1], s.tail_inner[0], s.tail_inner[1], n[0], n[1], n[2], n[3], n[4], n[5], t[0], t[1], t[2], t[3],
-      t[4], t[5]);
+      t[4], t[5], w[0], w[1], w[2], w[3], w[4], w[5]);
   if (count <= 0)
     return false;
   HANDLE file = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);

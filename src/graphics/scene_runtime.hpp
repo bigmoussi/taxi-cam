@@ -70,6 +70,8 @@ struct Snapshot {
   float display_exposure_ev = -8.8f;
   float ground_speed_knots = 0;
   bool ground_speed_valid = false;
+  // False skips the GS overlay entirely (PMDG 777: no readout, no black box).
+  bool ground_speed_overlay = true;
   const char* message = "Start the scene test to prepare the PFD feed.";
   SceneCaptureManager::Statistics capture;
 };
@@ -84,6 +86,9 @@ bool prepare(std::uint64_t key);
 bool set_display_exposure(std::uint64_t key, float ev);
 // A fresh public SimConnect sample; unavailable samples render GS --.
 void set_ground_speed(std::uint64_t key, float knots, bool valid);
+// Skip the GS overlay entirely (no glyphs, no black panel). Font fixtures
+// re-enable GS via set_ground_speed and keep the default panel geometry.
+void hide_ground_speed(std::uint64_t key);
 void reset_feed(std::uint64_t key);
 // Full aircraft/airport boundary. Stop new camera/calibration publications and
 // submissions immediately; replayable buffers and in-flight leases drain on
@@ -91,6 +96,7 @@ void reset_feed(std::uint64_t key);
 std::uint64_t reset_session(std::uint64_t key);
 bool resume_session(std::uint64_t key, std::uint64_t generation);
 void set_composition(std::uint64_t key, const profiles::Composition& layout);
+void set_reference_guides(std::uint64_t key, bool enabled);
 void service();
 Snapshot snapshot(std::uint64_t key);
 // Terminal DIRECT-list entry only: immediately before native Close, after all

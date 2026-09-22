@@ -1,5 +1,7 @@
+#include "../../src/graphics/native_device_identity.hpp"
 #include "../../src/hooks/render_boundary_observer.hpp"
 #include <array>
+#include <cstring>
 #include <atomic>
 #include <cstdio>
 #include <stdexcept>
@@ -58,6 +60,7 @@ struct Evidence {
   unsigned pass_metadata = 0, metadata_invalidations_seen = 0, metadata_begins_seen = 0;
   unsigned enhanced_notifications = 0, enhanced_originals_seen = 0;
   bool ordinary_pass_access = false;
+  ID3D12GraphicsCommandList* pass_list = nullptr;
   D3D12_RENDER_PASS_FLAGS metadata_pass_flags = D3D12_RENDER_PASS_FLAG_NONE;
   unsigned raw_legacy = 0, raw_enhanced = 0, copy_resources = 0, copy_textures = 0, after_resources = 0, after_textures = 0;
   std::uint32_t raw_scope = 0;
@@ -93,10 +96,25 @@ void note(unsigned value) {
 }
 bool interface_available = true;
 void* interface_override = nullptr;
+ID3D12GraphicsCommandList* unwrap_proxy = nullptr;
+ID3D12GraphicsCommandList* unwrap_native = nullptr;
 D3D12_COMMAND_LIST_TYPE list_type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-HRESULT STDMETHODCALLTYPE query(ID3D12GraphicsCommandList* list, REFIID, void** result) {
-  *result = interface_available ? (interface_override ? interface_override : list) : nullptr;
-  return interface_available ? S_OK : E_NOINTERFACE;
+HRESULT STDMETHODCALLTYPE query(ID3D12GraphicsCommandList* list, REFIID iid, void** result) {
+  *result = nullptr;
+  if (!interface_available)
+    return E_NOINTERFACE;
+  // ReShade's IID_UnwrappedObject returns the native command list and AddRefs.
+  if (unwrap_proxy && list == unwrap_proxy && unwrap_native &&
+      std::memcmp(&iid, &taxi_camera::UnwrappedObjectId, sizeof(GUID)) == 0) {
+    unwrap_native->AddRef();
+    *result = unwrap_native;
+    return S_OK;
+  }
+  *result = interface_override ? interface_override : list;
+  return S_OK;
+}
+ULONG STDMETHODCALLTYPE add_reference(ID3D12GraphicsCommandList*) {
+  return 2;
 }
 ULONG STDMETHODCALLTYPE release(ID3D12GraphicsCommandList*) {
   ++evidence.releases;
@@ -313,6 +331,7 @@ void pass_began(void*,
   evidence.metadata_begins_seen = evidence.begins;
   evidence.metadata_pass_flags = flags;
   evidence.ordinary_pass_access = ordinary_access;
+  evidence.pass_list = list;
 }
 void enhanced_call(void*, ID3D12GraphicsCommandList* list, std::uint64_t generation) noexcept {
   (void)obs::recording_allows_injection(list, generation);
@@ -375,6 +394,7 @@ int main() {
     std::array<void*, 81> table{};
     std::array<std::array<void*, 81>, 9> active_tables{};
     table[0] = reinterpret_cast<void*>(&query);
+    table[1] = reinterpret_cast<void*>(&add_reference);
     table[2] = reinterpret_cast<void*>(&release);
     table[8] = reinterpret_cast<void*>(&type);
     table[12] = reinterpret_cast<void*>(&original_draw);
@@ -577,6 +597,42 @@ int main() {
     extended->EndRenderPass();
     list->DrawInstanced(3, 1, 0, 0);
     check_legacy(1, &transition, 0, "Local-preservation depth end access authorized unrelated work");
+
+    // ReShade 6.8 stays loaded as dxgi.dll. Read-only depth/stencil flags are
+    // legal, and a second End of an already-closed ordinary pass is the proxy
+    // plus the active-pass vtable, not a new PassState failure.
+    obs::successful_reset(list, 1);
+    list->DrawInstanced(3, 1, 0, 0);
+    constexpr auto read_only_depth_stencil = static_cast<D3D12_RENDER_PASS_FLAGS>(0x8u | 0x10u);
+    extended->BeginRenderPass(0, nullptr, nullptr, read_only_depth_stencil);
+    extended->EndRenderPass();
+    const auto invalid_before_repeat = evidence.invalidations;
+    extended->EndRenderPass();
+    check_legacy(1, &transition, 1, "ReShade read-only depth/stencil pass was recorded as PassState");
+    require(evidence.invalidations == invalid_before_repeat, "Repeated End of a closed pass emitted PassState");
+    obs::successful_reset(list, 1);
+    list->DrawInstanced(3, 1, 0, 0);
+    extended->BeginRenderPass(0, nullptr, nullptr, static_cast<D3D12_RENDER_PASS_FLAGS>(0x20u));
+    extended->EndRenderPass();
+    check_legacy(1, &transition, 0, "Unknown render-pass flag was treated as ordinary");
+    obs::successful_reset(list, 1);
+    list->DrawInstanced(3, 1, 0, 0);
+    Fake proxy{table.data()};
+    unwrap_proxy = reinterpret_cast<ID3D12GraphicsCommandList*>(&proxy);
+    unwrap_native = list;
+    auto* proxy_list = reinterpret_cast<ID3D12GraphicsCommandList4*>(&proxy);
+    proxy_list->BeginRenderPass(0, nullptr, nullptr, D3D12_RENDER_PASS_FLAG_NONE);
+    require(evidence.pass_list == list, "ReShade proxy Begin did not report the native command list");
+    check_legacy(1, &transition, 0, "ReShade proxy Begin left the native pass inactive");
+    proxy_list->EndRenderPass();
+    check_legacy(1, &transition, 1, "ReShade proxy End did not complete the native pass");
+    const auto invalid_before_proxy_repeat = evidence.invalidations;
+    proxy_list->EndRenderPass();
+    require(evidence.invalidations == invalid_before_proxy_repeat, "ReShade proxy repeated End emitted PassState");
+    check_legacy(1, &transition, 1, "ReShade proxy repeated End invalidated the native recording");
+    unwrap_proxy = nullptr;
+    unwrap_native = nullptr;
+
     obs::successful_reset(list, 1);
     list->DrawInstanced(3, 1, 0, 0);
 

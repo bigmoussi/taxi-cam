@@ -675,5 +675,47 @@ int main() {
   detector.reset();
   assert(!detector.snapshot().valid && detector.snapshot().targets[0] == 0 && detector.snapshot().stable_windows == 0);
 
+  static PfdTargetDetector inboard;
+  inboard.configure(taxi_camera::profiles::Pmdg777);
+  const auto& pmdg = taxi_camera::profiles::Pmdg777;
+  assert(pmdg.formats[0] == 0 && pmdg.mips == 0 && !pmdg.reference_guides && !pmdg.ground_speed);
+  const unsigned levels = pmdg.mips ? pmdg.mips : 1u;
+  // 28 is an observation format, not a scanned PMDG DXGI format.
+  PfdTargetObservation one{42, 10, pmdg.width, pmdg.height, levels, 28};
+  assert(!inboard.observe(&one, 1, 0, false).valid && std::strcmp(inboard.snapshot().status, "incomplete_inventory") == 0);
+  inboard.reset();
+  assert(!inboard.observe(&one, 1, 0).valid);
+  assert(!inboard.observe(&one, 1, 1000).valid && inboard.snapshot().stable_windows == 1);
+  assert(!inboard.observe(&one, 1, 2000).valid && inboard.snapshot().stable_windows == 2);
+  const auto& confirmed = inboard.observe(&one, 1, 3000);
+  assert(confirmed.valid && confirmed.targets[0] == 42 && confirmed.targets[1] == 0);
+  std::array<PfdTargetObservation, 2> pair{one, one};
+  pair[1].id = 43;
+  pair[1].draws = 1000;
+  inboard.reset();
+  assert(!inboard.observe(pair.data(), pair.size(), 0).valid);
+  assert(!inboard.observe(pair.data(), pair.size(), 1000).valid && inboard.snapshot().stable_windows == 1);
+  assert(!inboard.observe(pair.data(), pair.size(), 2000).valid && inboard.snapshot().stable_windows == 2);
+  const auto& last = inboard.observe(pair.data(), pair.size(), 3000);
+  assert(last.valid && last.targets[0] == 43 && last.targets[1] == 0);
+  PfdTargetObservation kept = pair[1];
+  const auto& still_last = inboard.observe(&kept, 1, 4000);
+  assert(still_last.valid && still_last.targets[0] == 43 && still_last.targets[1] == 0);
+  std::array<PfdTargetObservation, 3> reversed{one, one, one};
+  reversed[0].id = 90;
+  reversed[0].draws = 1;
+  reversed[1].id = 10;
+  reversed[1].draws = 5000;
+  reversed[2].id = 50;
+  inboard.reset();
+  assert(!inboard.observe(reversed.data(), reversed.size(), 0).valid);
+  assert(!inboard.observe(reversed.data(), reversed.size(), 1000).valid);
+  assert(!inboard.observe(reversed.data(), reversed.size(), 2000).valid);
+  const auto& tail = inboard.observe(reversed.data(), reversed.size(), 3000);
+  assert(tail.valid && tail.targets[0] == 90 && tail.targets[1] == 0);
+  reversed[0].id = 91;
+  assert(!inboard.observe(reversed.data(), reversed.size(), 4000).valid);
+  assert(std::strcmp(inboard.snapshot().status, "candidate_disappeared") == 0 && inboard.snapshot().targets[0] == 0);
+
   std::puts("PFD target detector: PASS");
 }

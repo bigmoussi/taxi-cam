@@ -58,8 +58,11 @@ inline bool parse_mount_config(std::string_view text, MountPair& output, const c
     candidate[index] = {{values[0], values[1], values[2]}, values[3], values[4], static_cast<float>(values[5])};
     seen |= 1u << index;
   }
-  if (seen != 3 || !valid_mounts(candidate))
+  if (seen != 3 || !valid_mounts(candidate, 2))
     return false;
+  // Legacy nose/tail files only carry two mounts; duplicate the aft mount into
+  // the unused third slot so MountPair capacity stays fully valid.
+  candidate[2] = candidate[1];
   output = candidate;
   error = "";
   return true;

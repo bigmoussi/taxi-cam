@@ -96,7 +96,8 @@ void log_contention(const win::Status& status, const win::GraphicsStatus& graphi
   auto used = static_cast<std::size_t>(std::snprintf(
       detail, sizeof(detail),
       "Render-thread contention: armed=%u pulse=%llu queue_calls=%llu queue_contended=%llu manager_evidence=%llu "
-      "manager_lifecycle=%llu manager_submit=%llu unordered=%llu gated=%llu deferred_retirements=%llu deferred_evidence=%llu "
+      "manager_lifecycle=%llu manager_submit=%llu unordered=%llu gated=%llu released_waits=%llu deferred_retirements=%llu "
+      "deferred_evidence=%llu "
       "deferred_overflows=%llu deferred_lifecycle=%llu "
       "runtime_writes=%llu watchdog_trips=%u last_stall_ms=%llu notifications=%u/%llu hook_failures=%llu "
       "failure_rate_peak=%llu admission_halted=%u wipes=%llu last_wipe=%s unordered_consumers=%llu contended_invalidations=%llu "
@@ -107,6 +108,7 @@ void log_contention(const win::Status& status, const win::GraphicsStatus& graphi
       static_cast<unsigned long long>(output.capture.contended_submissions),
       static_cast<unsigned long long>(output.capture.unordered_submissions),
       static_cast<unsigned long long>(output.capture.gated_submissions),
+      static_cast<unsigned long long>(output.capture.released_waits),
       static_cast<unsigned long long>(output.capture.deferred_retirements),
       static_cast<unsigned long long>(output.capture.deferred_evidence), static_cast<unsigned long long>(output.capture.deferred_overflows),
       static_cast<unsigned long long>(graphics.deferred_lifecycle), static_cast<unsigned long long>(output.contended_writes),
@@ -279,7 +281,7 @@ DWORD run_impl() {
       announce(events[i], sim_limiter, at);
   };
   std::uint64_t last_stop_sequence{};
-  std::array<std::array<double, 6>, 2> applied_mounts{};
+  std::array<std::array<double, 6>, 3> applied_mounts{};
   // Diagnostics: counters at the previous loop tick, so a wipe line can show
   // which writer moved with it.
   struct WipeTrace {
@@ -599,7 +601,8 @@ DWORD run_impl() {
       const auto previous_warm_phase = prewarm.phase();
       background_warmup = prewarm.observe(
           now, warm_readiness().eligible(), mask || test_scene,
-          {requested && warm_scene.ready[0] && warm_scene.ready[1], warm_output.output, warm_output.frames, warm_output.completed_frames},
+          {requested && warm_scene.ready[0] && warm_scene.ready[1] && (!warm_scene.pair.owned_ids[2] || warm_scene.ready[2]),
+           warm_output.output, warm_output.frames, warm_output.completed_frames},
           failed || warm_output.failed || warm_scene.pair.state == engine_camera::State::failed ||
               warm_scene.pair.state == engine_camera::State::blocked);
       if (prewarm.phase() != previous_warm_phase) {
@@ -637,15 +640,17 @@ DWORD run_impl() {
     const auto* rate_profile = profiles::find(applied_profile ? applied_profile : settings.profile);
     effective_rate =
         effective_camera_rate(settings.camera_rate, rate_profile ? rate_profile->pfd_refresh_hz : 0, parked, settings.parked_rate);
-    if (connected && (rate != effective_rate.rate || feeds != (settings.single_camera ? 1u : 2u))) {
+    const unsigned desired_feeds =
+        settings.single_camera ? 1u : (rate_profile && rate_profile->composition.split_bottom != 0 ? 3u : 2u);
+    if (connected && (rate != effective_rate.rate || feeds != desired_feeds)) {
       rate = effective_rate.rate;
-      feeds = settings.single_camera ? 1u : 2u;
+      feeds = desired_feeds;
       native_camera::request_scene_rate(rate, feeds);
       scene_runtime::manager().set_source_rate(rate);
     }
     if (connected && applied_mounts != settings.mounts) {
       native_camera::MountPair mounts;
-      for (unsigned i = 0; i < 2; ++i) {
+      for (unsigned i = 0; i < mounts.size(); ++i) {
         const auto& m = settings.mounts[i];
         mounts[i] = {{m[0], m[1], m[2]}, m[3], m[4], static_cast<float>(m[5])};
       }
@@ -669,7 +674,8 @@ DWORD run_impl() {
     // loss close the render gates immediately.
     // Keep the owned pair and ordered source-state evidence for the next ON.
     native_camera::suspend_scene_rendering(demand.suspend);
-    auto composition = profiles::find(applied_profile ? applied_profile : settings.profile)->composition;
+    const auto* drawing = profiles::find(applied_profile ? applied_profile : settings.profile);
+    auto composition = drawing->composition;
     composition.speed_color = settings.speed_color;
     composition.guide_color = settings.guide_color;
     composition.nose_dot = settings.nose_dot;
@@ -713,6 +719,7 @@ DWORD run_impl() {
         start_timing.request_begin_ms = GetTickCount64();
         log_startup(status, start_timing, "request_begin");
         scene_runtime::set_composition(key, composition);
+        scene_runtime::set_reference_guides(key, drawing->reference_guides);
         scene_runtime::reset_feed(key);
         scene_runtime::manager().begin_source_tracking();
         native_camera::request_scene_test(true);
@@ -751,11 +758,15 @@ DWORD run_impl() {
     // Normal button changes never call request_scene_stop/reset_feed or release
     // source leases. The profile-change transaction above still owns teardown.
     scene_runtime::set_composition(key, composition);
+    scene_runtime::set_reference_guides(key, drawing->reference_guides);
     const auto light = native_camera::get_lighting();
     const auto display = exposure.update(now, settings.exposure, settings.automatic_exposure != 0, settings.night_boost, light.valid,
                                          light.ambient, light.sample_ms);
     scene_runtime::set_display_exposure(key, display.applied_ev);
-    scene_runtime::set_ground_speed(key, static_cast<float>(speed.knots), speed.valid);
+    if (drawing->ground_speed)
+      scene_runtime::set_ground_speed(key, static_cast<float>(speed.knots), speed.valid);
+    else
+      scene_runtime::hide_ground_speed(key);
     service_scene();
     const auto scene = native_camera::scene_snapshot();
     const auto output = scene_runtime::snapshot(key);
@@ -765,7 +776,7 @@ DWORD run_impl() {
     }
     if (now >= next_recovery) {
       const bool eligible = (mask || test_scene) && !failed && !output.failed && scene.pair.state == engine_camera::State::active &&
-                            scene.requested_feeds == 2 && !scene.pose_waiting && !scene.view_waiting &&
+                            scene.requested_feeds >= 2 && !scene.pose_waiting && !scene.view_waiting &&
                             native_camera::sample_body_pose(now).valid;
       if (eligible && output.frames != last_frames)
         native_camera::note_scene_capture_progress(now);
@@ -821,7 +832,7 @@ DWORD run_impl() {
     std::memcpy(status.aircraft_path, identity.path.data(), sizeof(status.aircraft_path));
     status.graphics_ready = graphics.ready;
     status.hook_failures = graphics.hook_failures;
-    status.scene_ready = scene.ready[0] && scene.ready[1];
+    status.scene_ready = scene.ready[0] && scene.ready[1] && (!scene.pair.owned_ids[2] || scene.ready[2]);
     status.taxi_mask = active;
     status.speed_inhibited = cutoff.inhibited;
     status.left_id = targets[0];
@@ -876,7 +887,14 @@ DWORD run_impl() {
                                      ? "Waiting for cockpit displays to be drawn. They are learned on first use; Restart Flight if the "
                                        "list stays empty."
                                      : "Select the left and right displays, or wait for automatic assignment.";
-    if (selected_profile && selected_profile->pfd_detection == profiles::PfdDetectionPolicy::ini_a380_allocation_group) {
+    const bool single_display =
+        selected_profile && selected_profile->pfd_detection == profiles::PfdDetectionPolicy::single_display;
+    if (single_display) {
+      const auto is = [&](const char* reason) { return std::strcmp(graphics.target_detection, reason) == 0; };
+      target_message = !settings.auto_detect        ? "Automatic display selection is off. Select the navigation display manually."
+                       : is("incomplete_inventory") ? "Display tracking was incomplete. Select the navigation display manually."
+                                                    : "Waiting for the navigation display texture.";
+    } else if (selected_profile && selected_profile->pfd_detection == profiles::PfdDetectionPolicy::ini_a380_allocation_group) {
       const auto is = [&](const char* reason) { return std::strcmp(graphics.target_detection, reason) == 0; };
       target_message = !settings.auto_detect        ? "Automatic PFD selection is off. Select the left and right displays manually."
                        : is("incomplete_inventory") ? "Display tracking was incomplete. Select the left and right PFDs manually."
@@ -902,7 +920,7 @@ DWORD run_impl() {
         : !manual_only && !buttons.valid                                                                ? buttons.error
         : !manual_only && taxi_request_status.failed && taxi_request_status.serial == settings.taxi_request
             ? "Aircraft TAXI-button change was not confirmed. Try the shortcut again."
-        : (!targets[0] || !targets[1])         ? target_message
+        : (single_display ? !targets[0] : (!targets[0] || !targets[1])) ? target_message
         : !active && settings.calibration_mask ? "Calibration requested on the selected display."
         : stopped_camera                       ? stopped_camera
         : background_warmup                    ? "Preparing camera views in the background; TAXI displays remain off."

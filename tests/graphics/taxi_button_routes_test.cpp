@@ -80,6 +80,21 @@ int main() {
   taxi_camera::TaxiButtonRoutes replacements;
   assert(!replacements.adopt_detected({0, 1}));
   assert(!replacements.adopt_detected({1, 1}));
+  taxi_camera::TaxiButtonRoutes single;
+  assert(!single.adopt_detected({77, 0}));
+  assert(!single.adopt_single(0));
+  assert((single.adopt_single(77) && single.targets == std::array<std::uint64_t, 2>{77, 77}));
+  assert(single.adopt_single(77) && !single.adopt_single(78));
+  assert(single.active_mask(true, true, true) == 3);
+  assert(single.active_mask(true, true, false) == 1 && single.active_mask(true, false, true) == 2);
+  assert(single.matches(77, 1) && single.matches(77, 2));
+  single.forget(77);
+  assert(single.targets[0] == 0 && single.targets[1] == 0);
+  assert(single.adopt_single(77));  // Texture recreation must rebind without an Auto toggle.
+  assert((single.targets == std::array<std::uint64_t, 2>{77, 77}));
+  single.forget(77);
+  assert(single.assign(0, 88));
+  assert(!single.adopt_single(77));  // A surviving explicit side stays authoritative.
   assert(replacements.adopt_detected({11569, 11170}));
   replacements.forget(11170);
   assert(replacements.adopt_detected({43712, 11569}));  // New right ID is larger than surviving left.

@@ -43,7 +43,7 @@ The companion saves settings to:
 %LOCALAPPDATA%\Taxi Cam\profiles\<aircraft-key>.ini
 ~~~
 
-The selected aircraft ID (`profile`) and automatic selection (`automatic`, default 1) are saved in `settings.ini` under `[aircraft]`. The keys are `fbw-a380x`, `ini-a350-900`, `ini-a350-1000` and `ini-a380`; each has its own calibration file. Keyboard combinations are saved separately in `hotkeys.ini` and apply to all aircraft.
+The selected aircraft ID (`profile`) and automatic selection (`automatic`, default 1) are saved in `settings.ini` under `[aircraft]`. The keys are `fbw-a380x`, `ini-a350-900`, `ini-a350-1000`, `ini-a380`, `pmdg-777`, `pmdg-777-300er` and `pmdg-777f`; each has its own calibration file. Keyboard combinations are saved separately in `hotkeys.ini` and apply to all aircraft.
 
 Selecting a profile manually turns off **Auto aircraft**. The loaded aircraft must still match before camera or calibration writes are enabled. When a fresh supported identity differs, status names both the detected aircraft and selected profile, and directs manual users to enable **Auto aircraft** or select the matching profile on Overview.
 
@@ -56,14 +56,15 @@ Night-boost preference revision 1 sets `night_boost` to 8 once for each existing
 | Saved field | Default | Range or purpose |
 | --- | --- | --- |
 | `enabled` | 1 | Legacy saved field; runtime enable follows Connect/Disconnect. Connect and Auto-connect enable operation regardless of a saved 0. |
-| `follow_taxi` | 1; iniBuilds A380: 0 | Read aircraft TAXI controls; 0 uses manual control |
+| `follow_taxi` | 1; iniBuilds A380 and PMDG 777: 0 | Read aircraft TAXI controls; 0 uses manual control |
 | `auto_detect` | 1 | Detect the PFD pair using the profile's policy |
 | `camera_rate` | 10 | Integer 5–60 (minimum 5), activation limit per camera. The first keep-install of this version writes 10 into existing `settings.ini` and known aircraft profile INIs; later upgrades keep a user-changed rate. Missing keys use 10. The bridge caps the rate it requests at the aircraft's useful maximum (PFD refresh or the camera-manager ceiling of 15) and reports the rate in use; the saved value is never rewritten. |
 | `parked_rate` | 5 | Schedule rate while ground speed stays below 0.2 kt for 3 s; a sample at or above 0.35 kt restores `camera_rate` at once, and 0.2–0.35 kt holds the current state (parked stays parked, moving stays moving). 0 disables the floor; other values are kept within 5–60. Views stay open while parked. |
 | `camera_rate_revision` | 2 after the one-shot install migrate | Installer migration marker on `settings.ini`; not a user control. Later installs skip the rate write when this is 2. Revision 1 (the earlier force-5 migrate) is migrated once to 10. |
 | `single_camera` | 0 | Render only the nose for a performance test |
 | `automatic_exposure` | 1 | Adjust exposure from ambient light |
-| `exposure` | −11.5 for all aircraft | Daytime EV, −16 to +4 |
+| `exposure` | −8 for all aircraft | Daytime EV, −16 to +4. Keep-install forces −8 once when `exposure_revision` is missing or below 1. |
+| `exposure_revision` | 1 after the one-shot install migrate | Installer migration marker on `settings.ini`; not a user control. Later installs skip the exposure write when this is 1. |
 | `speed_red`, `speed_green`, `speed_blue` | 22 / 255, 109 / 255, 19 / 255 for all aircraft (`#166D13`) | Normalized RGB, 0–1, edited with the colour picker |
 | `guide_red`, `guide_green`, `guide_blue` | 1, 0, 1 for all aircraft (`#FF00FF`) | Normalized RGB, 0–1, saved in `[guides]`; **Marking colour** changes all reference marks independently of GS |
 | `night_boost` | 8 | Maximum automatic boost, 0–8 EV; existing profiles migrate once |

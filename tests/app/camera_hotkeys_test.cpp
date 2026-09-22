@@ -34,7 +34,7 @@ HWND shortcut_fixture() {
 void shortcut_command(HWND editor, int id) {
   shortcut_dialog(editor, WM_COMMAND, MAKEWPARAM(id, BN_CLICKED), 0);
 }
-struct FakeRegistration {
+  struct FakeRegistration {
   inline static std::array<bool, 3> active{};
   inline static unsigned adds{}, removes{};
   inline static int blocked = -1;
@@ -253,6 +253,14 @@ void aircraft_hotkey_intent_checks() {
   manual.follow_taxi = 0;
   require(request_camera_hotkey(manual, 2, {}, 0) == CameraHotkeyResult::manual && manual.manual_mask == 3 && !manual.taxi_request,
           "INOP aircraft uses manual display intent without aircraft commands");
+  Settings pmdg;
+  pmdg.profile = profiles::Pmdg777.id;
+  pmdg.follow_taxi = 0;
+  require(request_camera_hotkey(pmdg, 2, {}, 0) == CameraHotkeyResult::manual && pmdg.manual_mask == 3 && !pmdg.taxi_request,
+          "PMDG uses the same Both shortcut and writes no aircraft variable");
+  require(request_camera_hotkey(pmdg, 0, {}, 0) == CameraHotkeyResult::manual && pmdg.manual_mask == 2 && !pmdg.taxi_request,
+          "PMDG Left toggles the same way as the other profiles");
+  require(request_camera_hotkey(pmdg, 3, {}, 0) == CameraHotkeyResult::unavailable, "There is no fourth camera shortcut");
   Settings saved;
   saved.profile = 2;
   saved.taxi_request = 9;
@@ -297,8 +305,8 @@ void ui_checks() {
   SetWindowTextW(rate, L"-");
   const auto original_rate = current.camera_rate;
   const auto editor = shortcut_fixture();
-  require(GetDlgItem(editor, 620) && GetDlgItem(editor, 621) && GetDlgItem(editor, 622),
-          "Flight-deck shortcut editor exposes all three configurable actions");
+  require(GetDlgItem(editor, 620) && GetDlgItem(editor, 621) && GetDlgItem(editor, 622) && !GetDlgItem(editor, 623),
+          "Flight-deck shortcut editor exposes Left, Right and Both");
   shortcut_command(editor, 631);
   require(!hotkey_draft[1].key && hotkey_draft != hotkey_saved, "Clear marks a shortcut disabled without applying it early");
   shortcut_command(editor, IDOK);

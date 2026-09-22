@@ -23,7 +23,7 @@ void require(bool value, const char* label) {
   }
 }
 bool equal(const nc::MountPair& a, const nc::MountPair& b) {
-  for (unsigned i = 0; i < 2; ++i)
+  for (unsigned i = 0; i < a.size(); ++i)
     if (a[i].position_m != b[i].position_m || a[i].pitch_degrees != b[i].pitch_degrees || a[i].yaw_degrees != b[i].yaw_degrees ||
         a[i].fov_radians != b[i].fov_radians)
       return false;
@@ -60,7 +60,20 @@ void parser_tests() {
   }
 }
 void write_config(const std::wstring& path, const std::string& contents) {
-  HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+  // The mount worker may already hold a shared read on this path. Open with the
+  // same share mask and retry brief sharing/lock conflicts so the test can
+  // replace contents without discarding a readable two-camera config.
+  HANDLE file = INVALID_HANDLE_VALUE;
+  for (unsigned attempt = 0; attempt < 100 && file == INVALID_HANDLE_VALUE; ++attempt) {
+    file = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, CREATE_ALWAYS,
+                       FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+      const auto error = GetLastError();
+      if (error != ERROR_SHARING_VIOLATION && error != ERROR_LOCK_VIOLATION && error != ERROR_ACCESS_DENIED)
+        break;
+      Sleep(10);
+    }
+  }
   require(file != INVALID_HANDLE_VALUE, "Open own test config");
   DWORD bytes = 0;
   require(WriteFile(file, contents.data(), static_cast<DWORD>(contents.size()), &bytes, nullptr) && bytes == contents.size(),
@@ -112,7 +125,9 @@ void worker_tests() {
 namespace taxi_camera::native_camera {
 // Link the production worker to a numeric mailbox fixture, never the engine.
 bool request_scene_mounts(const MountPair& mounts) noexcept {
-  if (!valid_mounts(mounts))
+  // Accept a fully filled MountPair (legacy nose/tail files duplicate tail into
+  // the third slot in parse_mount_config). Do not require a third file line.
+  if (!valid_mounts(mounts, kMaxCameraFeeds))
     return false;
   AcquireSRWLockExclusive(&test_lock);
   latest = mounts;
