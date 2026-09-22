@@ -81,7 +81,8 @@ struct State {
   unsigned calibration_samples = 0;
   std::uint64_t calibration_camera_ms = 0;
   double candidate_correction = 0;
-  Vector3 candidate_private{}, candidate_public{};
+  // Altitudes only: taxiing moves both cameras horizontally between responses.
+  double candidate_private_altitude = 0, candidate_public_altitude = 0;
   const char* error = "not_initialized";
 };
 State state;
@@ -1037,17 +1038,19 @@ bool calibrate_body_pose(const Vector3& position, float fov, std::uint64_t now, 
   if (!good)
     state.calibration_samples = local.public_ready ? 0 : state.calibration_samples;
   else if (state.camera_ms != state.calibration_camera_ms) {
-    const auto public_position = body_math::ecef(state.camera.position[0], state.camera.position[1], state.camera.position[2]);
-    // Initial calibration requires a momentarily settled camera. Three
-    // distinct responses and both positions stable within2cm prevent a
+    const double public_altitude = state.camera.position[2];
+    // Initial calibration requires a vertically settled camera. Three
+    // distinct responses and both altitudes stable within2cm prevent a
     // vertically moving pilot camera becoming a permanent altitude bias.
+    // The correction is vertical only, so horizontal travel between responses
+    // is not compared: arrival recalibration must converge while taxiing
+    // (issue 82). Each sample still passes the 0.5m horizontal match above.
     if (!state.calibration_samples || std::abs(delta - state.candidate_correction) > 0.02 ||
-        body_math::distance(position, state.candidate_private) > 0.02 ||
-        body_math::distance(public_position, state.candidate_public) > 0.02) {
+        std::abs(lla[2] - state.candidate_private_altitude) > 0.02 || std::abs(public_altitude - state.candidate_public_altitude) > 0.02) {
       state.calibration_samples = 0;
       state.candidate_correction = delta;
-      state.candidate_private = position;
-      state.candidate_public = public_position;
+      state.candidate_private_altitude = lla[2];
+      state.candidate_public_altitude = public_altitude;
     }
     state.calibration_camera_ms = state.camera_ms;
     if (++state.calibration_samples >= 3) {

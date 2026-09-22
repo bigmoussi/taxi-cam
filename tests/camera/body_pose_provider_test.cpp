@@ -361,6 +361,42 @@ void session_readiness_regressions(Check check) {
       check(sample < 2 ? !arrived : arrived);
     }
     check(sample_body_pose(now).valid);
+    // Issue 82: TAXI is usually pressed while vacating the runway, so arrival
+    // recalibration must converge while the aircraft rolls. Each response
+    // moves both cameras about 0.4m north (8 m/s); the altitude correction is
+    // unchanged and must lock after three responses.
+    reset_body_pose_calibration();
+    unsigned response = 0;
+    const auto roll = [&](unsigned sample, double climb) {
+      std::array<double, 7> moving_bv = far_bv;
+      std::array<double, 3> moving_cv = far_cv;
+      moving_bv[0] += sample * 3.6e-6;
+      moving_cv[0] += sample * 3.6e-6;
+      moving_bv[2] += sample * climb;
+      moving_cv[2] += sample * climb;
+      std::memcpy(body.data() + 40, moving_bv.data(), sizeof(moving_bv));
+      std::memcpy(camera.data() + 12, moving_cv.data(), sizeof(moving_cv));
+      now = GetTickCount64() + 50 + ++response;
+      supply();
+      return body_math::ecef(moving_cv[0], moving_cv[1], moving_cv[2]);
+    };
+    bool rolled = false;
+    for (unsigned sample = 0; sample < 3; ++sample) {
+      CameraMatchReport latch;
+      rolled = calibrate_body_pose(roll(sample, 0), static_cast<float>(fov), now, &latch);
+      check(latch.geometry && latch.calibration_samples == sample + 1);
+      check(sample < 2 ? !rolled : rolled);
+    }
+    check(sample_body_pose(now).valid);
+    // A camera still moving vertically cannot become the altitude bias, even
+    // when the public and private samples agree on every response.
+    reset_body_pose_calibration();
+    for (unsigned sample = 0; sample < 6; ++sample) {
+      CameraMatchReport latch;
+      check(!calibrate_body_pose(roll(sample, 0.05), static_cast<float>(fov), now, &latch));
+      check(latch.geometry && latch.calibration_samples == 1);
+    }
+    check(sample_body_pose(now).calibration_required);
     // Restore the original local coordinates for the refusal fixture below.
     std::memcpy(body.data() + 40, bv.data(), sizeof(bv));
     std::memcpy(camera.data() + 12, cv.data(), sizeof(cv));
