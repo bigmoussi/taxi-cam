@@ -315,10 +315,11 @@ function Set-TaxiForcedCameraRate([object[]]$Snapshot, [int]$Rate = 10) {
     return $true
 }
 
-# One-shot install migrate for daytime exposure: write display exposure=-8 once
-# into existing settings.ini and known profile INIs, then leave later user
-# overrides alone. Stamp lives on settings.ini so a companion profile save
-# cannot clear it.
+# One-shot install migrate for daytime exposure: write ONLY display exposure=-8
+# into existing settings.ini and known profile INIs. Do not touch mounts,
+# calibration_budget, camera_rate, guides, or any other key. Stamp lives on
+# settings.ini so a companion profile save cannot clear it; later installs skip
+# when exposure_revision already matches.
 $script:TaxiExposureMigrationRevision = '1'
 $script:TaxiForcedExposureEv = '-8'
 
