@@ -1,20 +1,27 @@
 diff --git a/src/bridge/d3d12_bridge.cpp b/src/bridge/d3d12_bridge.cpp
 --- a/src/bridge/d3d12_bridge.cpp
 +++ b/src/bridge/d3d12_bridge.cpp
-@@ -1058,8 +1058,15 @@ void invalidate(void*, ID3D12GraphicsCommandList* native, std::uint64_t id, std:
+@@ -20,6 +20,7 @@
+ #include "../hooks/render_boundary_observer.hpp"
+ #include "native_hooks.hpp"
+ #include "root_layout.hpp"
++#include "source_invalidation_policy.hpp"
+ 
+ namespace taxi_camera::standalone {
+ namespace {
+@@ -1058,8 +1059,14 @@ void invalidate(void*, ID3D12GraphicsCommandList* native, std::uint64_t id, std:
      list->pending_rt = {};
      list->pfd_dirty = false;
    }
+-  const bool scoped =
+-      (reasons & ~(boundary::InvalidationPassBegin | boundary::InvalidationSplitBarrier | boundary::InvalidationAliasOrDiscard)) == 0;
 +  // BeginRenderPass publishes exact RTV descriptors through pass_targets before
 +  // boundary invalidation, and End keeps those targets until pass_ended. When
 +  // PassState is the only additional uncertainty, retire those exact live
 +  // generations instead of every source previously named by this recording.
 +  // Stronger uncertainty (barrier batch, unobserved work, disabled observer or
 +  // failed Reset) must still take the conservative recording/global fallback.
-   const bool scoped =
--      (reasons & ~(boundary::InvalidationPassBegin | boundary::InvalidationSplitBarrier | boundary::InvalidationAliasOrDiscard)) == 0;
-+      (reasons & ~(boundary::InvalidationPassBegin | boundary::InvalidationPassState | boundary::InvalidationSplitBarrier |
-+                   boundary::InvalidationAliasOrDiscard)) == 0;
++  const bool scoped = source_invalidation::can_scope_to_exact_targets(reasons);
    if (scoped && list->count) {
      std::array<ID3D12Resource*, 8> targets{};
      std::array<std::uint64_t, 8> generations{};
