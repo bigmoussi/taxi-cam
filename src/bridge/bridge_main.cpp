@@ -1001,7 +1001,7 @@ DWORD run_impl() {
           "pass_no_rts=%llu pass_unresolved_rts=%llu invalid_draws=%llu "
           "lease_failures=%llu global_aliases=%llu overflows=%llu reasons=0x%x capture_stalled=%u "
           "wipes=%llu last_wipe=%s retired_recordings=%llu unordered_consumers=%llu retirements=%llu "
-          "barrier_max=%llu barrier_truncated=%llu probe_ms=%.3f queries=%llu query_ms=%.3f read_ms=%.3f "
+          "barrier_max=%llu barrier_truncated=%llu probe_ms=%.3f queries=%llu query_ms=%.3f read_ms=%.3f reads=%llu read_bytes=%llu "
           "allocation_queries=%llu page_queries=%llu region_queries=%llu aa_ms=%.3f "
           "inspections=%llu updates=%llu clear_states=%llu | %.256s",
           applied_profile, aircraft_matches, connected, requested, static_cast<unsigned long long>(control.busy_reads()), buttons.valid,
@@ -1029,6 +1029,7 @@ DWORD run_impl() {
           static_cast<unsigned long long>(boundaries.maximum_legacy_batch),
           static_cast<unsigned long long>(boundaries.metadata_truncated_calls), scene.observer_last_ms,
           static_cast<unsigned long long>(scene.performance.query_calls), scene.performance.query_ms, scene.performance.read_ms,
+          static_cast<unsigned long long>(scene.performance.read_calls), static_cast<unsigned long long>(scene.performance.requested_bytes),
           static_cast<unsigned long long>(scene.performance.query_allocation_calls),
           static_cast<unsigned long long>(scene.performance.query_page_calls),
           static_cast<unsigned long long>(scene.performance.query_fallback_calls),

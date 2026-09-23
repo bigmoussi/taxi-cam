@@ -48,8 +48,21 @@ struct Identity {
 constexpr UINT known_render_pass_flags = static_cast<UINT>(D3D12_RENDER_PASS_FLAG_ALLOW_UAV_WRITES) |
                                          static_cast<UINT>(D3D12_RENDER_PASS_FLAG_SUSPENDING_PASS) |
                                          static_cast<UINT>(D3D12_RENDER_PASS_FLAG_RESUMING_PASS) | 0x8u | 0x10u;
-SRWLOCK registry_lock = SRWLOCK_INIT, control_lock = SRWLOCK_INIT;
-std::unordered_map<ID3D12GraphicsCommandList*, Identity> identities;
+SRWLOCK control_lock = SRWLOCK_INIT;
+// Identities are split by list pointer so recording threads, which each record
+// different lists, do not share one lock word on every draw. A key always maps
+// to the same shard; whole-registry changes take every shard in index order.
+struct alignas(64) Shard {
+  SRWLOCK lock = SRWLOCK_INIT;
+  std::unordered_map<ID3D12GraphicsCommandList*, Identity> identities;
+};
+std::array<Shard, 16> shards;
+constexpr std::size_t kMaximumIdentities = 8192;
+std::atomic<std::size_t> identity_count{0};
+Shard& shard_for(const ID3D12GraphicsCommandList* key) noexcept {
+  const auto hash = (reinterpret_cast<std::uintptr_t>(key) >> 4) * 0x9e3779b97f4a7c15ull;
+  return shards[(hash >> 60) & 15];
+}
 Callbacks callbacks;
 std::atomic<bool> enabled{false};
 // Advanced before every exclusive registry release, so a reader that sees the
@@ -89,14 +102,50 @@ struct Lock {
       AcquireSRWLockShared(&lock);
   }
   ~Lock() {
-    if (exclusive && &lock == &registry_lock)
-      identity_changes.fetch_add(1, std::memory_order_release);
     if (exclusive)
       ReleaseSRWLockExclusive(&lock);
     else
       ReleaseSRWLockShared(&lock);
   }
 };
+// One identity shard. Every exclusive release advances identity_changes first.
+struct ShardLock {
+  Shard& shard;
+  bool exclusive;
+  ShardLock(Shard& value, bool write) : shard(value), exclusive(write) {
+    if (write)
+      AcquireSRWLockExclusive(&shard.lock);
+    else
+      AcquireSRWLockShared(&shard.lock);
+  }
+  ~ShardLock() {
+    if (exclusive) {
+      identity_changes.fetch_add(1, std::memory_order_release);
+      ReleaseSRWLockExclusive(&shard.lock);
+    } else {
+      ReleaseSRWLockShared(&shard.lock);
+    }
+  }
+};
+// Exclusive over every shard, acquired in index order.
+struct AllShardsLock {
+  AllShardsLock() {
+    for (auto& shard : shards)
+      AcquireSRWLockExclusive(&shard.lock);
+  }
+  ~AllShardsLock() {
+    identity_changes.fetch_add(1, std::memory_order_release);
+    for (auto it = shards.rbegin(); it != shards.rend(); ++it)
+      ReleaseSRWLockExclusive(&it->lock);
+  }
+};
+// Runs f(identities, iterator) with key's shard locked; iterator may be end().
+template <class F>
+auto with_identity(ID3D12GraphicsCommandList* key, bool exclusive, F&& f) {
+  auto& shard = shard_for(key);
+  const ShardLock lock(shard, exclusive);
+  return f(shard.identities, shard.identities.find(key));
+}
 // ReShade's command-list proxy and the native list are different pointers.
 // IID_UnwrappedObject returns the native object and AddRefs it. The test fake
 // returns the same pointer without AddRef, so that result is not released.
@@ -116,19 +165,31 @@ ID3D12GraphicsCommandList* identity_key(ID3D12GraphicsCommandList* list) noexcep
   unwrapped->Release();
   return native;
 }
+Identity find_identity(ID3D12GraphicsCommandList* key, bool& found) noexcept {
+  return with_identity(key, false, [&](auto& identities, auto it) {
+    found = it != identities.end();
+    return found ? it->second : Identity{};
+  });
+}
+// Registered keys are unwrapped native lists, and hooks receive native lists,
+// so an entry under the argument itself needs no unwrap. Only a miss pays for
+// QueryInterface, which finds the native list behind a proxy argument.
 Identity lookup(ID3D12GraphicsCommandList* list) noexcept {
+  bool found = false;
+  const auto direct = find_identity(list, found);
+  if (found)
+    return direct;
   const auto key = identity_key(list);
-  const Lock lock(registry_lock, false);
-  const auto it = identities.find(key);
-  return it == identities.end() ? Identity{} : it->second;
+  return key == list ? Identity{} : find_identity(key, found);
 }
 void disable_capture() noexcept {
   enabled.store(false, std::memory_order_release);
   // A failed/changed hook may have missed pass calls. Never revive the previous
   // recording's empty-pass assumption when a later registration repairs slots.
-  const Lock lock(registry_lock, true);
-  for (auto& entry : identities)
-    entry.second.invalid = true;
+  const AllShardsLock lock;
+  for (auto& shard : shards)
+    for (auto& entry : shard.identities)
+      entry.second.invalid = true;
 }
 bool same_safe(ID3D12GraphicsCommandList* list, std::uint64_t generation) noexcept {
   const auto current = lookup(list);
@@ -196,11 +257,11 @@ void observe_work(ID3D12GraphicsCommandList* list) noexcept {
   if (!identity.generation || identity.prior_work || identity.active || identity.suspended || identity.invalid)
     return;
   const auto key = identity_key(list);
-  const Lock lock(registry_lock, true);
-  const auto it = identities.find(key);
-  if (it != identities.end() && it->second.generation == identity.generation && !it->second.active && !it->second.suspended &&
-      !it->second.invalid)
-    it->second.prior_work = true;
+  with_identity(key, true, [&](auto& identities, auto it) {
+    if (it != identities.end() && it->second.generation == identity.generation && !it->second.active && !it->second.suspended &&
+        !it->second.invalid)
+      it->second.prior_work = true;
+  });
 }
 // The identity read before the draw is still current unless some identity
 // changed while it ran. That saves a second unwrap and registry lock per draw.
@@ -453,7 +514,9 @@ void STDMETHODCALLTYPE begin(ID3D12GraphicsCommandList4* list,
   const auto identity = lookup(key);
   bool ordinary_access = false;
   if (identity.generation) {
-    const Lock lock(registry_lock, true);
+    auto& shard = shard_for(key);
+    const ShardLock lock(shard, true);
+    auto& identities = shard.identities;
     const auto it = identities.find(key);
     if (it != identities.end() && it->second.generation == identity.generation) {
       auto& value = it->second;
@@ -525,7 +588,9 @@ void end_impl(ID3D12GraphicsCommandList4* list, End original) noexcept {
   // End access can discard/resolve; no image is copied here and no RTV binding
   // is presumed to survive. Only later actual transitions prove layout/state.
   if (identity.generation) {
-    const Lock lock(registry_lock, true);
+    auto& shard = shard_for(key);
+    const ShardLock lock(shard, true);
+    auto& identities = shard.identities;
     const auto it = identities.find(key);
     if (it != identities.end() && it->second.generation == identity.generation) {
       if (!it->second.active)
@@ -918,16 +983,21 @@ Result register_list(ID3D12GraphicsCommandList* list, std::uint64_t generation, 
   }
   {
     const auto key = registry_key(list);
-    const Lock lock(registry_lock, true);
+    auto& shard = shard_for(key);
+    const ShardLock lock(shard, true);
+    auto& identities = shard.identities;
     const auto found = identities.find(key);
     if (found != identities.end() && found->second.generation != generation)
       return result("identity_not_retired");
     if (found == identities.end()) {
-      if (identities.size() >= 8192)
+      if (identity_count.fetch_add(1, std::memory_order_relaxed) >= kMaximumIdentities) {
+        identity_count.fetch_sub(1, std::memory_order_relaxed);
         return result("identity_limit");
+      }
       try {
         identities.emplace(key, Identity{generation});
       } catch (...) {
+        identity_count.fetch_sub(1, std::memory_order_relaxed);
         return result("allocation_failed");
       }
     }
@@ -937,24 +1007,29 @@ Result register_list(ID3D12GraphicsCommandList* list, std::uint64_t generation, 
 }
 void unregister_list(ID3D12GraphicsCommandList* list, std::uint64_t generation) noexcept {
   const auto key = registry_key(list);
-  const Lock lock(registry_lock, true);
+  auto& shard = shard_for(key);
+  const ShardLock lock(shard, true);
+  auto& identities = shard.identities;
   const auto it = identities.find(key);
-  if (it != identities.end() && it->second.generation == generation)
+  if (it != identities.end() && it->second.generation == generation) {
     identities.erase(it);
+    identity_count.fetch_sub(1, std::memory_order_relaxed);
+  }
 }
 // Hooks receive the native list, which is normally its own registry key. An
 // entry under that exact pointer with the caller's generation belongs to this
 // list incarnation, so Reset and invalidation skip registry_key's readability
 // probe (VirtualQuery and ReadProcessMemory) and unwrap. Anything else, such as
 // a proxy argument, takes the checked path unchanged.
-Identity* same_key_identity(ID3D12GraphicsCommandList* list, std::uint64_t generation) noexcept {
-  const auto it = identities.find(list);
-  return it != identities.end() && it->second.generation == generation ? &it->second : nullptr;
+Identity* same_key_identity(Shard& shard, ID3D12GraphicsCommandList* list, std::uint64_t generation) noexcept {
+  const auto it = shard.identities.find(list);
+  return it != shard.identities.end() && it->second.generation == generation ? &it->second : nullptr;
 }
 void successful_reset(ID3D12GraphicsCommandList* list, std::uint64_t generation) noexcept {
   {
-    const Lock lock(registry_lock, true);
-    if (auto* identity = same_key_identity(list, generation)) {
+    auto& shard = shard_for(list);
+    const ShardLock lock(shard, true);
+    if (auto* identity = same_key_identity(shard, list, generation)) {
       *identity = Identity{generation, false, false, !enabled.load(std::memory_order_acquire)};
       return;
     }
@@ -962,7 +1037,9 @@ void successful_reset(ID3D12GraphicsCommandList* list, std::uint64_t generation)
   const auto key = registry_key(list);
   if (key == list)
     return;
-  const Lock lock(registry_lock, true);
+  auto& shard = shard_for(key);
+  const ShardLock lock(shard, true);
+  auto& identities = shard.identities;
   const auto it = identities.find(key);
   if (it != identities.end() && it->second.generation == generation)
     it->second = Identity{generation, false, false, !enabled.load(std::memory_order_acquire)};
@@ -974,8 +1051,9 @@ void invalidate_recording(ID3D12GraphicsCommandList* list, std::uint64_t generat
   auto key = list;
   bool found = false;
   {
-    const Lock lock(registry_lock, true);
-    if (auto* identity = same_key_identity(list, generation)) {
+    auto& shard = shard_for(list);
+    const ShardLock lock(shard, true);
+    if (auto* identity = same_key_identity(shard, list, generation)) {
       identity->invalid = true;
       found = true;
     }
@@ -984,7 +1062,9 @@ void invalidate_recording(ID3D12GraphicsCommandList* list, std::uint64_t generat
     key = registry_key(list);
     if (key == list)
       return;
-    const Lock lock(registry_lock, true);
+    auto& shard = shard_for(key);
+    const ShardLock lock(shard, true);
+    auto& identities = shard.identities;
     const auto it = identities.find(key);
     if (it == identities.end() || it->second.generation != generation)
       return;
@@ -1011,8 +1091,10 @@ Result remove() noexcept {
       return result("active_end_removal_incomplete", error);
   }
   {
-    const Lock registry(registry_lock, true);
-    identities.clear();
+    const AllShardsLock registry;
+    for (auto& shard : shards)
+      shard.identities.clear();
+    identity_count.store(0, std::memory_order_relaxed);
   }
   return result("removed");
 }

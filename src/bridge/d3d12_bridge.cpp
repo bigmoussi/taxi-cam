@@ -788,6 +788,12 @@ void consider_live_resource(ID3D12GraphicsCommandList* list, ID3D12Resource* nat
     r.live_bind.clear(list);
     return;
   }
+  // backfill_displays is atomic. A resource outside it makes the bind
+  // ambiguous whatever the registry holds, so only displays take the lock.
+  if (!is_backfill_display(r, native)) {
+    r.live_bind.note(list, nullptr);
+    return;
+  }
   const RegistryLock lock(r, wait_budget::recording_us, ContentionSite::registry_recording);
   if (!lock) {
     r.live_bind.clear(list);  // An unverified bind hint must not survive.
@@ -930,6 +936,17 @@ struct KnownListCache {
   void remember(const std::shared_ptr<List>& item) noexcept {
     if (item)
       entries[next++ % entries.size()] = {item->native, item->id, item->recording.load(std::memory_order_acquire), item};
+  }
+  // A native Reset on this thread holds the live registration and has just
+  // published its new recording. Record that recording in place so the hooks
+  // that follow on this thread do not take the registry lock to relearn it.
+  void refresh(const std::shared_ptr<List>& item) noexcept {
+    for (auto& entry : entries)
+      if (entry.native == item->native) {
+        entry = {item->native, item->id, item->recording.load(std::memory_order_acquire), item};
+        return;
+      }
+    remember(item);
   }
 };
 thread_local KnownListCache known_lists;
@@ -1307,14 +1324,17 @@ void after_draw(void*, ID3D12GraphicsCommandList* native, std::uint64_t id, bool
   std::array<ID3D12Resource*, 8> sources;
   std::array<std::uint64_t, 8> ids;
   UINT count = 0;
+  bool selected_target = false;
   for (UINT i = 0; i < list->count; ++i) {
     const auto& target = list->targets[i];
     if (target.resource && target.resource->alive && !target.mip) {
       if (target.resource->display_shape)
         target.resource->draws.fetch_add(1, std::memory_order_relaxed);
-      if (maybe_selected(target.resource->native))
+      if (maybe_selected(target.resource->native)) {
+        selected_target = true;
         list->submission_proof.note_render_target_write({reinterpret_cast<std::uint64_t>(target.resource->native), target.resource->id},
                                                         12);
+      }
       if (observed) {
         if (allowed)
           list->copy_proof.after_draw({reinterpret_cast<std::uint64_t>(target.resource->native), target.resource->id});
@@ -1337,7 +1357,11 @@ void after_draw(void*, ID3D12GraphicsCommandList* native, std::uint64_t id, bool
   // TAA/DLSS resolve often binds the PFD as one of several RTs; those draws
   // must still schedule a later overlay so an earlier stamp cannot lose to a
   // temporal mix of the native instrument.
-  list->pfd_dirty = allowed && list->depth_known && list->count >= 1;
+  // stage_pfd only stages a bound target routed to an active or calibrating
+  // side, which is exactly what maybe_selected reports. A draw with no such
+  // target leaves nothing to stage, so it does not send the next OM boundary
+  // through the registry lock.
+  list->pfd_dirty = allowed && list->depth_known && list->count >= 1 && selected_target;
   list->pfd_transition = false;
 }
 // Stage only actual typed RTVs established by a nonzero native draw.
@@ -2297,7 +2321,8 @@ HRESULT STDMETHODCALLTYPE close(ID3D12GraphicsCommandList* native) noexcept {
   if (!owned_depth && registry().ready) {
     const OwnedWork guard;
     registry().frame_pulse.fetch_add(1, std::memory_order_relaxed);
-    clear_live_bind(native);
+    if (registry().live_backfill.load(std::memory_order_relaxed))
+      clear_live_bind(native);
     observe_safely([&] {
       if (auto item = find_list(native); item && item->ready && !item->closing) {
         item->closing = true;
@@ -2376,6 +2401,10 @@ HRESULT STDMETHODCALLTYPE reset(ID3D12GraphicsCommandList* native, ID3D12Command
   // do not depend on demand. Outside observation_mutex, one thread's Reset no
   // longer waits while another thread retires its previous recording.
   if (item->ready) {
+#ifdef TAXI_METADATA_BATCH_VALIDATION
+    if (!bypass_known_list_cache)
+#endif
+      known_lists.refresh(item);
     if (registry().live_backfill.load(std::memory_order_relaxed))
       registry().live_bind.clear(native);
     boundary::successful_reset(native, item->id);
@@ -2422,8 +2451,37 @@ struct ClearState {
 struct Heaps {
   static void apply(List& l, UINT n, ID3D12DescriptorHeap* const* p) { l.graphics.descriptor_heaps(n, p); }
 };
+// Every recording thread binds the same few root signatures. A per-thread cache
+// of live registrations avoids the registry lock on each bind. Roots are only
+// erased from the registry after they retire, and a retired entry is never used.
+struct KnownRootCache {
+  struct Entry {
+    ID3D12RootSignature* native{};
+    std::shared_ptr<Root> item;
+  };
+  std::array<Entry, 8> entries{};
+  unsigned next{};
+  const Root* find(ID3D12RootSignature* native) noexcept {
+    for (auto& entry : entries)
+      if (entry.native == native) {
+        if (entry.item && entry.item->alive.load(std::memory_order_acquire))
+          return entry.item.get();
+        entry = {};
+      }
+    return nullptr;
+  }
+  void remember(ID3D12RootSignature* native, const std::shared_ptr<Root>& item) noexcept {
+    entries[next++ % entries.size()] = {native, item};
+  }
+};
+thread_local KnownRootCache known_roots;
 struct GraphicsRoot {
   static void apply(List& l, ID3D12RootSignature* p) {
+    if (p)
+      if (const auto* cached = known_roots.find(p)) {
+        l.graphics.bind_observed_root(p, cached->id);
+        return;
+      }
     auto& r = registry();
     const RegistryLock lock(r, wait_budget::recording_us, ContentionSite::registry_recording);
     if (!lock) {
@@ -2442,10 +2500,12 @@ struct GraphicsRoot {
       }
       it = r.roots.find(p);
     }
-    if (it != r.roots.end() && it->second->alive)
+    if (it != r.roots.end() && it->second->alive) {
       l.graphics.bind_observed_root(p, it->second->id);
-    else
+      known_roots.remember(p, it->second);
+    } else {
       l.graphics.bind_observed_root(nullptr, 0);
+    }
   }
 };
 struct Table {
@@ -2658,7 +2718,9 @@ struct ClearRenderTarget {
   // a queue copy placed on the previous list, and the frame is the clear colour.
   static void apply(List& l, D3D12_CPU_DESCRIPTOR_HANDLE handle, const FLOAT*, UINT, const D3D12_RECT*) {
     l.submission_proof.gpu_work(48);
-    if (!handle.ptr)
+    // note() records only a selected display, so with nothing selected the
+    // descriptor lookup below could not change the outcome.
+    if (!handle.ptr || !registry().selected_mask.load(std::memory_order_relaxed))
       return;
     for (UINT i = 0; i < l.count; ++i) {
       if (l.targets[i].rtv != handle.ptr)
