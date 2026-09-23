@@ -1749,6 +1749,14 @@ void observer(void* manager) noexcept {
               // Bitmaps may still be settling after an AA/upscaler switch. Keep
               // the closed pair and retry on a later manager update.
               runtime.resize_recovery.release_resize_authorization();
+              // Issue 69 diagnostic: after Frame Generation is toggled in flight
+              // the pair stays closed here indefinitely. Show which sizes differ.
+              char sizes[160];
+              std::snprintf(sizes, sizeof(sizes), " Output %dx%d/%dx%d, retained panes %dx%d/%dx%d.", views[0].output_dimensions[0],
+                            views[0].output_dimensions[1], views[1].output_dimensions[0], views[1].output_dimensions[1],
+                            runtime.allocation_panes[0][0], runtime.allocation_panes[0][1], runtime.allocation_panes[1][0],
+                            runtime.allocation_panes[1][1]);
+              runtime.message += sizes;
             } else {
               const bool restored = outputs_unchanged && timed(runtime, ProbeStage::lifecycle, [&] {
                                       bool ok = true;
