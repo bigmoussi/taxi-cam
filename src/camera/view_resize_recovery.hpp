@@ -111,6 +111,10 @@ class ViewResizeRecovery {
   }
   bool pending() const noexcept { return pending_; }
   bool failed() const noexcept { return failed_; }
+  // Diagnostics only (issue 69): where a recovery that never completes waits.
+  bool closed_seen() const noexcept { return closed_seen_; }
+  bool resize_issued() const noexcept { return resize_issued_; }
+  std::uint64_t closed_update() const noexcept { return closed_update_; }
   void clear() noexcept { *this = {}; }  // Explicit lifecycle reset, never automatic retry.
   void mark_failed() noexcept {
     failed_ = true;

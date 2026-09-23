@@ -1736,6 +1736,19 @@ void observer(void* manager) noexcept {
             }
           }
           runtime.message = "Graphics settings changed; camera IDs retained while both render gates close.";
+          {
+            // Issue 69 diagnostic: the pair can stay here indefinitely after a
+            // Frame Generation toggle. Record which recovery step it waits in.
+            static constexpr const char* actions[] = {"wait", "close_gates", "resize", "blocked"};
+            char step[200];
+            std::snprintf(step, sizeof(step), " [recovery=%s update=%llu closed_update=%llu seen=%u issued=%u flags=%llx/%llx status=%u/%u complete=%u/%u]",
+                          actions[static_cast<unsigned>(action) & 3u], static_cast<unsigned long long>(runtime.updates),
+                          static_cast<unsigned long long>(runtime.resize_recovery.closed_update()), runtime.resize_recovery.closed_seen(),
+                          runtime.resize_recovery.resize_issued(), static_cast<unsigned long long>(views[0].flags[0]),
+                          static_cast<unsigned long long>(views[1].flags[0]),
+                          static_cast<unsigned>(views[0].status), static_cast<unsigned>(views[1].status), views[0].complete, views[1].complete);
+            runtime.message += step;
+          }
           bool restored_now = false;
           if (action == ViewResizeRecovery::Action::resize) {
             const bool retainable = views[0].mode == 2 && views[1].mode == 2 && views[0].resource_present && views[1].resource_present;
