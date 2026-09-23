@@ -9,8 +9,10 @@
 // The PLEASE WAIT page from a compositor that never had camera inputs: black
 // everywhere except the centred text, drawn in the configured GS colour.
 unsigned waiting_page_case(ID3D12Device* device, const wchar_t* preview) {
-  constexpr unsigned Width = 768, Height = 763, Pitch = 768 * 4, Scale = 2, Advance = 16 * Scale, CellWidth = 12 * Scale;
-  constexpr unsigned TextWidth = (16 * 10 + 12) * Scale, TextHeight = 20 * Scale;
+  constexpr float Scale = Compositor::WaitingTextScale;
+  constexpr unsigned Width = 768, Height = 763, Pitch = 768 * 4, Advance = unsigned(16 * Scale), CellWidth = unsigned(12 * Scale);
+  constexpr unsigned TextWidth = Compositor::WaitingTextWidth, TextHeight = Compositor::WaitingTextHeight;
+  static_assert(TextWidth == 258 && TextHeight == 30, "PLEASE WAIT is the GS font at 1.5 times its size");
   constexpr unsigned Left = (Width - TextWidth) / 2, Top = (Height - TextHeight) / 2;
   constexpr std::array<std::array<float, 3>, 2> colours{{{22.f / 255, 109.f / 255, 19.f / 255}, {1.f, .5f, .25f}}};
   constexpr UINT64 FrameBytes = UINT64(Pitch) * Height;
@@ -74,7 +76,7 @@ unsigned waiting_page_case(ID3D12Device* device, const wchar_t* preview) {
           ++lit[cell];
       }
     for (unsigned cell = 0; cell < lit.size(); ++cell) {
-      require(cell == 6 ? lit[cell] == 0 : lit[cell] > 60, "Every PLEASE WAIT letter is drawn at full colour");
+      require(cell == 6 ? lit[cell] == 0 : lit[cell] > 25, "Every PLEASE WAIT letter is drawn at full colour");
       lit_total += lit[cell];
     }
     const auto same_cells = [&](unsigned a, unsigned b) {

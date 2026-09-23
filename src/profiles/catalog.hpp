@@ -95,7 +95,7 @@ inline constexpr unsigned side_mask(const AircraftProfile& p) noexcept {
 }
 // Minimum PLEASE WAIT time after a side starts drawing, and the camera-image
 // age that brings the page back while the side stays on.
-inline constexpr std::uint64_t WaitingPageMinimumMs = 2000;
+inline constexpr std::uint64_t WaitingPageMinimumMs = 1500;
 inline constexpr std::uint64_t WaitingPageStaleMs = 1000;
 inline constexpr AircraftProfile A380{1,
                                       "fbw-a380x",

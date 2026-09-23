@@ -510,7 +510,9 @@ void active_profile_switch_case(bool warp) {
   // black content except the centred text box. No stale camera pixel survives.
   const auto require_waiting_page = [&](const std::array<std::vector<unsigned char>, 2>& pixels, bool a350, UINT offset,
                                         const char* label) {
-    constexpr UINT TextLeft = (768 - 344) / 2, TextTop = (763 - 40) / 2;
+    constexpr UINT TextWidth = taxi_camera::CameraCompositorD3D12::WaitingTextWidth,
+                   TextHeight = taxi_camera::CameraCompositorD3D12::WaitingTextHeight;
+    constexpr UINT TextLeft = (768 - TextWidth) / 2, TextTop = (763 - TextHeight) / 2;
     UINT text_pixels = 0;
     for (UINT side = 0; side < 2; ++side) {
       const UINT left = a350 && side ? 838u : 0u, width = a350 ? 806u : 768u;
@@ -520,7 +522,7 @@ void active_profile_switch_case(bool warp) {
           const auto* pixel = pixels[side].data() + SIZE_T{y} * row_pitch + 4 * x;
           const auto wx = static_cast<UINT>((x - left - 16 + .5) * 768 / (width - 32));
           const auto wy = static_cast<UINT>((y - 12 + .5) * 763 / 751);
-          const bool text = wx + 1 >= TextLeft && wx <= TextLeft + 344 && wy + 1 >= TextTop && wy <= TextTop + 40;
+          const bool text = wx + 1 >= TextLeft && wx <= TextLeft + TextWidth && wy + 1 >= TextTop && wy <= TextTop + TextHeight;
           if (!text)
             require(pixel[0] == 0 && pixel[1] == 0 && pixel[2] == 0 && pixel[3] == 255, label);
           else if (pixel[1] > 64)

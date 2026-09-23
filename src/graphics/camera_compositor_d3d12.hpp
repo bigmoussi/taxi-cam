@@ -49,6 +49,13 @@ class CameraCompositorD3D12 {
   static constexpr UINT VisibleDividerTop = 251;
   static constexpr UINT VisibleDividerHeight = 12;
   static constexpr UINT TailHeight = 504;
+  // PLEASE WAIT is the GS stroke font at this scale, centred in the working
+  // image. Keep equal to WaitingScale in the shader; cells stay pixel-aligned.
+  static constexpr float WaitingTextScale = 1.5f;
+  static constexpr UINT WaitingTextWidth = static_cast<UINT>((16 * 10 + 12) * WaitingTextScale);
+  static constexpr UINT WaitingTextHeight = static_cast<UINT>(20 * WaitingTextScale);
+  static_assert(16 * WaitingTextScale == static_cast<UINT>(16 * WaitingTextScale) &&
+                12 * WaitingTextScale == static_cast<UINT>(12 * WaitingTextScale));
   static constexpr float MinimumExposureEv = -16;
   static constexpr float MaximumExposureEv = 4;
   // User-approved starting point, still adjustable for the current scene.
@@ -637,10 +644,10 @@ float glyph_coverage(float2 position, float2 origin, uint glyph) {
   // remains opaque: coverage scales the text colour, never its output alpha.
   return saturate(1.4 - glyph_distance(local, glyph));
 }
-// PLEASE WAIT in cell order; 20 is the space. The GS font drawn at twice its
-// size keeps a one-pixel edge ramp, so the text is sharp rather than blurred.
+// PLEASE WAIT in cell order; 20 is the space. The GS font drawn at 1.5 times
+// its size keeps a one-pixel edge ramp, so the text is sharp rather than blurred.
 static const uint WaitingText[11] = { 13, 14, 15, 16, 11, 15, 20, 17, 16, 18, 19 };
-static const float WaitingScale = 2;
+static const float WaitingScale = 1.5;
 float4 waiting_pixel(float2 position) {
   float2 size = float2(16 * 10 + 12, 20) * WaitingScale;
   float2 origin = floor((float2(768, 763) - size) * 0.5);
