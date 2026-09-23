@@ -16,6 +16,14 @@ class ViewResizeRecovery {
   enum class Action { wait, close_gates, resize, blocked };
   using Ids = std::array<engine_camera::EntryId, 3>;
   using Views = std::array<engine_camera::OwnedViewSnapshot, 3>;
+  using OutputDimensions = std::array<std::array<std::int32_t, 2>, 3>;
+
+  // A real graphics-mode transition can take several manager updates to settle.
+  // Do not fail merely because the first post-change Bitmap has another size.
+  // Conversely, an unchanged incompatible Bitmap must not leave both render
+  // gates closed forever. Count only consecutive retry authorizations carrying
+  // the exact same observed output dimensions; any new size restarts the proof.
+  static constexpr unsigned MaximumStableOutputMismatches = 48;
 
   bool begin(engine_camera::ManagerToken owner, const Ids& ids) noexcept {
     if (failed_)
@@ -57,6 +65,8 @@ class ViewResizeRecovery {
     }
     if (temporary) {
       closed_seen_ = false;
+      settle_sample_valid_ = false;
+      stable_output_mismatches_ = 0;
       return Action::wait;
     }
     const unsigned feeds = ids[2] ? 3u : 2u;
@@ -68,6 +78,9 @@ class ViewResizeRecovery {
         }
       }
     }
+    last_output_dimensions_ = {};
+    for (unsigned i = 0; i < feeds; ++i)
+      last_output_dimensions_[i] = views[i].output_dimensions;
     // A native attempt consumes this authorization. The caller must finish on
     // complete success or mark_failed on ANY refused/partial mutation.
     if (resize_issued_)
@@ -104,13 +117,28 @@ class ViewResizeRecovery {
   }
   // Caller inspected a closed ready pair but could not prove the existing Bitmap
   // still matches the pane. Release the one-shot authorization so a later update
-  // may restore instead of sitting in wait after an unused resize token.
+  // may restore instead of sitting in wait after an unused resize token. A size
+  // that continues changing is treated as settling. The exact same incompatible
+  // size for a bounded number of fresh updates is a hard refusal instead of an
+  // infinite gates-closed loop.
   void release_resize_authorization() noexcept {
-    if (pending_ && !failed_)
-      resize_issued_ = false;
+    if (!pending_ || failed_)
+      return;
+    resize_issued_ = false;
+    if (!settle_sample_valid_ || settle_dimensions_ != last_output_dimensions_) {
+      settle_dimensions_ = last_output_dimensions_;
+      settle_sample_valid_ = true;
+      stable_output_mismatches_ = 1;
+      return;
+    }
+    if (stable_output_mismatches_ < MaximumStableOutputMismatches)
+      ++stable_output_mismatches_;
+    if (stable_output_mismatches_ >= MaximumStableOutputMismatches)
+      mark_failed();
   }
   bool pending() const noexcept { return pending_; }
   bool failed() const noexcept { return failed_; }
+  unsigned stable_output_mismatches() const noexcept { return stable_output_mismatches_; }
   void clear() noexcept { *this = {}; }  // Explicit lifecycle reset, never automatic retry.
   void mark_failed() noexcept {
     failed_ = true;
@@ -135,8 +163,10 @@ class ViewResizeRecovery {
 
   engine_camera::ManagerToken owner_{};
   Ids ids_{};
+  OutputDimensions last_output_dimensions_{}, settle_dimensions_{};
   std::uint64_t last_update_ = 0, closed_update_ = 0;
-  bool pending_ = false, failed_ = false, closed_seen_ = false, resize_issued_ = false;
+  unsigned stable_output_mismatches_ = 0;
+  bool pending_ = false, failed_ = false, closed_seen_ = false, resize_issued_ = false, settle_sample_valid_ = false;
 };
 
 }  // namespace taxi_camera::native_camera
