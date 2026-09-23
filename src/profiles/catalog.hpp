@@ -83,9 +83,10 @@ struct AircraftProfile {
   bool reference_guides = true;
   // False keeps ground speed out of the composed ND (PMDG 777).
   bool ground_speed = true;
-  // Airbus displays show a black PLEASE WAIT page, in the GS colour, while a
-  // side starts or its camera image is missing or stale.
-  bool waiting_page = true;
+  // Every profile shows a black PLEASE WAIT page while a side starts or its
+  // camera image is missing or stale. Airbus text uses the GS colour; true
+  // draws it white (PMDG 777, which has no ground-speed readout).
+  bool waiting_white_text = false;
   // Display sides this aircraft drives: captain and first officer, plus the
   // lower ECAM on the A340-600.
   unsigned sides = 2;
@@ -95,7 +96,7 @@ inline constexpr unsigned side_mask(const AircraftProfile& p) noexcept {
 }
 // Minimum PLEASE WAIT time after a side starts drawing, and the camera-image
 // age that brings the page back while the side stays on.
-inline constexpr std::uint64_t WaitingPageMinimumMs = 1500;
+inline constexpr std::uint64_t WaitingPageMinimumMs = 750;
 inline constexpr std::uint64_t WaitingPageStaleMs = 1000;
 inline constexpr AircraftProfile A380{1,
                                       "fbw-a380x",
@@ -290,7 +291,7 @@ inline constexpr auto make_pmdg_777 = [](std::uint32_t id, std::string_view key,
   p.display_texture = Pmdg777Texture;
   p.reference_guides = false;
   p.ground_speed = false;
-  p.waiting_page = false;
+  p.waiting_white_text = true;
   // Larger top ND inset moves the stamped page down without shortening the nose
   // picture. Bottom inset stays 0; leftover working-image rows under the squares
   // are black. L/R stay 0.

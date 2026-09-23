@@ -23,7 +23,8 @@ struct Device {
   // when the GS colour, the profile or the requested patch set changes.
   SceneFrameOutput waiting_output;
   bool waiting_available = false, waiting_ready = false;
-  std::array<float, 3> waiting_color{-1, -1, -1};
+  // Text colour of the submitted page, and of a recording kept for a retry.
+  std::array<float, 3> waiting_color{-1, -1, -1}, waiting_prepared_color{-1, -1, -1};
   // Tick of the latest submitted camera composition; 0 before the first one.
   std::uint64_t output_ms = 0;
   QueuePatchConfig queue_config;
@@ -79,8 +80,11 @@ bool current_output(const Device& item) {
   return true;
 }
 bool waiting_page(const Device& item) {
+  return item.waiting_available && profiles::find(item.patch_profile);
+}
+std::array<float, 3> waiting_text_color(const Device& item) {
   const auto* profile = profiles::find(item.patch_profile);
-  return profile && profile->waiting_page && item.waiting_available;
+  return profile && profile->waiting_white_text ? std::array<float, 3>{1, 1, 1} : item.composition.speed_color;
 }
 // A camera side shows the waiting page during its minimum time and whenever
 // the composed image is missing or older than the stale limit. The caller has
@@ -309,6 +313,9 @@ bool set_patch_profile(std::uint64_t key, std::uint32_t profile) {
   if (auto* item = find(key)) {
     if (item->status.initialized && !item->output.set_patch_profile(profile))
       return false;
+    // A recording kept for retry used the previous profile's patch set.
+    if (item->waiting_output.prepared() && !item->waiting_output.discard_prepared())
+      item->waiting_available = item->waiting_ready = false;
     if (item->waiting_available && !item->waiting_output.set_patch_profile(profile))
       item->waiting_available = item->waiting_ready = false;
     if (item->patch_profile != profile)
@@ -561,17 +568,27 @@ void service() {
         }
       }
     }
+    // The page changes only with its text colour or patch set, so a recording
+    // deferred by queue contention is kept and only its submission is retried.
+    const auto waiting_color = waiting_text_color(item);
     if (waiting_page(item) && item.status.initialized && item.waiting_output.idle() &&
-        (!item.waiting_ready || item.waiting_color != item.composition.speed_color || item.waiting_output.patches_pending())) {
-      const auto color = item.composition.speed_color;
-      if (!item.waiting_output.set_composition(item.composition) || !item.waiting_output.prepare_waiting()) {
-        // Nothing reached the GPU. Keep the previous behaviour without a page.
-        item.waiting_available = item.waiting_ready = false;
-      } else {
+        (item.waiting_output.prepared() || !item.waiting_ready || item.waiting_color != waiting_color ||
+         item.waiting_output.patches_pending())) {
+      if (!item.waiting_output.prepared()) {
+        auto layout = item.composition;
+        layout.speed_color = waiting_color;
+        if (!item.waiting_output.set_composition(layout) || !item.waiting_output.prepare_waiting()) {
+          // Nothing reached the GPU. Keep the previous behaviour without a page.
+          item.waiting_available = item.waiting_ready = false;
+        } else {
+          item.waiting_prepared_color = waiting_color;
+        }
+      }
+      if (item.waiting_output.prepared()) {
         const auto waiting = manager().begin_private_submission(item.key, item.waiting_output.queue());
         if (!waiting.receipt) {
-          const bool discarded = item.waiting_output.discard_prepared();
-          if (!waiting.deferred || !discarded) {
+          if (!waiting.deferred) {
+            item.waiting_output.discard_prepared();
             item.status.failed = true;
             item.status.message = "Waiting page queue ordering failed.";
             continue;
@@ -585,7 +602,7 @@ void service() {
             continue;
           }
           item.waiting_ready = true;
-          item.waiting_color = color;
+          item.waiting_color = item.waiting_prepared_color;
           ++item.status.waiting_pages;
         }
       }

@@ -80,6 +80,8 @@ class SceneFrameOutput {
   bool discard_prepared() noexcept;
   bool submit() noexcept;
   bool idle() const noexcept;
+  // A closed recording is waiting for submission or discard.
+  bool prepared() const noexcept { return prepared_; }
   ID3D12CommandQueue* queue() const noexcept { return queue_; }
   ID3D12Resource* buffer() const noexcept { return buffer_; }
   D3D12_GPU_VIRTUAL_ADDRESS address() const noexcept { return address_; }

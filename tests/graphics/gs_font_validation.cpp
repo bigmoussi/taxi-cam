@@ -14,7 +14,8 @@ unsigned waiting_page_case(ID3D12Device* device, const wchar_t* preview) {
   constexpr unsigned TextWidth = Compositor::WaitingTextWidth, TextHeight = Compositor::WaitingTextHeight;
   static_assert(TextWidth == 258 && TextHeight == 30, "PLEASE WAIT is the GS font at 1.5 times its size");
   constexpr unsigned Left = (Width - TextWidth) / 2, Top = (Height - TextHeight) / 2;
-  constexpr std::array<std::array<float, 3>, 2> colours{{{22.f / 255, 109.f / 255, 19.f / 255}, {1.f, .5f, .25f}}};
+  // Airbus GS green, an arbitrary custom colour and the PMDG 777's white text.
+  constexpr std::array<std::array<float, 3>, 3> colours{{{22.f / 255, 109.f / 255, 19.f / 255}, {1.f, .5f, .25f}, {1.f, 1.f, 1.f}}};
   constexpr UINT64 FrameBytes = UINT64(Pitch) * Height;
   Compositor compositor;
   check(compositor.initialize(device), compositor.last_error());
@@ -275,7 +276,7 @@ int wmain(int argc, wchar_t** argv) {
     const auto waiting_lit = waiting_page_case(device.get(), waiting_preview);
     std::printf(
         "PASS GS font %s: %u cases, 10 distinct digits, %llu two-space gap pixels, %llu antialiased pixels; all profiles and overflow "
-        "'--'; PLEASE WAIT page %u full-colour pixels in two colours.\n",
+        "'--'; PLEASE WAIT page %u full-colour pixels in three colours.\n",
         warp ? "WARP" : "hardware", Frames, gap_pixels, antialiased, waiting_lit);
     return 0;
   } catch (const std::exception& e) {

@@ -393,8 +393,8 @@ int main() {
     const bool pmdg = std::strcmp(profile->display_texture, profiles::Pmdg777Texture) == 0;
     assert(pmdg != profile->reference_guides);
     assert(pmdg != profile->ground_speed);
-    // Every Airbus profile shows the PLEASE WAIT page; the PMDG ND does not.
-    assert(pmdg != profile->waiting_page);
+    // Every profile shows the PLEASE WAIT page; only the PMDG ND draws it white.
+    assert(pmdg == profile->waiting_white_text);
     assert((profile->pfd_detection == profiles::PfdDetectionPolicy::single_display) == (profile->display_texture[0] != '\0'));
     if (profile->id == profiles::AerosoftA346.id) {
       assert(profile->pfd_detection == profiles::PfdDetectionPolicy::single_display);
