@@ -46,6 +46,23 @@ bool Recording::append(Effect effect) noexcept {
   return true;
 }
 
+bool Recording::invalidate_named_sources() noexcept {
+  if (invalid || overflowed || count > effects.size()) {
+    invalidate();
+    return false;
+  }
+  for (std::size_t i = 0; i < count; ++i)
+    if (!valid(effects[i].key) || !valid(effects[i].kind)) {
+      invalidate();
+      return false;
+    }
+  // Replacing in place also works at capacity and preserves every generation.
+  // No GPU state is mutated until this recording is actually submitted.
+  for (std::size_t i = 0; i < count; ++i)
+    effects[i].kind = Effect::Kind::other;
+  return true;
+}
+
 bool Tracker::register_source(Key key, Model initial) noexcept {
   if (!valid(key) || (initial != Model::unknown && initial != Model::legacy_rt && initial != Model::enhanced_rt && initial != Model::other))
     return false;

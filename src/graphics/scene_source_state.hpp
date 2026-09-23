@@ -37,6 +37,10 @@ struct Recording {
   // Repeated draw evidence collapses across independent keys until this key's
   // next state effect. Transitions only collapse when consecutively identical.
   bool append(Effect effect) noexcept;
+  // A pass-local refusal drops evidence only for keys named by this recording.
+  // It cannot narrow an already invalid, overflowing or malformed recording.
+  // Unknown commands/barriers must continue to use invalidate().
+  bool invalidate_named_sources() noexcept;
   void invalidate() noexcept { invalid = true; }
   // Old storage is ignored, not traversed/cleared; subsequent appends overwrite.
   void reset() noexcept {

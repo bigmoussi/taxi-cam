@@ -532,6 +532,44 @@ void tail_run(bool warp_requested, bool enhanced, bool born_render_target) {
   manager->begin_source_tracking();
   require(manager->statistics().capture_copy_gpu.samples == 0, "GPU capture timing default inactive");
   manager->set_gpu_timing_enabled(true);
+  {
+    Commands bystander;
+    bystander.initialize(device.p);
+    constexpr std::uint64_t BystanderGeneration = Generation + 9;
+    require(manager->register_command_list(bystander.list.p, DeviceKey, BystanderGeneration), "Register unrelated pass list");
+    auto* owner = manager->device(DeviceKey);
+    auto* item = manager->list(bystander.list.p);
+    require(owner && item, "Pass-state fixture identities");
+    const taxi_camera::source_state::Key left{reinterpret_cast<std::uint64_t>(sources[0].p), ids[0]};
+    const taxi_camera::source_state::Key right{reinterpret_cast<std::uint64_t>(sources[1].p), ids[1]};
+    const auto before_left = owner->source_states.state(left).model;
+    const auto before_right = owner->source_states.state(right).model;
+    manager->invalidate_source_recording(bystander.list.p, BystanderGeneration, true, Boundary::InvalidationPassState);
+    require(!item->source_effects.invalid && !item->source_touched, "Unrelated pass must not prepare global camera wipe");
+    ID3D12CommandList* batch = bystander.list.p;
+    require(manager->before_submission(bystander.queue.p, 1, &batch) == 0, "Unrelated pass remains unrelated at submission");
+    require(owner->source_states.state(left).model == before_left && owner->source_states.state(right).model == before_right,
+            "Unrelated pass preserved both camera states");
+    require(item->source_effects.append({left, taxi_camera::source_state::Effect::Kind::draw}), "Name one camera");
+    manager->invalidate_source_recording(bystander.list.p, BystanderGeneration, true,
+                                        Boundary::InvalidationPassBegin | Boundary::InvalidationPassState);
+    require(!item->source_effects.invalid && item->source_touched && item->source_effects.count == 1 &&
+                item->source_effects.effects[0].kind == taxi_camera::source_state::Effect::Kind::other,
+            "Named source loses evidence without global invalidation");
+    require(owner->source_states.state(left).model == before_left, "Recording cannot mutate submitted state");
+    for (const auto reason : {Boundary::InvalidationAliasOrDiscard, Boundary::InvalidationSplitBarrier,
+                              Boundary::InvalidationUnobservedWork, Boundary::InvalidationResetFailed,
+                              Boundary::InvalidationBarrierBatch, Boundary::InvalidationObserverDisabled}) {
+      manager->successful_reset(bystander.list.p, BystanderGeneration);
+      manager->invalidate_source_recording(bystander.list.p, BystanderGeneration, true, Boundary::InvalidationPassState | reason);
+      require(item->source_effects.invalid && item->source_touched, "Mixed unsafe reason must retain global refusal");
+    }
+    manager->successful_reset(bystander.list.p, BystanderGeneration);
+    item->source_effects.invalidate();
+    manager->invalidate_source_recording(bystander.list.p, BystanderGeneration, true, Boundary::InvalidationPassState);
+    require(item->source_effects.invalid && item->source_touched, "Pass refusal must not narrow prior uncertainty");
+    manager->destroy_command_list(bystander.list.p, BystanderGeneration);
+  }
   DrawFixture draw;
   draw.initialize(device.p, DXGI_FORMAT_R11G11B10_FLOAT);
   constexpr float colors[2][2][4] = {{{0.25f, 0.5f, 0.75f, 1}, {2, 4, 0.125f, 1}}, {{1, 0, 0.5f, 1}, {0.125f, 1, 2, 1}}};
