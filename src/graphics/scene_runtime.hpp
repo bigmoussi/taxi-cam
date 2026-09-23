@@ -65,6 +65,8 @@ struct Snapshot {
   // (by the bridge worker's compose/prepare) past the simulator thread's budget.
   std::uint64_t contended_writes = 0;
   std::uint64_t stale_frames = 0;
+  // Completed captures accepted per feed, compared with activations per feed.
+  std::array<std::uint64_t, 3> accepted_frames{};
   std::uint32_t patch_requests = 0;
   std::uint64_t patch_draws = 0;
   float display_exposure_ev = -8.8f;

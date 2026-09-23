@@ -1073,8 +1073,11 @@ void SceneCaptureManager::apply_enhanced_barrier(List& item, const D3D12_TEXTURE
   item.source_effects.append({{reinterpret_cast<std::uint64_t>(source->native), source->generation}, kind});
 }
 void SceneCaptureManager::successful_reset(ID3D12GraphicsCommandList* native, std::uint64_t generation) noexcept {
+  // Every recording thread resets lists many times per frame, so this uses the
+  // per-command budget rather than the creation/destruction one. A missed lock
+  // defers the retirement, which the next holder applies before any evidence.
   std::unique_lock<std::mutex> lock;
-  if (!evidence_lock(lock, wait_budget::lifecycle_us, contended_lifecycle_)) {
+  if (!evidence_lock(lock, wait_budget::recording_us, contended_lifecycle_)) {
     // Retired by the next lock holder before any later evidence on this list
     // or any transaction; nothing global is invalidated for it.
     DeferredWork work;

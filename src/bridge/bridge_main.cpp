@@ -11,6 +11,7 @@
 #include "../hooks/render_boundary_observer.hpp"
 #include "../shared/camera_rate_policy.hpp"
 #include "../shared/companion_control.hpp"
+#include "../shared/hook_timing.hpp"
 #include "../shared/protocol.hpp"
 #include "../shared/rotating_log.hpp"
 #include "../shared/scene_demand.hpp"
@@ -141,6 +142,16 @@ void log_contention(const win::Status& status, const win::GraphicsStatus& graphi
   for (unsigned i = 0; i < graphics.contention.size(); ++i)
     append("", win::contention_site_name(static_cast<win::ContentionSite>(i)), graphics.contention[i]);
   log_status(status, detail);
+}
+// Bridge CPU time on simulator threads since the previous periodic log. Worker
+// thread only: the report keeps the previous totals between calls.
+void log_hook_timing(const win::Status& status) noexcept {
+  static hook_timing::Report report;
+  char sites[1024], threads[1400];
+  if (report.sample(sites, sizeof(sites), threads, sizeof(threads))) {
+    log_status(status, sites);
+    log_status(status, threads);
+  }
 }
 // Dedicated thread: reads counters, never takes a bridge lock, and flips the
 // graphics gate. The worker applies the camera disarm on its next iteration.
@@ -990,7 +1001,7 @@ DWORD run_impl() {
           "pass_no_rts=%llu pass_unresolved_rts=%llu invalid_draws=%llu "
           "lease_failures=%llu global_aliases=%llu overflows=%llu reasons=0x%x capture_stalled=%u "
           "wipes=%llu last_wipe=%s retired_recordings=%llu unordered_consumers=%llu retirements=%llu "
-          "barrier_max=%llu barrier_truncated=%llu probe_ms=%.3f queries=%llu query_ms=%.3f read_ms=%.3f "
+          "barrier_max=%llu barrier_truncated=%llu probe_ms=%.3f queries=%llu query_ms=%.3f read_ms=%.3f reads=%llu read_bytes=%llu "
           "allocation_queries=%llu page_queries=%llu region_queries=%llu aa_ms=%.3f "
           "inspections=%llu updates=%llu clear_states=%llu | %.256s",
           applied_profile, aircraft_matches, connected, requested, static_cast<unsigned long long>(control.busy_reads()), buttons.valid,
@@ -1018,6 +1029,7 @@ DWORD run_impl() {
           static_cast<unsigned long long>(boundaries.maximum_legacy_batch),
           static_cast<unsigned long long>(boundaries.metadata_truncated_calls), scene.observer_last_ms,
           static_cast<unsigned long long>(scene.performance.query_calls), scene.performance.query_ms, scene.performance.read_ms,
+          static_cast<unsigned long long>(scene.performance.read_calls), static_cast<unsigned long long>(scene.performance.requested_bytes),
           static_cast<unsigned long long>(scene.performance.query_allocation_calls),
           static_cast<unsigned long long>(scene.performance.query_page_calls),
           static_cast<unsigned long long>(scene.performance.query_fallback_calls),
@@ -1182,6 +1194,18 @@ DWORD run_impl() {
                     static_cast<unsigned long long>(graphics.sample_position_calls));
       log_status(status, copy_detail);
       log_contention(status, graphics, output);
+      log_hook_timing(status);
+      // More accepted captures than activations for a feed means the engine
+      // drew its view on closed-gate updates too (issue 71 frame jumps).
+      char cadence_detail[384];
+      std::snprintf(cadence_detail, sizeof(cadence_detail),
+                    "Feed cadence: activations=%llu/%llu/%llu accepted=%llu/%llu/%llu stale=%llu rate=%u updates=%llu",
+                    static_cast<unsigned long long>(scene.activation_counts[0]), static_cast<unsigned long long>(scene.activation_counts[1]),
+                    static_cast<unsigned long long>(scene.activation_counts[2]),
+                    static_cast<unsigned long long>(output.accepted_frames[0]), static_cast<unsigned long long>(output.accepted_frames[1]),
+                    static_cast<unsigned long long>(output.accepted_frames[2]), static_cast<unsigned long long>(output.stale_frames), rate,
+                    static_cast<unsigned long long>(scene.updates));
+      log_status(status, cadence_detail);
       if (!logged || status.active_profile != last_logged.active_profile || std::strcmp(status.aircraft_type, last_logged.aircraft_type) ||
           std::strcmp(status.aircraft_path, last_logged.aircraft_path)) {
         char identity_detail[640];

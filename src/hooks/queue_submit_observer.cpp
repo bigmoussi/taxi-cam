@@ -1,4 +1,5 @@
 #include "queue_submit_observer.hpp"
+#include "../shared/hook_timing.hpp"
 
 #include <array>
 #include <atomic>
@@ -175,6 +176,7 @@ bool valid_insertions(const std::array<Insertion, kMaximumInsertions>& insertion
 
 void STDMETHODCALLTYPE submit(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists) noexcept {
   const auto forward = original.load(std::memory_order_acquire);
+  const hook_timing::Scope timing(hook_timing::execute);
   // Published before the slot exchange and immutable after a successful install.
   // A valid call through this wrapper always has an original to forward to.
   auto* entry = find_queue(queue);
@@ -188,13 +190,13 @@ void STDMETHODCALLTYPE submit(ID3D12CommandQueue* queue, UINT count, ID3D12Comma
   }
   if (inside_wrapper) {
     nested_submission = true;
-    forward(queue, count, lists);
+    hook_timing::forward(forward, queue, count, lists);
     return;
   }
   if (entry)
     entry->calls.fetch_add(1, std::memory_order_relaxed);
   if (!entry || !entry->enabled.load(std::memory_order_acquire)) {
-    forward(queue, count, lists);
+    hook_timing::forward(forward, queue, count, lists);
     return;
   }
   ExclusiveLock lock(entry->submit_lock, true);
@@ -209,7 +211,7 @@ void STDMETHODCALLTYPE submit(ID3D12CommandQueue* queue, UINT count, ID3D12Comma
       entry->refusals.fetch_add(1, std::memory_order_relaxed);
       token = notify(entry->callbacks.context, queue, count, lists);
     }
-    forward(queue, count, lists);
+    hook_timing::forward(forward, queue, count, lists);
     if (notified && entry->callbacks.contended_completed)
       entry->callbacks.contended_completed(entry->callbacks.context, queue, token);
     if (!notify && entry->enabled.load(std::memory_order_acquire))
@@ -217,7 +219,7 @@ void STDMETHODCALLTYPE submit(ID3D12CommandQueue* queue, UINT count, ID3D12Comma
     return;
   }
   if (!entry->enabled.load(std::memory_order_acquire)) {
-    forward(queue, count, lists);
+    hook_timing::forward(forward, queue, count, lists);
     return;
   }
   struct ReentryGuard {
@@ -236,7 +238,7 @@ void STDMETHODCALLTYPE submit(ID3D12CommandQueue* queue, UINT count, ID3D12Comma
   // Unrelated work retains its exact original arguments and fast forwarding.
   if (!receipt && !oversized && !invalid) {
     lock.release();
-    forward(queue, count, lists);
+    hook_timing::forward(forward, queue, count, lists);
     if (entry->callbacks.forwarded_unordered)
       entry->callbacks.forwarded_unordered(entry->callbacks.context, queue);
     return;
@@ -262,9 +264,9 @@ void STDMETHODCALLTYPE submit(ID3D12CommandQueue* queue, UINT count, ID3D12Comma
       while (next < inserted && insertions[next].after_list == i)
         augmented[output++] = insertions[next++].list;
     }
-    forward(queue, output, augmented.data());
+    hook_timing::forward(forward, queue, output, augmented.data());
   } else {
-    forward(queue, count, lists);
+    hook_timing::forward(forward, queue, count, lists);
   }
   if (nested_submission)
     refuse(*entry, queue, Refusal::reentrant_submission);

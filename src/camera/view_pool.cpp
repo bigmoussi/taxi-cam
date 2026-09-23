@@ -36,34 +36,103 @@ struct Observation {
   std::uint64_t address = 0;
   std::uint32_t size = 0;
   std::int32_t slot = -1;
+  std::int32_t span = -1;  // Served from this span, or -1 for its own read.
   std::array<std::uint8_t, 16> bytes{};
+};
+
+// One exact read of an object's known extent (the eight view pointers, or one
+// generation control record). Fields inside it are served from that read; the
+// recheck rereads the span once and compares only the bytes each field observed.
+constexpr std::uint32_t kSpanBytes = 64;
+constexpr std::size_t kMaximumSpans = 1 + 8;
+struct Span {
+  std::uint64_t address = 0;
+  std::uint32_t size = 0;
+  std::int32_t slot = -1;
+  std::array<std::uint8_t, kSpanBytes> bytes{};
 };
 
 class BoundedReader {
  public:
   BoundedReader(MemoryReader& reader, ViewPoolSnapshot& result) noexcept : reader_(reader), result_(result) {}
 
-  bool capture(std::uint64_t address, std::uint32_t size, std::uint8_t* output) noexcept {
-    if (count_ == observations_.size()) {
+  // Reads [address, address+size) now. Call only with the extent of fields this
+  // inspection goes on to capture in the same object. A covered range is reused.
+  bool span(std::uint64_t address, std::uint32_t size) noexcept {
+    for (std::size_t index = 0; index < span_count_; ++index)
+      if (covers(spans_[index], address, size))
+        return true;
+    if (span_count_ == spans_.size() || order_count_ == order_.size() || size == 0 || size > kSpanBytes) {
       result_.status = ViewPoolStatus::read_budget_exhausted;
       return false;
     }
-    if (!read(address, size, output))
+    auto& value = spans_[span_count_];
+    value.address = address;
+    value.size = size;
+    value.slot = result_.failure_slot;
+    if (!read_exact(address, size, value.bytes.data()))
       return false;
+    order_[order_count_++] = -1 - static_cast<std::int32_t>(span_count_++);
+    return true;
+  }
+
+  bool capture(std::uint64_t address, std::uint32_t size, std::uint8_t* output) noexcept {
+    if (count_ == observations_.size() || order_count_ == order_.size() || (size != 1 && size != 4 && size != 8 && size != 16)) {
+      result_.status = ViewPoolStatus::read_budget_exhausted;
+      return false;
+    }
+    std::int32_t served = -1;
+    for (std::size_t index = 0; index < span_count_; ++index)
+      if (covers(spans_[index], address, size)) {
+        served = static_cast<std::int32_t>(index);
+        break;
+      }
+    if (served >= 0) {
+      const auto& value = spans_[static_cast<std::size_t>(served)];
+      std::copy_n(value.bytes.begin() + (address - value.address), size, output);
+    } else {
+      if (!read_exact(address, size, output))
+        return false;
+      order_[order_count_++] = static_cast<std::int32_t>(count_);
+    }
     auto& observation = observations_[count_++];
     observation.address = address;
     observation.size = size;
     observation.slot = result_.failure_slot;
+    observation.span = served;
     std::copy_n(output, size, observation.bytes.begin());
     return true;
   }
 
+  // Repeats every read in its original order. Each captured field is compared
+  // as soon as its own read or its span has been reread.
   bool recheck() noexcept {
-    for (std::size_t index = 0; index < count_; ++index) {
-      const auto& observation = observations_[index];
+    for (std::size_t step = 0; step < order_count_; ++step) {
+      const auto item = order_[step];
+      if (item < 0) {
+        const auto index = static_cast<std::int32_t>(-1 - item);
+        const auto& value = spans_[static_cast<std::size_t>(index)];
+        result_.failure_slot = value.slot;
+        std::array<std::uint8_t, kSpanBytes> current;
+        if (!read_exact(value.address, value.size, current.data()))
+          return false;
+        for (std::size_t observed = 0; observed < count_; ++observed) {
+          const auto& observation = observations_[observed];
+          if (observation.span != index)
+            continue;
+          result_.failure_slot = observation.slot;
+          const auto* bytes = current.data() + (observation.address - value.address);
+          if (!std::equal(bytes, bytes + observation.size, observation.bytes.begin())) {
+            result_.status = ViewPoolStatus::changed;
+            return false;
+          }
+        }
+        continue;
+      }
+      const auto& observation = observations_[static_cast<std::size_t>(item)];
       result_.failure_slot = observation.slot;
       std::array<std::uint8_t, 16> current{};
-      if (!read(observation.address, observation.size, current.data()))
+      if (!read_exact(observation.address, observation.size, current.data()))
         return false;
       if (!std::equal(current.begin(), current.begin() + observation.size, observation.bytes.begin())) {
         result_.status = ViewPoolStatus::changed;
@@ -74,8 +143,12 @@ class BoundedReader {
   }
 
  private:
-  bool read(std::uint64_t address, std::uint32_t size, std::uint8_t* output) noexcept {
-    if ((size != 1 && size != 4 && size != 8 && size != 16) || size > kReadBudget - result_.read_bytes) {
+  static bool covers(const Span& value, std::uint64_t address, std::uint32_t size) noexcept {
+    return address >= value.address && size <= value.size && address - value.address <= value.size - size;
+  }
+
+  bool read_exact(std::uint64_t address, std::uint32_t size, std::uint8_t* output) noexcept {
+    if (size > kReadBudget - result_.read_bytes) {
       result_.status = ViewPoolStatus::read_budget_exhausted;
       return false;
     }
@@ -91,6 +164,11 @@ class BoundedReader {
   ViewPoolSnapshot& result_;
   std::array<Observation, kMaximumObservations> observations_{};
   std::size_t count_ = 0;
+  std::array<Span, kMaximumSpans> spans_{};
+  std::size_t span_count_ = 0;
+  // Pass-one reads in order: an observation index, or -1 - span index.
+  std::array<std::int32_t, kMaximumObservations + kMaximumSpans> order_{};
+  std::size_t order_count_ = 0;
 };
 
 ViewPoolSnapshot inspect_pool(MemoryReader& reader, std::uint64_t renderer, bool release) noexcept {
@@ -110,6 +188,9 @@ ViewPoolSnapshot inspect_pool(MemoryReader& reader, std::uint64_t renderer, bool
     result.status = ViewPoolStatus::invalid_array;
     return result;
   }
+  // All eight view pointers in one read.
+  if (!source.span(result.array_address, static_cast<std::uint32_t>(result.slots.size() * 8)))
+    return result;
   for (std::uint32_t index = 0; index < result.slots.size(); ++index) {
     result.failure_slot = static_cast<std::int32_t>(index);
     auto& slot = result.slots[index];
@@ -139,7 +220,8 @@ ViewPoolSnapshot inspect_pool(MemoryReader& reader, std::uint64_t renderer, bool
         result.status = ViewPoolStatus::invalid_control;
         return result;
       }
-      if (!source.capture(control + 28, 4, bytes.data()))
+      // Payload at +0 and generation at +28 of the control record in one read.
+      if (!source.span(control, 32) || !source.capture(control + 28, 4, bytes.data()))
         return result;
       if (u32(bytes.data()) != generation) {
         slot.association = ViewAssociation::stale_generation;
