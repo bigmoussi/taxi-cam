@@ -326,7 +326,10 @@ int main() {
   Settings a346;
   assert(load_settings(a346, L"missing", profiles::AerosoftA346.id));
   assert(a346.profile == profiles::AerosoftA346.id && a346.follow_taxi && a346.mounts == profiles::AerosoftA346.mounts);
-  assert(a346.exposure == -8.f && a346.tail_corner == profiles::A359.composition.tail_corner);
+  assert(a346.exposure == -8.f && a346.tail_corner == profiles::AerosoftA346.composition.tail_corner);
+  assert((a346.tail_upper == std::array<float, 2>{0.28f, 0.72f} && a346.tail_corner == std::array<float, 2>{0.24f, 0.86f} &&
+          a346.tail_inner == std::array<float, 2>{0.31f, 0.86f} && a346.nose_dot == profiles::A380.composition.nose_dot));
+  assert(a346.mounts[0][1] == -2.5 && a346.mounts[0][2] == 23.33);
   assert(settings_path(a346) != settings_path(pmdg) && settings_path(a346) != settings_path(a380));
   assert(profiles::matches_display(profiles::IniA380, 768, 1024, 1, 27));
   assert(profiles::matches_display(profiles::IniA380, 768, 1024, 1, 28));
@@ -548,14 +551,16 @@ int main() {
 
   // Aerosoft A346 Pro 1.0.1 flight_model.cfg contact points are feet: NLG
   // forward/up 103.51/-21.4; left MLG right/up/forward -17.5/-22.4/-4.46.
-  // The starting mounts keep the A350-900 gear-relative framing.
+  // The live-calibrated nose camera sits 1.27 m higher than the A350-derived
+  // start, so the nose gear projects lower in its pane.
   {
     const auto& a346 = profiles::AerosoftA346;
     const auto nose = project_landmark(a346, 0, {0, -21.4 * 0.3048, 103.51 * 0.3048});
-    assert(std::abs(nose[0] - 0.5) < 1e-6 && nose[1] > 0.55 && nose[1] < 0.75);
+    assert(std::abs(nose[0] - 0.5) < 1e-6 && nose[1] > 0.80 && nose[1] < 0.90);
     const auto gear = project_landmark(a346, 1, {-17.5 * 0.3048, -22.4 * 0.3048, -4.46 * 0.3048});
     assert(gear[0] > 0.28 && gear[0] < 0.34 && gear[1] > 0.85 && gear[1] < 0.90);
-    assert(a346.composition.tail_corner == profiles::A359.composition.tail_corner);
+    // The calibrated bracket corner sits outboard of the projected tyre contact.
+    assert(a346.composition.tail_corner[0] < gear[0] && std::abs(a346.composition.tail_corner[1] - gear[1]) < 0.03);
     assert(a346.mounts[1] == a346.mounts[2]);
   }
 

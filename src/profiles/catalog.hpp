@@ -324,11 +324,21 @@ inline constexpr unsigned A346NdSize = 750;
 inline constexpr unsigned A346SdX = 1529;
 inline constexpr unsigned A346SdY = 1230;
 // flight_model.cfg contact points (feet): NLG forward/up 103.51/-21.4; left
-// MLG right/up/forward -17.5/-22.4/-4.46. Mounts keep the A350-900's accepted
-// gear-relative offsets (nose 8.22 m aft and 2.75 m above the NLG contact;
-// tail 27.63 m aft and 15.01 m above the MLG contact) until calibrated live.
+// MLG right/up/forward -17.5/-22.4/-4.46. Mounts started from the A350-900's
+// gear-relative offsets (nose 8.22 m aft of the NLG contact; tail 27.63 m aft
+// and 15.01 m above the MLG contact). Defaults reflect the user's saved live
+// calibration from 2026-09-23, which raised the nose camera to -2.5 m.
 inline constexpr std::array<std::array<double, 6>, 3> A346Mounts{
-    {{0, -3.77, 23.33, -15, 0, 0.55}, {0, 8.18, -28.99, -15, 0, 0.62}, {0, 8.18, -28.99, -15, 0, 0.62}}};
+    {{0, -2.5, 23.33, -15, 0, 0.55}, {0, 8.18, -28.99, -15, 0, 0.62}, {0, 8.18, -28.99, -15, 0, 0.62}}};
+// Guide defaults from the same live calibration; the nose markers keep the
+// shared position.
+inline constexpr Composition A346Composition = [] {
+  auto c = A350Etacs;
+  c.tail_upper = {0.28f, 0.72f};
+  c.tail_corner = {0.24f, 0.86f};
+  c.tail_inner = {0.31f, 0.86f};
+  return c;
+}();
 // All three TAXI selectors are two-state XML switches whose setter writes 1/0
 // to the latch. Same idempotent zero write as the A350 for automatic cutoff.
 inline constexpr AircraftProfile AerosoftA346 = [] {
@@ -351,7 +361,7 @@ inline constexpr AircraftProfile AerosoftA346 = [] {
   p.taxi_events[2] = "";
   p.pfd_labels[2] = "ECAM_LOWER";
   p.display_regions[2] = {A346SdX, A346SdY, A346SdX + A346NdSize, A346SdY + A346NdSize};
-  p.composition = A350Etacs;
+  p.composition = A346Composition;
   p.formats = {};
   p.package_markers = {"simobjects/airplanes/airbus-a346-pro", "aerosoft-aircraft-a346-pro", ""};
   p.pfd_detection = PfdDetectionPolicy::single_display;

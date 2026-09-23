@@ -105,12 +105,12 @@ Each mount stores six values: **right, up, forward, pitch, yaw, lens**.
 | A350-900 tail | 0 | 10 | -33 | -15 | 0 | 0.62 |
 | A350-1000 nose | 0 | -2 | 19.81 | -15 | 0 | 0.55 |
 | A350-1000 tail | 0 | 10 | -36.17 | -15 | 0 | 0.62 |
-| Aerosoft A340-600 nose | 0 | -3.77 | 23.33 | -15 | 0 | 0.55 |
+| Aerosoft A340-600 nose | 0 | -2.5 | 23.33 | -15 | 0 | 0.55 |
 | Aerosoft A340-600 tail | 0 | 8.18 | -28.99 | -15 | 0 | 0.62 |
 
 Positions are relative to the aircraft datum. Positive pitch looks up; positive yaw turns right. A larger lens value widens the field of view.
 
-The A350-900 mounts use the default visual calibration. The -1000 retains the same height, pitch, yaw and lens with model-specific longitudinal offsets. Its live alignment remains unverified. The Aerosoft A340-600 mounts keep the A350-900 offsets relative to its own gear contact points; they are not yet calibrated live. Saved mounts override the defaults above.
+The A350-900 mounts use the default visual calibration. The -1000 retains the same height, pitch, yaw and lens with model-specific longitudinal offsets. Its live alignment remains unverified. The Aerosoft A340-600 mounts started from the A350-900 offsets relative to its own gear contact points; the defaults are the user's live calibration from 2026-09-23. Saved mounts override the defaults above.
 
 Position components are bounded to ±500 m, pitch to ±89°, yaw to ±180° and lens to 0.05–1.55 radians. Both mounts are saved in the profile.
 
