@@ -2,6 +2,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include "../shared/display_sides.hpp"
 
 namespace taxi_camera::native_camera {
 struct TaxiButtonRequest {
@@ -56,7 +57,7 @@ class TaxiButtonCommand {
     latest_ = request;  // Even refused requests are consumed, never replayed later.
     status_ = {request.serial, request.selected_mask, false, ""};
     started_ms_ = now;
-    if ((request.selected_mask & ~3u) || (request.desired_mask & ~request.selected_mask))
+    if ((request.selected_mask & ~AllDisplaySides) || (request.desired_mask & ~request.selected_mask))
       reject("taxi_request_invalid");
     else if (!request.selected_mask)
       return;
@@ -88,7 +89,7 @@ class TaxiButtonCommand {
     if (!c.identity_valid || !buttons || !c.aircraft_buttons)
       return result;
     const bool speed = c.speed_valid && std::isfinite(c.speed_knots) && c.speed_knots >= 0;
-    for (unsigned side = 0; side < 2; ++side) {
+    for (unsigned side = 0; side < MaxDisplaySides; ++side) {
       const unsigned bit = 1u << side;
       auto& flight = flights_[side];
       const bool actual = (c.actual_mask & bit) != 0;
@@ -122,7 +123,7 @@ class TaxiButtonCommand {
   }
   // Recheck after releasing the cache lock to prepare the SimConnect call.
   bool current(const TaxiButtonCommandDecision& decision, unsigned side, std::uint64_t now) const noexcept {
-    if (side >= 2 || !(decision.send_mask & (1u << side)) || flights_[side].active)
+    if (side >= MaxDisplaySides || !(decision.send_mask & (1u << side)) || flights_[side].active)
       return false;
     if (decision.cutoff_mask & (1u << side))
       return true;
@@ -130,7 +131,7 @@ class TaxiButtonCommand {
            (status_.pending_mask & (1u << side));
   }
   void sent(const TaxiButtonCommandDecision& decision, unsigned side, bool accepted, std::uint64_t now) noexcept {
-    if (side >= 2 || !(decision.send_mask & (1u << side)))
+    if (side >= MaxDisplaySides || !(decision.send_mask & (1u << side)))
       return;
     if (accepted)
       flights_[side] = {true, (decision.desired_mask & (1u << side)) != 0, decision.button_sample_ms, now, decision.serial};
@@ -139,7 +140,7 @@ class TaxiButtonCommand {
   }
   // Only a correlated SimConnect rejection proves an accepted send did not run.
   void rejected(unsigned side) noexcept {
-    if (side < 2 && flights_[side].active) {
+    if (side < MaxDisplaySides && flights_[side].active) {
       const auto serial = flights_[side].serial;
       flights_[side] = {};
       if (serial == status_.serial)
@@ -163,7 +164,7 @@ class TaxiButtonCommand {
   };
   TaxiButtonRequest latest_{};
   TaxiButtonRequestStatus status_{};
-  std::array<Flight, 2> flights_{};
+  std::array<Flight, MaxDisplaySides> flights_{};
   std::uint64_t permission_ms_{}, started_ms_{};
   bool permission_{};
 };

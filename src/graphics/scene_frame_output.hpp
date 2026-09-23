@@ -68,12 +68,20 @@ class SceneFrameOutput {
   // Separate retained output instance: no camera inputs or compositor shaders.
   // Uses the same private submission lifetime and manager timeline contract.
   bool prepare_calibration(std::uint64_t frame) noexcept;
+  // Retained waiting page: the compositor's PLEASE WAIT image, with no camera
+  // inputs, into this output's buffer and every requested patch. Same private
+  // submission lifetime and manager timeline contract as prepare().
+  bool prepare_waiting() noexcept;
+  // A requested patch has not yet been written by a submitted recording.
+  bool patches_pending() const noexcept;
   // Discard a closed prepared list which was NEVER submitted (e.g. the manager
   // refused a private transaction). Reset discards its command/descriptor uses
   // before later prepare may replace compositor input references.
   bool discard_prepared() noexcept;
   bool submit() noexcept;
   bool idle() const noexcept;
+  // A closed recording is waiting for submission or discard.
+  bool prepared() const noexcept { return prepared_; }
   ID3D12CommandQueue* queue() const noexcept { return queue_; }
   ID3D12Resource* buffer() const noexcept { return buffer_; }
   D3D12_GPU_VIRTUAL_ADDRESS address() const noexcept { return address_; }
@@ -85,6 +93,7 @@ class SceneFrameOutput {
  private:
   bool fail(const char* error) noexcept;
   bool prepare_patches(std::uint64_t calibration_frame = 0) noexcept;
+  void record_buffer_copy() noexcept;
   bool valid_patch_request(DXGI_FORMAT, UINT width, UINT height, const D3D12_RECT& content) const noexcept;
   struct PatchStorage {
     Patch view;

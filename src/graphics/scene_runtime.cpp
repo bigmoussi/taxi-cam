@@ -19,6 +19,14 @@ struct Device {
   ID3D12Device* native = nullptr;
   SceneFrameOutput output;
   SceneFrameOutput calibration_output;
+  // Retained PLEASE WAIT page. Rendered with no camera inputs, then again only
+  // when the GS colour, the profile or the requested patch set changes.
+  SceneFrameOutput waiting_output;
+  bool waiting_available = false, waiting_ready = false;
+  // Text colour of the submitted page, and of a recording kept for a retry.
+  std::array<float, 3> waiting_color{-1, -1, -1}, waiting_prepared_color{-1, -1, -1};
+  // Tick of the latest submitted camera composition; 0 before the first one.
+  std::uint64_t output_ms = 0;
   QueuePatchConfig queue_config;
   QueuePatchSnapshot queue_snapshot;
   std::array<PfdStampD3D12, Formats.size() * DepthFormats.size()> stamps;
@@ -34,6 +42,8 @@ struct Runtime {
   std::mutex mutex;
   std::atomic<std::uint64_t> contended_writes{0};
   bool gpu_timing_enabled = false;
+  // Camera-image age that brings the PLEASE WAIT page back; 0 disables it.
+  std::uint64_t waiting_stale_ms = 0;
   std::array<Device, SceneCaptureManager::MaximumDevices> devices;
 };
 Runtime& runtime() {
@@ -71,6 +81,27 @@ bool current_output(const Device& item) {
     return false;
   return true;
 }
+bool waiting_page(const Device& item) {
+  return item.waiting_available && profiles::find(item.patch_profile);
+}
+std::array<float, 3> waiting_text_color(const Device& item) {
+  const auto* profile = profiles::find(item.patch_profile);
+  return profile && profile->waiting_white_text ? std::array<float, 3>{1, 1, 1} : item.composition.speed_color;
+}
+// A camera side shows the waiting page during its minimum time and whenever
+// the composed image is missing or older than the stale limit. The caller has
+// already admitted the side for display writes; this never widens that mask.
+bool show_waiting(const Device& item, bool minimum_time) {
+  if (!waiting_page(item))
+    return false;
+  if (minimum_time || !current_output(item))
+    return true;
+  const auto limit = runtime().waiting_stale_ms;
+  if (!limit)
+    return false;
+  const auto now = GetTickCount64();
+  return !item.output_ms || now < item.output_ms || now - item.output_ms > limit;
+}
 
 D3D12_RECT native_rect(const profiles::DisplayRect& rect) {
   return {static_cast<LONG>(rect.left), static_cast<LONG>(rect.top), static_cast<LONG>(rect.right), static_cast<LONG>(rect.bottom)};
@@ -79,9 +110,10 @@ bool valid_queue_config(const Device& item, const QueuePatchConfig& config) {
   if (!config.generation)
     return config == QueuePatchConfig{};
   const auto* profile = profiles::find(config.profile);
-  if (!profile || config.profile != item.patch_profile || ((config.camera_mask | config.calibration_mask) & ~3u))
+  if (!profile || config.profile != item.patch_profile || ((config.camera_mask | config.calibration_mask) & ~profiles::side_mask(*profile)) ||
+      (config.waiting_mask & ~config.camera_mask))
     return false;
-  for (unsigned side = 0; side < 2; ++side)
+  for (unsigned side = 0; side < profile->sides; ++side)
     if (((config.camera_mask | config.calibration_mask) & (1u << side)) &&
         (std::find(Formats.begin(), Formats.end(), config.formats[side]) == Formats.end() ||
          !profiles::matches_display(*profile, profile->width, profile->height, profile->mips ? profile->mips : 1,
@@ -97,12 +129,15 @@ bool request_queue_patches(Device& item) {
   if (config.calibration_mask &&
       (!item.calibration_output.initialize(item.native, true) || !item.calibration_output.set_patch_profile(config.profile)))
     return false;
-  for (unsigned side = 0; side < 2; ++side) {
+  for (unsigned side = 0; side < profile->sides; ++side) {
     const auto outer = profiles::display_rect(*profile, side), inner = profiles::display_content_rect(*profile, side);
     const D3D12_RECT local{static_cast<LONG>(inner.left - outer.left), static_cast<LONG>(inner.top - outer.top),
                            static_cast<LONG>(inner.right - outer.left), static_cast<LONG>(inner.bottom - outer.top)};
     if ((config.camera_mask & (1u << side)) &&
         !item.output.request_patch(config.formats[side], outer.right - outer.left, outer.bottom - outer.top, local))
+      return false;
+    if ((config.camera_mask & (1u << side)) && waiting_page(item) &&
+        !item.waiting_output.request_patch(config.formats[side], outer.right - outer.left, outer.bottom - outer.top, local))
       return false;
     if ((config.calibration_mask & (1u << side)) &&
         !item.calibration_output.request_patch(config.formats[side], outer.right - outer.left, outer.bottom - outer.top, local))
@@ -120,15 +155,21 @@ void publish_queue_patches(Device& item) {
   snapshot.generation = config.generation;
   snapshot.profile = config.profile;
   const bool camera_ready = current_output(item);
-  for (unsigned side = 0; side < 2; ++side) {
+  for (unsigned side = 0; side < profile->sides; ++side) {
     const bool calibration = (config.calibration_mask & (1u << side)) != 0;
-    if (!calibration && (!(config.camera_mask & (1u << side)) || !camera_ready))
-      continue;
+    bool waiting = false;
+    if (!calibration) {
+      if (!(config.camera_mask & (1u << side)))
+        continue;
+      waiting = show_waiting(item, (config.waiting_mask & (1u << side)) != 0);
+      if (waiting ? !item.waiting_ready : !camera_ready)
+        continue;
+    }
     const auto outer = profiles::display_rect(*profile, side), inner = profiles::display_content_rect(*profile, side);
     const D3D12_RECT local{static_cast<LONG>(inner.left - outer.left), static_cast<LONG>(inner.top - outer.top),
                            static_cast<LONG>(inner.right - outer.left), static_cast<LONG>(inner.bottom - outer.top)};
-    const auto patch = (calibration ? item.calibration_output : item.output)
-                           .patch(config.formats[side], outer.right - outer.left, outer.bottom - outer.top, local);
+    const auto& source = calibration ? item.calibration_output : waiting ? item.waiting_output : item.output;
+    const auto patch = source.patch(config.formats[side], outer.right - outer.left, outer.bottom - outer.top, local);
     if (!patch.buffer)
       continue;
     snapshot.sides[side] = {patch.buffer, patch.footprint, native_rect(outer), native_rect(inner), calibration};
@@ -164,6 +205,10 @@ bool try_snapshot_queue_patches(std::uint64_t key, std::uint64_t generation, Que
 SceneCaptureManager& manager() {
   static auto* const instance = new SceneCaptureManager(scene_handoff());
   return *instance;
+}
+void set_waiting_stale_ms(std::uint64_t ms) {
+  const std::lock_guard lock(runtime().mutex);
+  runtime().waiting_stale_ms = ms;
 }
 void set_gpu_timing_enabled(bool enabled) {
   const standalone::OwnedWork owned_work_guard;
@@ -249,6 +294,10 @@ bool prepare(std::uint64_t key) {
   }
   if (!item->output.set_patch_profile(item->patch_profile))
     return false;
+  // The waiting page is cosmetic: failing to build it keeps the previous
+  // behaviour (no display write until the camera image exists).
+  item->waiting_available =
+      item->waiting_output.initialize(item->native) && item->waiting_output.set_patch_profile(item->patch_profile);
   for (std::size_t i = 0; i < Formats.size(); ++i) {
     for (std::size_t depth = 0; depth < DepthFormats.size(); ++depth) {
       const auto slot = i * DepthFormats.size() + depth;
@@ -273,6 +322,11 @@ bool set_patch_profile(std::uint64_t key, std::uint32_t profile) {
   if (auto* item = find(key)) {
     if (item->status.initialized && !item->output.set_patch_profile(profile))
       return false;
+    // A recording kept for retry used the previous profile's patch set.
+    if (item->waiting_output.prepared() && !item->waiting_output.discard_prepared())
+      item->waiting_available = item->waiting_ready = false;
+    if (item->waiting_available && !item->waiting_output.set_patch_profile(profile))
+      item->waiting_available = item->waiting_ready = false;
     if (item->patch_profile != profile)
       item->status.output = false;
     item->queue_snapshot = {};
@@ -290,14 +344,16 @@ bool copy_patch(ID3D12GraphicsCommandList* list,
                 DXGI_FORMAT format,
                 const D3D12_RECT& destination,
                 const D3D12_RECT& content,
-                ID3D12GraphicsCommandList7* enhanced) {
+                ID3D12GraphicsCommandList7* enhanced,
+                bool waiting) {
   // Recording-thread entry (barrier callback or Close). service() may hold this
   // mutex across a private compose submit; skip this write rather than wait.
   const BoundedLock lock(runtime().mutex, wait_budget::close_us, &runtime().contended_writes);
   if (!lock)
     return false;
   auto* item = find(key);
-  if (!list || !target || !item || !current_output(*item) || item->status.failed ||
+  const bool page = item && item->status.session_active && show_waiting(*item, waiting);
+  if (!list || !target || !item || (page ? !item->waiting_ready : !current_output(*item)) || item->status.failed ||
       (enhanced && static_cast<ID3D12GraphicsCommandList*>(enhanced) != list) || desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
       desc.DepthOrArraySize != 1 || desc.SampleDesc.Count != 1 || !desc.MipLevels || !desc.Width || desc.Width > 16384 || !desc.Height ||
       desc.Height > 16384 || (desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) == 0 || destination.left < 0 || destination.top < 0 ||
@@ -321,11 +377,16 @@ bool copy_patch(ID3D12GraphicsCommandList* list,
   // Only a fully validated native copy opportunity may request private work.
   // A cold request records no app commands; terminal delivery remains available
   // until a later composition publishes this exact typed patch.
-  if (!item->output.request_patch(format, width, height, local)) {
+  // Reserve both patches, so the live image is ready when the page ends and
+  // the page is already drawn when a side first starts or goes stale.
+  const bool camera_requested = item->output.request_patch(format, width, height, local);
+  const bool waiting_requested = waiting_page(*item) && item->waiting_output.request_patch(format, width, height, local);
+  auto& patches = page ? item->waiting_output : item->output;
+  if (!camera_requested || (page && !waiting_requested)) {
     ++item->status.state_skips;
     return false;
   }
-  const auto patch = item->output.patch(format, width, height, local);
+  const auto patch = patches.patch(format, width, height, local);
   if (!patch.buffer || patch.buffer == target || patch.footprint.Offset % D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT ||
       patch.footprint.Footprint.RowPitch % D3D12_TEXTURE_DATA_PITCH_ALIGNMENT || !manager().register_consumer_recording(list)) {
     ++item->status.state_skips;
@@ -518,6 +579,45 @@ void service() {
         }
       }
     }
+    // The page changes only with its text colour or patch set, so a recording
+    // deferred by queue contention is kept and only its submission is retried.
+    const auto waiting_color = waiting_text_color(item);
+    if (waiting_page(item) && item.status.initialized && item.waiting_output.idle() &&
+        (item.waiting_output.prepared() || !item.waiting_ready || item.waiting_color != waiting_color ||
+         item.waiting_output.patches_pending())) {
+      if (!item.waiting_output.prepared()) {
+        auto layout = item.composition;
+        layout.speed_color = waiting_color;
+        if (!item.waiting_output.set_composition(layout) || !item.waiting_output.prepare_waiting()) {
+          // Nothing reached the GPU. Keep the previous behaviour without a page.
+          item.waiting_available = item.waiting_ready = false;
+        } else {
+          item.waiting_prepared_color = waiting_color;
+        }
+      }
+      if (item.waiting_output.prepared()) {
+        const auto waiting = manager().begin_private_submission(item.key, item.waiting_output.queue());
+        if (!waiting.receipt) {
+          if (!waiting.deferred) {
+            item.waiting_output.discard_prepared();
+            item.status.failed = true;
+            item.status.message = "Waiting page queue ordering failed.";
+            continue;
+          }
+        } else {
+          const bool submitted = item.waiting_output.submit();
+          const bool ordered = manager().end_private_submission(waiting.receipt);
+          if (!submitted || !ordered) {
+            item.status.failed = true;
+            item.status.message = "Waiting page submission failed.";
+            continue;
+          }
+          item.waiting_ready = true;
+          item.waiting_color = item.waiting_prepared_color;
+          ++item.status.waiting_pages;
+        }
+      }
+    }
     publish_queue_patches(item);
     if (!item.key || !item.status.initialized || item.status.failed || !item.output.idle())
       continue;
@@ -579,6 +679,7 @@ void service() {
       manager().finish_consumption(third.token, submission.fence, submission.value);
     item.pending = {};
     item.status.output = true;
+    item.output_ms = GetTickCount64();
     ++item.status.frames;
     publish_queue_patches(item);
     item.status.message = "Live camera composition available: inset upper PFD, lower trim area preserved.";
@@ -615,13 +716,16 @@ bool stamp_at_recording_end(ID3D12GraphicsCommandList* list,
                             UINT height,
                             DXGI_FORMAT depth_format,
                             const D3D12_RECT* destination,
-                            const D3D12_RECT* content) {
+                            const D3D12_RECT* content,
+                            bool waiting) {
   const BoundedLock lock(runtime().mutex, wait_budget::close_us, &runtime().contended_writes);
   if (!lock)
     return false;
   auto* item = find(key);
-  if (!item || !current_output(*item) || item->status.failed)
+  const bool page = item && item->status.session_active && show_waiting(*item, waiting);
+  if (!item || (page ? !item->waiting_ready : !current_output(*item)) || item->status.failed)
     return false;
+  const auto address = page ? item->waiting_output.address() : item->output.address();
   for (std::size_t i = 0; i < Formats.size(); ++i) {
     if (Formats[i] != format)
       continue;
@@ -630,7 +734,7 @@ bool stamp_at_recording_end(ID3D12GraphicsCommandList* list,
         continue;
       const auto slot = i * DepthFormats.size() + d;
       if (list && item->stamp_ready[slot] && state.can_restore(list) && manager().register_consumer_recording(list) &&
-          item->stamps[slot].record_final_buffer(list, state, item->native, item->output.address(), width, height, destination, content)) {
+          item->stamps[slot].record_final_buffer(list, state, item->native, address, width, height, destination, content)) {
         ++item->status.stamps;
         return true;
       }

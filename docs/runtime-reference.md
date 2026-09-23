@@ -43,7 +43,7 @@ The companion saves settings to:
 %LOCALAPPDATA%\Taxi Cam\profiles\<aircraft-key>.ini
 ~~~
 
-The selected aircraft ID (`profile`) and automatic selection (`automatic`, default 1) are saved in `settings.ini` under `[aircraft]`. The keys are `fbw-a380x`, `ini-a350-900`, `ini-a350-1000`, `ini-a380`, `pmdg-777`, `pmdg-777-300er` and `pmdg-777f`; each has its own calibration file. Keyboard combinations are saved separately in `hotkeys.ini` and apply to all aircraft.
+The selected aircraft ID (`profile`) and automatic selection (`automatic`, default 1) are saved in `settings.ini` under `[aircraft]`. The keys are `fbw-a380x`, `ini-a350-900`, `ini-a350-1000`, `ini-a380`, `pmdg-777`, `pmdg-777-300er`, `pmdg-777f` and `aerosoft-a346`; each has its own calibration file. Keyboard combinations are saved separately in `hotkeys.ini` (`left`, `right`, `both`, `sd`) and apply to all aircraft.
 
 Selecting a profile manually turns off **Auto aircraft**. The loaded aircraft must still match before camera or calibration writes are enabled. When a fresh supported identity differs, status names both the detected aircraft and selected profile, and directs manual users to enable **Auto aircraft** or select the matching profile on Overview.
 
@@ -105,10 +105,12 @@ Each mount stores six values: **right, up, forward, pitch, yaw, lens**.
 | A350-900 tail | 0 | 10 | -33 | -15 | 0 | 0.62 |
 | A350-1000 nose | 0 | -2 | 19.81 | -15 | 0 | 0.55 |
 | A350-1000 tail | 0 | 10 | -36.17 | -15 | 0 | 0.62 |
+| Aerosoft A340-600 nose | 0 | -2.5 | 23.33 | -15 | 0 | 0.55 |
+| Aerosoft A340-600 tail | 0 | 8.18 | -28.99 | -15 | 0 | 0.62 |
 
 Positions are relative to the aircraft datum. Positive pitch looks up; positive yaw turns right. A larger lens value widens the field of view.
 
-The A350-900 mounts use the default visual calibration. The -1000 retains the same height, pitch, yaw and lens with model-specific longitudinal offsets. Its live alignment remains unverified. Saved mounts override the defaults above.
+The A350-900 mounts use the default visual calibration. The -1000 retains the same height, pitch, yaw and lens with model-specific longitudinal offsets. Its live alignment remains unverified. The Aerosoft A340-600 mounts started from the A350-900 offsets relative to its own gear contact points; the defaults are the user's live calibration from 2026-09-23. Saved mounts override the defaults above.
 
 Position components are bounded to ±500 m, pitch to ±89°, yaw to ±180° and lens to 0.05–1.55 radians. Both mounts are saved in the profile.
 
@@ -157,7 +159,7 @@ Each session gets one background attempt. Shader preparation and native camera/c
 
 ## PFD-copy diagnostics
 
-The `Camera retention` log includes `patch_requests`, the number of distinct admitted format/size/content slots, and `patch_draws`, the cumulative number of private patch draws recorded during composition. Repeated matching requests reuse a slot. Both remain zero until a validated copy opportunity requests a patch. After admission, every requested slot is refreshed on later compositions so previously recorded copies remain current across profile changes. `patch_draws` includes prepared work that may be discarded; it is not a completed-frame count.
+The `Camera retention` log includes `patch_requests`, the number of distinct admitted format/size/content slots, and `patch_draws`, the cumulative number of private patch draws recorded during composition. Repeated matching requests reuse a slot. Both remain zero until a validated copy opportunity requests a patch. After admission, every requested slot is refreshed on later compositions so previously recorded copies remain current across profile changes. `patch_draws` includes prepared work that may be discarded; it is not a completed-frame count. `waiting_pages` counts submitted renders of the retained PLEASE WAIT page; it normally stays at one or two per session and rises only when the GS colour or the patch set changes.
 
 The bridge log reports `PFD copy admission` alongside the normal camera counters. `rt_metadata` counts selected-target RT exits seen in native barrier metadata; `rt_callbacks` counts those admitted by the recording/pass checks. `pending_matches` shows same-recording PFD evidence. `view_resolved` also includes verified selected targets whose earlier draw was recorded elsewhere. `attempts`, `rejected`, `state_skips` and `reason` distinguish missing/conflicting typed-view evidence from output or recording rejection. These are cumulative observations, not completed GPU-frame counts.
 
@@ -203,7 +205,7 @@ Mutex:   Local\380TaxiCamera.Control.<MSFS_PID>
 Mapping: Local\380TaxiCamera.Data.<MSFS_PID>
 ~~~
 
-The header contains `magic`, `version`, `bytes`, `owner_pid` and `owner_heartbeat`. Magic is `0x54415849`, protocol version is `12` and size must equal `sizeof(Shared)`. The payload is the native C++ `Settings` and `Status` layout, so the EXE and DLL must be shipped as a compatible pair. Protocol 10 added `in_sim_messages`; protocol 11 appends `parked_rate` to `Settings` and `effective_rate`, `useful_rate`, `rate_limits` and `parked` to `Status` after the protocol 10 layout; protocol 12 renames the setting to `notifications` and appends `notifications` to `Status`: 16 self-describing slots (`serial`, `posted_ms` from `GetTickCount64`, `SimEvent`) that the bridge copies from its lock-free event log every control tick, and the companion shows unseen fresh serials as tray notifications. Session-only TAXI requests carry a serial, selected sides and desired states. Status returns fresh button telemetry and request acknowledgement; these commands are never saved in aircraft calibration.
+The header contains `magic`, `version`, `bytes`, `owner_pid` and `owner_heartbeat`. Magic is `0x54415849`, protocol version is `14` and size must equal `sizeof(Shared)`. The payload is the native C++ `Settings` and `Status` layout, so the EXE and DLL must be shipped as a compatible pair. Protocol 10 added `in_sim_messages`; protocol 11 appends `parked_rate` to `Settings` and `effective_rate`, `useful_rate`, `rate_limits` and `parked` to `Status` after the protocol 10 layout; protocol 12 renames the setting to `notifications` and appends `notifications` to `Status`: 16 self-describing slots (`serial`, `posted_ms` from `GetTickCount64`, `SimEvent`) that the bridge copies from its lock-free event log every control tick, and the companion shows unseen fresh serials as tray notifications. Protocol 13 grew `Settings.mounts` to three feeds; protocol 14 lets the side masks (`manual_mask`, `calibration_mask`, TAXI selections and button telemetry) use bit 2 for the A340-600 lower ECAM, validated against the selected profile's side count. Session-only TAXI requests carry a serial, selected sides and desired states. Status returns fresh button telemetry and request acknowledgement; these commands are never saved in aircraft calibration.
 
 The mapping carries values, IDs and bounded text. It carries no camera pixels or native object pointers. Routine access tries the mutex without blocking. A busy mutex retains the last validated settings only until their original heartbeat expires; a failed read never extends that deadline. Heartbeat age is measured after the read. An abandoned mutex immediately invalidates the bridge cache and clears enable and heartbeat rather than consuming a partial write.
 

@@ -48,6 +48,13 @@ int main() {
   assert(crossing.update(2, true, 59, true, 1, 2) == 1 && crossing.inhibited());
   crossing.sent(0, true);
   assert(crossing.update(3, true, 59, true, 0, 3) == 0 && !crossing.inhibited());
+  // The A340-600 lower ECAM is a third side with its own OFF command.
+  taxi_camera::native_camera::TaxiSpeedCutoff sd;
+  assert(sd.update(1, true, 80, true, 5, 1) == 5 && sd.pending() == 5);
+  sd.sent(0, true);
+  sd.sent(2, true);
+  assert(sd.update(2, true, 80, true, 4, 2) == 0 && sd.pending() == 4);  // Left acknowledged; SD awaits its OFF.
+  assert(sd.update(3, true, 80, true, 0, 3) == 0 && sd.pending() == 0 && sd.inhibited());
 
   TaxiSpeedCutoff manual;
   assert(!manual.update(100, true, 60, false, 0, 0, 60, false) && !manual.inhibited());

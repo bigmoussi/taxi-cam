@@ -45,9 +45,12 @@ void patch_demand_case() {
   require(output.set_patch_profile(taxi_camera::profiles::IniA380.id), "Select ini A380");
   request(taxi_camera::profiles::IniA380, DXGI_FORMAT_R8G8B8A8_UNORM);
   require(output.patch_requests() == 5, "ini A380 starting geometry reuses the existing A380 slot");
+  require(output.set_patch_profile(taxi_camera::profiles::AerosoftA346.id), "Select Aerosoft A346");
+  request(taxi_camera::profiles::AerosoftA346, DXGI_FORMAT_R8G8B8A8_UNORM);
+  require(output.patch_requests() == 6, "The smaller A346 ND reserves its own exact slot");
   require(!output.set_patch_profile(99) && output.set_patch_profile(1), "Invalid profile refuses without losing prior slots");
   request(taxi_camera::profiles::A380, DXGI_FORMAT_R8G8B8A8_UNORM);
-  require(output.patch_requests() == 5 && !output.patch_draws(), "Profile roundtrip retains bounded demand without GPU work");
+  require(output.patch_requests() == 6 && !output.patch_draws(), "Profile roundtrip retains bounded demand without GPU work");
   std::printf("PASS CPU-only typed patch demand: cold, invalid, duplicate, typed formats and retained profile geometry.\n");
 }
 struct ClearStatePipeline {
@@ -503,6 +506,32 @@ void active_profile_switch_case(bool warp) {
   std::array<std::uint64_t, 2> old_routes{};
   SceneCopyObservation initial_match{}, previous_match{};
   UINT64 checked_pixels = 0;
+  // Before fresh feeds, Airbus profiles show the retained PLEASE WAIT page:
+  // black content except the centred text box. No stale camera pixel survives.
+  const auto require_waiting_page = [&](const std::array<std::vector<unsigned char>, 2>& pixels, bool a350, UINT offset,
+                                        const char* label) {
+    constexpr UINT TextWidth = taxi_camera::CameraCompositorD3D12::WaitingTextWidth,
+                   TextHeight = taxi_camera::CameraCompositorD3D12::WaitingTextHeight;
+    constexpr UINT TextLeft = (768 - TextWidth) / 2, TextTop = (763 - TextHeight) / 2;
+    UINT text_pixels = 0;
+    for (UINT side = 0; side < 2; ++side) {
+      const UINT left = a350 && side ? 838u : 0u, width = a350 ? 806u : 768u;
+      const auto row_pitch = footprints[offset + side].Footprint.RowPitch;
+      for (UINT y = 12; y < 763; ++y)
+        for (UINT x = left + 16; x < left + width - 16; ++x) {
+          const auto* pixel = pixels[side].data() + SIZE_T{y} * row_pitch + 4 * x;
+          const auto wx = static_cast<UINT>((x - left - 16 + .5) * 768 / (width - 32));
+          const auto wy = static_cast<UINT>((y - 12 + .5) * 763 / 751);
+          const bool text = wx + 1 >= TextLeft && wx <= TextLeft + TextWidth && wy + 1 >= TextTop && wy <= TextTop + TextHeight;
+          if (!text)
+            require(pixel[0] == 0 && pixel[1] == 0 && pixel[2] == 0 && pixel[3] == 255, label);
+          else if (pixel[1] > 64)
+            ++text_pixels;
+          ++checked_pixels;
+        }
+    }
+    require(text_pixels > 1000, "PLEASE WAIT text reaches both sides");
+  };
   for (UINT phase = 0; phase < 3; ++phase) {
     const bool a350 = phase == 1;
     const auto& profile = a350 ? profiles::A359 : profiles::A380;
@@ -517,7 +546,7 @@ void active_profile_switch_case(bool warp) {
     }
     win::set_aircraft_profile(profile.id);
     runtime::set_composition(key, profile.composition);
-    require(win::target_ids() == std::array<std::uint64_t, 2>{}, "Active profile change clears all previous PFD routes");
+    require(win::target_ids() == std::array<std::uint64_t, taxi_camera::MaxDisplaySides>{}, "Active profile change clears all previous PFD routes");
     if (phase)
       require(!win::assign_targets(old_routes[0], old_routes[1]), "Other-profile PFD routes cannot be reused");
     const auto inventory = win::pfd_inventory();
@@ -550,16 +579,18 @@ void active_profile_switch_case(bool warp) {
     runtime::service();
     require(!runtime::snapshot(key).output && runtime::snapshot(key).frames == old_status.frames,
             "Old composed frame is unavailable before fresh sources");
-    const auto old_stamps = runtime::snapshot(key).stamps;
-    render_displays(offset, 3);
-    require(runtime::snapshot(key).stamps == old_stamps, "No stale profile image can stamp before either fresh feed");
+    service_until([&] { return runtime::snapshot(key).waiting_pages > 0; }, "Retained PLEASE WAIT page is rendered");
+    auto old_stamps = runtime::snapshot(key).stamps;
+    require_waiting_page(render_displays(offset, 3), a350, offset, "No stale profile image can stamp before either fresh feed");
+    require(runtime::snapshot(key).stamps == old_stamps + 2, "PLEASE WAIT covers both current-profile PFDs before fresh feeds");
+    old_stamps = runtime::snapshot(key).stamps;
     const auto completed = runtime::snapshot(key).capture.completed;
     draw_source(0, phase & 1);
     service_until([&] { return runtime::snapshot(key).capture.completed > completed; }, "Fresh nose capture completes");
     require(!runtime::snapshot(key).output && runtime::snapshot(key).frames == old_status.frames,
             "One fresh feed cannot pair with the old profile tail");
-    render_displays(offset, 3);
-    require(runtime::snapshot(key).stamps == old_stamps, "No stale mixed-profile image can stamp after only one fresh feed");
+    require_waiting_page(render_displays(offset, 3), a350, offset, "No stale mixed-profile image can stamp after only one fresh feed");
+    require(runtime::snapshot(key).stamps == old_stamps + 2, "PLEASE WAIT stays until both fresh feeds compose");
     Sleep(20);
     draw_source(1, phase & 1);
     service_until([&] { return runtime::snapshot(key).output && runtime::snapshot(key).frames > old_status.frames; },
@@ -568,6 +599,16 @@ void active_profile_switch_case(bool warp) {
     const auto before = runtime::snapshot(key).stamps;
     const auto on = render_displays(offset, 3);
     require(runtime::snapshot(key).stamps == before + 2, "Fresh camera images reach both current-profile PFDs");
+    if (phase == 2) {
+      // With the age rule on, a camera image that stops updating is replaced
+      // by the retained PLEASE WAIT page on both sides.
+      runtime::set_waiting_stale_ms(200);
+      Sleep(300);
+      const auto stale_before = runtime::snapshot(key).stamps;
+      require_waiting_page(render_displays(offset, 3), a350, offset, "A stale camera image is replaced by PLEASE WAIT");
+      require(runtime::snapshot(key).stamps == stale_before + 2, "PLEASE WAIT covers both sides once the camera image is stale");
+      runtime::set_waiting_stale_ms(0);
+    }
     UINT nose_pixels = 0, tail_pixels = 0;
     for (UINT side = 0; side < 2; ++side) {
       const UINT left = a350 && side ? 838u : 0u, width = a350 ? 806u : 768u;
@@ -1014,7 +1055,7 @@ void native_case(bool warp,
     for (std::size_t i = 0; i < learned.size(); ++i)
       learned_ids[i] = learned[i].id;
     std::sort(learned_ids.begin(), learned_ids.end());
-    require(learned_pair == std::array<std::uint64_t, 2>{learned_ids[7], learned_ids[5]},
+    require(learned_pair == std::array<std::uint64_t, taxi_camera::MaxDisplaySides>{learned_ids[7], learned_ids[5]},
             "Complete late-discovered ini group retains automatic last and third-last selection");
   }
   const auto key = win::graphics_status().device;
@@ -1059,15 +1100,15 @@ void native_case(bool warp,
   require(win::assign_targets(first, second), "Explicit PFD pair");
   require(!win::assign_targets(inventory[0].id, inventory[0].id), "Reject duplicate PFD identity");
   win::set_aircraft_profile(profile.id);
-  require(win::target_ids() == std::array<std::uint64_t, 2>{}, "Same-aircraft session clears old display bindings");
+  require(win::target_ids() == std::array<std::uint64_t, taxi_camera::MaxDisplaySides>{}, "Same-aircraft session clears old display bindings");
   require(win::pfd_inventory().size() == display_count, "Same-aircraft session preserves live resource incarnations");
   require(win::assign_targets(first, second), "Same-aircraft session reacquires existing displays");
   win::set_aircraft_profile(a350 ? taxi_camera::profiles::A380.id : taxi_camera::profiles::A359.id);
-  require(win::target_ids() == std::array<std::uint64_t, 2>{} && win::pfd_inventory().empty(),
+  require(win::target_ids() == std::array<std::uint64_t, taxi_camera::MaxDisplaySides>{} && win::pfd_inventory().empty(),
           "Other aircraft profile releases bindings and rejects previous display dimensions");
   require(!win::assign_targets(first, second), "Previous aircraft display IDs cannot bind the other profile");
   win::set_aircraft_profile(profile.id);
-  require(win::target_ids() == std::array<std::uint64_t, 2>{} && win::pfd_inventory().size() == display_count,
+  require(win::target_ids() == std::array<std::uint64_t, taxi_camera::MaxDisplaySides>{} && win::pfd_inventory().size() == display_count,
           "Profile round trip returns to unbound eligible displays");
   require(win::assign_targets(first, second), "Profile round trip reacquires existing displays");
   for (const auto& item : win::pfd_inventory())

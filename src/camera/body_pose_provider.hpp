@@ -34,6 +34,9 @@ struct TaxiButtonSample {
   bool valid = false;
   bool left_on = false;
   bool right_on = false;
+  // Lower ECAM selector, on profiles with a third display side.
+  bool sd_on = false;
+  unsigned mask() const noexcept { return (left_on ? 1u : 0u) | (right_on ? 2u : 0u) | (sd_on ? 4u : 0u); }
   std::uint64_t sample_ms = 0;
   const char* error = "not_initialized";
 };
@@ -161,7 +164,7 @@ bool accept_aircraft_packet(const void* packet, std::uint32_t bytes, std::uint64
 GroundSpeedSample ground_speed_at(std::uint64_t now_ms) noexcept;
 bool accept_on_ground_packet(const void* packet, std::uint32_t bytes, std::uint64_t sample_ms) noexcept;
 OnGroundSample on_ground_at(std::uint64_t now_ms) noexcept;
-bool accept_taxi_packet(const void* packet, std::uint32_t bytes, std::uint64_t sample_ms) noexcept;
+bool accept_taxi_packet(const void* packet, std::uint32_t bytes, std::uint64_t sample_ms, unsigned sides = 2) noexcept;
 TaxiButtonSample taxi_buttons_at(std::uint64_t now_ms) noexcept;
 bool accept_lighting_packet(const void* packet, std::uint32_t bytes, std::uint64_t sample_ms) noexcept;
 LightingSample lighting_at(std::uint64_t now_ms) noexcept;

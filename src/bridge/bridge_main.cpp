@@ -16,6 +16,7 @@
 #include "../shared/rotating_log.hpp"
 #include "../shared/scene_demand.hpp"
 #include "../shared/sim_messages.hpp"
+#include "../shared/waiting_page.hpp"
 #include "camera_status.hpp"
 #include "crash_evidence.hpp"
 #include "d3d12_bridge.hpp"
@@ -238,6 +239,7 @@ DWORD run_impl() {
   wchar_t gpu_timing_option[2]{};
   const bool gpu_timing = GetEnvironmentVariableW(L"TAXI_CAM_GPU_TIMING", gpu_timing_option, 2) == 1 && gpu_timing_option[0] == L'1';
   scene_runtime::set_gpu_timing_enabled(gpu_timing);
+  scene_runtime::set_waiting_stale_ms(profiles::WaitingPageStaleMs);
   wchar_t graphics_diagnostics_option[2]{};
   const bool graphics_diagnostics = GetEnvironmentVariableW(L"TAXI_CAM_GRAPHICS_DIAGNOSTICS", graphics_diagnostics_option, 2) == 1 &&
                                     graphics_diagnostics_option[0] == L'1';
@@ -270,6 +272,7 @@ DWORD run_impl() {
   std::vector<PfdTargetObservation> inventory;
   unsigned rate{}, feeds{}, applied_profile{};
   ParkedRatePolicy parked_policy;
+  win::WaitingPageTimer waiting_page;
   EffectiveCameraRate effective_rate;
   std::uint64_t applied_profile_request{}, applied_session_epoch{};
   std::uint64_t pending_profile_request{}, pending_session_epoch{}, transition_token{};
@@ -559,12 +562,14 @@ DWORD run_impl() {
     const bool manual_only = profile && profile->taxi_control == profiles::TaxiControl::manual_only;
     const auto buttons = native_camera::get_taxi_buttons();
     const auto cutoff = native_camera::get_taxi_cutoff();
-    const auto desired = intent.observe(now, buttons.valid, buttons.left_on, buttons.right_on);
+    const auto desired = intent.observe(now, buttons.valid, buttons.mask());
+    const unsigned sides = profile ? profiles::side_mask(*profile) : PilotDisplaySides;
     const unsigned mask = connected && session_settings && session.ready && settings.enabled && aircraft_matches && win::graphics_ready() &&
                                   !cutoff.inhibited && !degraded
                               ? (settings.follow_taxi && !manual_only ? desired.buttons
                                  : session_settings                   ? settings.manual_mask
-                                                                      : 0)
+                                                                      : 0) &
+                                    sides
                               : 0;
     const bool test_scene = connected && session_settings && session.ready && settings.enabled && aircraft_matches && settings.scene_test &&
                             !cutoff.inhibited && !degraded;
@@ -572,7 +577,10 @@ DWORD run_impl() {
     if (!mask && !test_scene && !prewarm.active())
       failed = false;
     const auto targets = win::target_ids();
-    const unsigned assigned = (targets[0] ? 1u : 0u) | (targets[1] ? 2u : 0u);
+    unsigned assigned = 0;
+    for (unsigned side = 0; side < targets.size(); ++side)
+      assigned |= targets[side] ? 1u << side : 0u;
+    assigned &= sides;
     const auto speed = native_camera::get_ground_speed();
     const auto setup_current = [&]() {
       const auto epoch = native_camera::get_aircraft_session_epoch();
@@ -642,6 +650,8 @@ DWORD run_impl() {
     // Warmup and scene-only diagnostics need capture observation without PFD
     // writes. Settled OFF may bypass PFD state while lifetime tracking remains.
     win::set_graphics_observation_demand(!demand.suspend || calibration != 0);
+    // Before the target mask: a newly admitted side starts on the waiting page.
+    win::set_waiting_mask(waiting_page.observe(GetTickCount64(), active));
     win::set_target_mask(active);
     win::set_calibration(calibration, settings.calibration_budget);
     const win::OwnedWork owned;
@@ -670,7 +680,7 @@ DWORD run_impl() {
     }
     if (!startup.observed && (mask || test_scene)) {
       startup.observed = true;
-      startup.intent_mask = mask & 3;
+      startup.intent_mask = mask & AllDisplaySides;
       startup.intent_ms = intent_observed_ms;
       startup.baseline_stamps = scene_runtime::snapshot(key).stamps;
       log_startup(status, startup, "accepted_intent");
@@ -833,7 +843,7 @@ DWORD run_impl() {
     const auto taxi_request_status = native_camera::get_taxi_button_request_status();
     const auto command_buttons = native_camera::get_taxi_buttons();
     status.taxi_buttons_valid = command_buttons.valid;
-    status.taxi_buttons_mask = (command_buttons.left_on ? 1u : 0u) | (command_buttons.right_on ? 2u : 0u);
+    status.taxi_buttons_mask = command_buttons.mask();
     status.taxi_buttons_sample_ms = command_buttons.sample_ms;
     status.taxi_request_seen = taxi_request_status.serial;
     status.taxi_request_retired = taxi_request_status.pending_mask ? 0 : taxi_request_status.serial;
@@ -1138,12 +1148,14 @@ DWORD run_impl() {
       std::snprintf(
           retention_detail, sizeof(retention_detail),
           "Camera retention: created_total=%llu snapshot_bytes=%llu quarantined=%llu prewarm=%s patch_requests=%u patch_draws=%llu "
+          "waiting_pages=%llu "
           "retirement_deferrals=%llu retirement_waiting=%u retirement_status=%s retirement_queues=%u/%u "
           "flags=%llx:%llx/%llx:%llx aa_restores=%llu aa_restore_failures=%llu aa_cleared_pending=%u rt=%03x/%03x rt_refusals=%u "
           "rt_holds=%llu",
           static_cast<unsigned long long>(scene.created_total), static_cast<unsigned long long>(output.capture.bytes),
           static_cast<unsigned long long>(output.capture.quarantined), prewarm.name(), output.patch_requests,
-          static_cast<unsigned long long>(output.patch_draws), static_cast<unsigned long long>(scene.retirement_deferrals),
+          static_cast<unsigned long long>(output.patch_draws), static_cast<unsigned long long>(output.waiting_pages),
+          static_cast<unsigned long long>(scene.retirement_deferrals),
           scene.retirement_waiting, scene.retirement_status, scene.retirement_queue_counts[0], scene.retirement_queue_counts[1],
           static_cast<unsigned long long>(scene.flags[0][0]), static_cast<unsigned long long>(scene.flags[0][1]),
           static_cast<unsigned long long>(scene.flags[1][0]), static_cast<unsigned long long>(scene.flags[1][1]),

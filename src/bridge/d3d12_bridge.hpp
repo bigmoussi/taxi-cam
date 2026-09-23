@@ -192,8 +192,11 @@ void service_live_backfill(std::uint64_t now, std::size_t inventory_count) noexc
 void service_display_patches() noexcept;
 bool assign_targets(std::uint64_t left, std::uint64_t right) noexcept;
 void set_target_mask(unsigned mask) noexcept;
+// Active sides inside their minimum PLEASE WAIT time. Only narrows what an
+// admitted side draws; it never admits a side for display writes.
+void set_waiting_mask(unsigned mask) noexcept;
 void set_calibration(unsigned mask, unsigned budget) noexcept;
-std::array<std::uint64_t, 2> target_ids() noexcept;
+std::array<std::uint64_t, MaxDisplaySides> target_ids() noexcept;
 // Control-thread flight reset: drop routes/activity and make all older recording
 // proofs ineligible. Keep native metadata and already-recorded GPU ownership.
 void reset_display_session() noexcept;

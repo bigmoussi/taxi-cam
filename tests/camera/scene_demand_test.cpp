@@ -310,8 +310,11 @@ int main() {
     require(!failed.start && failed.suspend && !failed.stamp_mask, "A failed start retried or stamped without permission");
     const auto test = taxi_camera::standalone::scene_demand(0, true, 0, false, false);
     require(test.start && !test.suspend && !test.stamp_mask, "Scene test incorrectly required a display target");
-    const auto unknown = taxi_camera::standalone::scene_demand(4, false, 7, false, false);
+    const auto unknown = taxi_camera::standalone::scene_demand(8, false, 15, false, false);
     require(!unknown.start && unknown.suspend && !unknown.stamp_mask, "Unknown demand bits created or stamped views");
+    // Bit 2 is the A340-600 lower ECAM; the bridge first limits it to the profile's sides.
+    const auto sd = taxi_camera::standalone::scene_demand(4, false, 7, false, false);
+    require(sd.start && !sd.suspend && sd.stamp_mask == 4, "The SD side starts and stamps like the pilot displays");
     std::puts(
         "PASS scene demand: prepare once before discovery, matched-target-only writes, scene-only test, left/OFF/right, retained "
         "pair, three completed background pairs, loading pause/resume, setup/render budgets and closed idle gates at 15/60 fps. Mock "

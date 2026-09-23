@@ -717,5 +717,17 @@ int main() {
   assert(!inboard.observe(reversed.data(), reversed.size(), 4000).valid);
   assert(std::strcmp(inboard.snapshot().status, "candidate_disappeared") == 0 && inboard.snapshot().targets[0] == 0);
 
+  // Aerosoft A346: both NDs are rectangles on one 4096 $GAUGES_UNIFIED texture.
+  // A 2048 PMDG-sized texture is not a candidate for this profile.
+  static PfdTargetDetector unified;
+  const auto& a346 = taxi_camera::profiles::AerosoftA346;
+  unified.configure(a346);
+  std::array<PfdTargetObservation, 2> gauges{{{7, 50, 2048, 2048, 1, 28}, {12, 5, a346.width, a346.height, 1, 28}}};
+  assert(!unified.observe(gauges.data(), gauges.size(), 0).valid);
+  assert(!unified.observe(gauges.data(), gauges.size(), 1000).valid);
+  assert(!unified.observe(gauges.data(), gauges.size(), 2000).valid);
+  const auto& gauges_found = unified.observe(gauges.data(), gauges.size(), 3000);
+  assert(gauges_found.valid && gauges_found.targets[0] == 12 && gauges_found.targets[1] == 0);
+
   std::puts("PFD target detector: PASS");
 }

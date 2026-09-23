@@ -3,6 +3,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include "../shared/display_sides.hpp"
 
 namespace taxi_camera::native_camera {
 
@@ -31,12 +32,12 @@ class TaxiSpeedCutoff {
     // Latch the crossing even when button telemetry is briefly missing. A
     // later low-speed sample must not silently cancel the required OFF.
     if (over_)
-      pending_ |= 3u;
+      pending_ |= AllDisplaySides;
     unsigned commands = 0;
     if (!buttons_valid || !button_sample || button_sample > now || now - button_sample > 500)
       return commands;
-    on &= 3u;
-    for (unsigned side = 0; side < 2; ++side) {
+    on &= AllDisplaySides;
+    for (unsigned side = 0; side < MaxDisplaySides; ++side) {
       const auto bit = 1u << side;
       if (!(on & bit)) {
         if (!waiting_[side] || button_sample > sent_sample_[side]) {
@@ -56,13 +57,13 @@ class TaxiSpeedCutoff {
     return commands;
   }
   void sent(unsigned side, bool accepted) noexcept {
-    if (side < 2 && accepted)
+    if (side < MaxDisplaySides && accepted)
       waiting_[side] = true;
   }
   // A correlated SimConnect rejection proves the accepted command did not
   // execute. Keep OFF pending and the retry delay; release only its ACK wait.
   void rejected(unsigned side) noexcept {
-    if (side < 2)
+    if (side < MaxDisplaySides)
       waiting_[side] = false;
   }
   bool inhibited() const noexcept { return over_ || pending_ != 0; }
@@ -71,8 +72,8 @@ class TaxiSpeedCutoff {
  private:
   bool over_ = false;
   unsigned pending_ = 0;
-  std::array<bool, 2> waiting_{};
-  std::array<std::uint64_t, 2> sent_sample_{}, next_attempt_{};
+  std::array<bool, MaxDisplaySides> waiting_{};
+  std::array<std::uint64_t, MaxDisplaySides> sent_sample_{}, next_attempt_{};
 };
 
 }  // namespace taxi_camera::native_camera

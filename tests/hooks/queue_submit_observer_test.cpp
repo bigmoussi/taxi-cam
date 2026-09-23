@@ -399,6 +399,7 @@ void augmentation() {
   auto* b = reinterpret_cast<ID3D12CommandList*>(0x20000);
   auto* x = reinterpret_cast<ID3D12CommandList*>(0x30000);
   auto* y = reinterpret_cast<ID3D12CommandList*>(0x40000);
+  auto* z = reinterpret_cast<ID3D12CommandList*>(0x50000);
   ID3D12CommandList* original[]{a, b};
   const auto run = [&](UINT accepted) {
     const auto calls = queue->calls.load(), after_count = context->after.load(), result_count = context->result_calls.load();
@@ -441,9 +442,21 @@ void augmentation() {
   run(0);
   context->insertion_count = 0;
   run(0);
-  context->insertion_count = 3;
+  context->insertion_count = qs::kMaximumInsertions + 1;
   run(0);
+  // One copy per display side: captain, first officer and the A340-600 lower ECAM.
+  static_assert(qs::kMaximumInsertions == 3);
+  context->insertion_count = 3;
+  context->insertions = {{{0, x, true}, {0, y}, {1, z}}};
+  context->expected_lists = {x, a, y, b, z};
+  context->expected_count = 5;
+  run(3);
+  context->insertions = {{{0, x}, {0, y, true}, {1, z}}};
+  run(0);  // Out of batch order.
+  context->insertions = {{{0, x}, {1, y}, {1, x}}};
+  run(0);  // Repeated inserted list.
   context->insertion_count = 2;
+  context->expected_count = 4;
   context->insertions = {{{1, x}, {0, y}}};
   run(0);
   context->insertions = {{{0, x}, {2, y}}};
@@ -470,7 +483,7 @@ void augmentation() {
   context->expected_lists[1] = x;
   for (UINT i = 1; i < maximum.size(); ++i)
     context->expected_lists[i + 1] = maximum[i];
-  context->expected_lists.back() = y;
+  context->expected_lists[qs::kMaximumCommandLists + 1] = y;
   context->expected_count = qs::kMaximumCommandLists + 2;
   invoke(queue, static_cast<UINT>(maximum.size()), maximum.data());
   require(queue->bad == 0 && context->bad == 0 && context->last_inserted == 2,
@@ -479,7 +492,7 @@ void augmentation() {
   context->expected_lists[0] = x;
   for (UINT i = 0; i < maximum.size(); ++i)
     context->expected_lists[i + 1] = maximum[i];
-  context->expected_lists.back() = y;
+  context->expected_lists[qs::kMaximumCommandLists + 1] = y;
   invoke(queue, static_cast<UINT>(maximum.size()), maximum.data());
   require(queue->bad == 0 && context->bad == 0 && context->last_inserted == 2,
           "Maximum-size batch could not prepend and append while retaining all original entries");
