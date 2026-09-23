@@ -3144,6 +3144,9 @@ void set_graphics_armed(bool armed) noexcept {
   registry().armed.store(open, std::memory_order_release);
   runtime::manager().set_submission_gate(open);
 }
+bool queued_wait_stalled(std::uint64_t now_ms, std::uint64_t stall_ms) noexcept {
+  return runtime::manager().queued_wait_stalled(now_ms, stall_ms);
+}
 bool graphics_admission_halted() noexcept {
   return registry().admission_halted.load(std::memory_order_acquire);
 }

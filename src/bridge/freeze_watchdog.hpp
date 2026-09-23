@@ -13,6 +13,13 @@ namespace taxi_camera {
 // sim_frames counts SIMCONNECT_PERIOD_SIM_FRAME telemetry packets; it stops in
 // menus and while paused, so on its own it can only substitute for the pulse
 // while no direct queue has been observed yet.
+//
+// Neither counter sees the GPU. When a simulator queue is held on one of our
+// timeline Waits, the simulator keeps recording and submitting, so both keep
+// advancing while the image is frozen (Frame Generation switched on in flight,
+// issue 69: more than eight minutes without a trip). bridge_wait_stalled
+// reports that case directly and trips on its own. It recovers like any trip;
+// a second one in the same armed period latches the cameras off.
 class FreezeWatchdog {
  public:
   static constexpr std::uint64_t StallMs = 3000;
@@ -25,6 +32,7 @@ class FreezeWatchdog {
     bool sim_frames_expected = false;  // Flight session ready: SIM_FRAME should flow.
     bool armed = false;                // Bridge connected with hooks installed.
     bool worker_alive = false;         // Bridge worker heartbeat is recent.
+    bool bridge_wait_stalled = false;  // A simulator queue is held on our Wait (QueuedWaitStall).
   };
   struct Decision {
     bool trip = false;
@@ -47,6 +55,8 @@ class FreezeWatchdog {
       pulse_since_ = sim_since_ = 0;
       recover_since_ = 0;
       telemetry_noted_ = presentation_noted_ = false;
+      wait_trips_ = 0;
+      latched_ = false;
       return decision;
     }
     const bool pulse_advanced = sample.pulse_available && (pulse_since_ == 0 || sample.frame_pulse != last_pulse_);
@@ -72,6 +82,9 @@ class FreezeWatchdog {
     const bool sim_stalled = sim_stalled_ms >= StallMs;
     const bool telemetry_stalled = sample.sim_frames_expected && sim_stalled;
     if (tripped_) {
+      // Re-arming after a second held Wait would freeze the simulator again.
+      if (latched_)
+        return decision;
       const bool progressing = sample.pulse_available ? pulse_advanced : sim_advanced;
       if (!progressing) {
         recover_since_ = 0;
@@ -85,6 +98,16 @@ class FreezeWatchdog {
         decision.recover = true;
         decision.reason = "presentation_resumed";
       }
+      return decision;
+    }
+    if (sample.bridge_wait_stalled) {
+      tripped_ = true;
+      ++trips_;
+      latched_ = ++wait_trips_ >= 2;
+      recover_since_ = 0;
+      decision.trip = true;
+      decision.reason = latched_ ? "bridge_queue_wait_stalled_latched" : "bridge_queue_wait_stalled";
+      decision.stalled_ms = StallMs;
       return decision;
     }
     if ((pulse_stalled && (sim_stalled || !sim_known)) || (!sample.pulse_available && telemetry_stalled)) {
@@ -113,6 +136,7 @@ class FreezeWatchdog {
   }
 
   bool tripped() const noexcept { return tripped_; }
+  bool latched() const noexcept { return latched_; }
   unsigned trips() const noexcept { return trips_; }
 
  private:
@@ -120,7 +144,9 @@ class FreezeWatchdog {
   std::uint64_t last_sim_ = 0, sim_since_ = 0;
   std::uint64_t recover_since_ = 0;
   unsigned trips_ = 0;
+  unsigned wait_trips_ = 0;
   bool tripped_ = false;
+  bool latched_ = false;
   bool telemetry_noted_ = false;
   bool presentation_noted_ = false;
 };

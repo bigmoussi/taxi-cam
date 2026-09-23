@@ -177,6 +177,9 @@ std::uint64_t frame_pulse() noexcept;
 // queue copy is planned, and the capture manager escapes every submission.
 // An atomic store; never waits and never touches a GPU resource.
 void set_graphics_armed(bool armed) noexcept;
+// Watchdog thread only: a simulator queue has been held on one of our timeline
+// Waits, with no GPU progress, for stall_ms (see QueuedWaitStall).
+bool queued_wait_stalled(std::uint64_t now_ms, std::uint64_t stall_ms) noexcept;
 bool graphics_armed() noexcept;
 // True once hook registration failures exceeded the storm rate; the bridge
 // stays disarmed for the rest of the simulator process.

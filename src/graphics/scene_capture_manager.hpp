@@ -5,6 +5,7 @@
 #include "../shared/camera_rate.hpp"
 #include "owned_gpu_timing.hpp"
 #include "pfd_submission_pool.hpp"
+#include "queued_wait_stall.hpp"
 #include "scene_capture_d3d12.hpp"
 #include "scene_handoff.hpp"
 #include "scene_source_state.hpp"
@@ -317,6 +318,10 @@ class SceneCaptureManager {
   // Atomic; callable from any thread.
   void set_submission_gate(bool open) noexcept;
   bool submission_gate_open() const noexcept;
+  // Watchdog thread only. True once a timeline value already passed to a
+  // simulator queue Wait has stayed incomplete, its fence not advancing, for
+  // stall_ms. Reads the published fences without a bridge mutex.
+  bool queued_wait_stalled(std::uint64_t now_ms, std::uint64_t stall_ms) noexcept;
   // True when the most recent evidence or registration call on this thread
   // skipped because its bounded wait expired, not because it was refused.
   static bool last_call_contended() noexcept;
@@ -524,6 +529,7 @@ class SceneCaptureManager {
     std::atomic<std::uint64_t> released{0};
   };
   std::array<PublishedTimeline, MaximumDevices> published_timelines_{};
+  QueuedWaitStall<MaximumDevices> queued_wait_stall_;  // Watchdog thread only.
   std::atomic<std::uint32_t> deferred_sources_{}, deferred_uncertain_{}, deferred_origins_{};
   std::atomic<bool> deferred_recordings_{};
   DeferredRing<DeferredWork, 256> deferred_work_;

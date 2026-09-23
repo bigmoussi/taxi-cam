@@ -160,6 +160,19 @@ void SceneCaptureManager::release_queued_waits() noexcept {
     released_waits_.fetch_add(1, std::memory_order_relaxed);
   }
 }
+bool SceneCaptureManager::queued_wait_stalled(std::uint64_t now_ms, std::uint64_t stall_ms) noexcept {
+  // Same lock-free reads as release_queued_waits, on the same thread.
+  bool stalled = false;
+  for (std::size_t index = 0; index < published_timelines_.size(); ++index) {
+    auto& slot = published_timelines_[index];
+    auto* fence = slot.fence.load(std::memory_order_acquire);
+    const auto waited = fence ? slot.waited.load(std::memory_order_acquire) : 0;
+    const auto released = slot.released.load(std::memory_order_acquire);
+    const auto completed = waited ? fence->GetCompletedValue() : 0;
+    stalled |= queued_wait_stall_.observe(index, waited, released, completed, now_ms, stall_ms);
+  }
+  return stalled;
+}
 void SceneCaptureManager::publish_queued_wait(Device& owner) noexcept {
   const auto index = static_cast<std::size_t>(&owner - devices_.data());
   if (index >= published_timelines_.size() || !owner.timeline || !owner.last_signal)

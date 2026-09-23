@@ -168,7 +168,8 @@ DWORD WINAPI watchdog_run(void*) noexcept {
     const auto pulse = win::frame_pulse();
     const auto decision = watchdog.observe({now, pulse, pulse != 0, telemetry.accepted_samples, session.ready,
                                             win::graphics_ready() && bridge_connected.load(std::memory_order_acquire),
-                                            heartbeat != 0 && now >= heartbeat && now - heartbeat < WorkerAliveMs});
+                                            heartbeat != 0 && now >= heartbeat && now - heartbeat < WorkerAliveMs,
+                                            win::queued_wait_stalled(now, FreezeWatchdog::StallMs)});
     if (!decision.trip && !decision.recover && !decision.telemetry_stall_noted && !decision.presentation_stall_noted)
       continue;
     win::Status status{};

@@ -2,9 +2,11 @@
 #include <cstdio>
 #include <mutex>
 #include <stdexcept>
+#include <string>
 #include <thread>
 
 #include "../../src/bridge/freeze_watchdog.hpp"
+#include "../../src/graphics/queued_wait_stall.hpp"
 #include "../../src/shared/bounded_lock.hpp"
 
 namespace {
@@ -238,6 +240,83 @@ void watchdog() {
   }
   require(early_trip, "Stalled telemetry did not substitute for a missing presentation pulse");
 }
+
+void queued_wait_stall() {
+  taxi_camera::QueuedWaitStall<2> stall;
+  constexpr std::uint64_t window = 3000;
+  std::uint64_t now = 1000;
+  // Healthy GPU: the fence reaches each waited value, nothing is pending.
+  for (std::uint64_t value = 1; value < 40; ++value) {
+    now += 250;
+    require(!stall.observe(0, value, 0, value, now, window), "A satisfied Wait was reported stalled");
+  }
+  // GPU behind but advancing: pending, never stalled.
+  for (std::uint64_t value = 40; value < 80; ++value) {
+    now += 250;
+    require(!stall.observe(0, value + 2, 0, value, now, window), "An advancing fence was reported stalled");
+  }
+  // Fence stops short of the waited value: the window opens at the first
+  // sample that sees it stopped, and it is stalled only once it has elapsed.
+  const auto start = now + 250;
+  bool reported = false;
+  for (unsigned i = 0; i < 20; ++i) {
+    now += 250;
+    const bool stalled = stall.observe(0, 90, 0, 85, now, window);
+    if (stalled && !reported) {
+      reported = true;
+      require(now - start >= window && now - start < window + 500, "Held Wait was not reported at the window bound");
+    }
+    require(stalled == (now - start >= window), "Held Wait reported before the window");
+  }
+  require(reported, "A held Wait was never reported");
+  // Released from the CPU (gate closed), or device removed: no longer pending.
+  now += 250;
+  require(!stall.observe(0, 90, 90, 85, now, window), "A released Wait stayed stalled");
+  now += 250;
+  require(!stall.observe(1, 90, 0, taxi_camera::QueuedWaitStall<2>::DeviceRemoved, now, window), "A removed device was reported stalled");
+  // A slot restarts its window after progress; another slot is independent.
+  for (unsigned i = 0; i < 20; ++i) {
+    now += 250;
+    require(!stall.observe(1, 50, 0, 40 + i % 2, now, window), "A fence that keeps moving was reported stalled");
+  }
+  require(!stall.observe(7, 50, 0, 1, now, window), "Out-of-range slot was reported");
+}
+
+void watchdog_bridge_wait() {
+  using taxi_camera::FreezeWatchdog;
+  FreezeWatchdog dog;
+  std::uint64_t now = 200000, pulse = 10, frames = 100;
+  auto held = [&](bool stalled) {
+    auto value = sample(now, ++pulse, ++frames);
+    value.bridge_wait_stalled = stalled;
+    return value;
+  };
+  // Issue 69: pulse and SIM_FRAME keep advancing, only our Wait is held.
+  now += 250;
+  auto decision = dog.observe(held(true));
+  require(decision.trip && dog.tripped() && !dog.latched(), "A held bridge Wait did not trip despite a live pulse");
+  require(std::string(decision.reason) == "bridge_queue_wait_stalled", "Held Wait trip reason missing");
+  // The released Wait lets the simulator run: normal recovery.
+  bool recovered = false;
+  for (unsigned i = 0; i < 30; ++i) {
+    now += 250;
+    recovered |= dog.observe(held(false)).recover;
+  }
+  require(recovered && !dog.tripped(), "Watchdog did not recover after the held Wait was released");
+  // Second held Wait in the same armed period: latched, never recovers.
+  now += 250;
+  decision = dog.observe(held(true));
+  require(decision.trip && dog.latched(), "Second held Wait did not latch");
+  require(std::string(decision.reason) == "bridge_queue_wait_stalled_latched", "Latched trip reason missing");
+  for (unsigned i = 0; i < 60; ++i) {
+    now += 250;
+    require(!dog.observe(held(false)).recover, "Latched watchdog recovered");
+  }
+  // Disarming (flight end, reconnect) clears the latch.
+  now += 250;
+  dog.observe(sample(now, pulse, frames, false));
+  require(!dog.latched(), "Disarm did not clear the latch");
+}
 }  // namespace
 
 int main() {
@@ -245,6 +324,8 @@ int main() {
     bounded_lock();
     deferred_ring();
     watchdog();
+    queued_wait_stall();
+    watchdog_bridge_wait();
   } catch (const std::exception& error) {
     std::fprintf(stderr, "freeze guards: %s\n", error.what());
     return 1;
