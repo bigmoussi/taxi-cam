@@ -7,7 +7,7 @@ function Replace-Exact([string]$Path, [string]$Old, [string]$New, [string]$Label
   $full = Join-Path $repo $Path
   $text = [IO.File]::ReadAllText($full)
   $count = ([regex]::Matches($text, [regex]::Escape($Old))).Count
-  if ($count -ne 1) { throw "$Label: expected exactly one match, got $count in $Path" }
+  if ($count -ne 1) { throw "${Label}: expected exactly one match, got $count in $Path" }
   [IO.File]::WriteAllText($full, $text.Replace($Old, $New), [Text.UTF8Encoding]::new($false))
 }
 
