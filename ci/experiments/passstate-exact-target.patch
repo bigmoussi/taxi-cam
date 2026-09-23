@@ -9,7 +9,7 @@ diff --git a/src/bridge/d3d12_bridge.cpp b/src/bridge/d3d12_bridge.cpp
  
  namespace taxi_camera::standalone {
  namespace {
-@@ -1058,8 +1059,13 @@ void invalidate(void*, ID3D12GraphicsCommandList* native, std::uint64_t id, std:
+@@ -1058,8 +1059,12 @@ void invalidate(void*, ID3D12GraphicsCommandList* native, std::uint64_t id, std:
      list->pending_rt = {};
      list->pfd_dirty = false;
    }
