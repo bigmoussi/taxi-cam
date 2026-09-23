@@ -1,6 +1,16 @@
 {
   "releases": [
     {
+      "version": "0.9.41",
+      "date": "2026-09-23",
+      "changes": [
+        "New Aerosoft A340-600 profile, showing the cameras on both PFDs and the lower ECAM, controlled by the CAM CAPT, CAM F/O and CAM SD selectors.",
+        "Ctrl + Shift + D toggles the A340-600 lower ECAM camera. Both still toggles only the pilot displays.",
+        "Displays show a black PLEASE WAIT page while their cameras start or when the camera image stops updating. It is white on the PMDG 777.",
+        "Choosing the display texture by hand on the PMDG 777 now routes it to both navigation displays."
+      ]
+    },
+    {
       "version": "0.9.39",
       "date": "2026-09-23",
       "changes": [
