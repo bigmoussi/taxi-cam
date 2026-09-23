@@ -37,6 +37,19 @@ struct Observation {
   std::uint64_t address = 0;
   std::uint32_t size = 0;
   std::array<std::uint8_t, 16> bytes{};
+  std::int32_t span = -1;  // Served from this span, or -1 for its own read.
+};
+
+// One exact read of an object's known extent: from the first to the end of the
+// last field this trace may observe in that object. Fields inside it are served
+// from that read, so neighbouring fields cost one ReadProcessMemory instead of
+// one each. The recheck rereads the span once, fresh, and compares only the
+// bytes each field observed.
+constexpr std::uint32_t kSpanBytes = 144;
+struct Span {
+  std::uint64_t address = 0;
+  std::uint32_t size = 0;
+  std::array<std::uint8_t, kSpanBytes> bytes{};
 };
 
 template <typename Result>
@@ -44,16 +57,53 @@ class BoundedReader {
  public:
   BoundedReader(MemoryReader& reader, Result& result) noexcept : reader_(reader), result_(result) {}
 
+  // Reads [address+begin, address+end) now. Call only with the extent of fields
+  // this trace goes on to observe in the same object.
+  bool span(std::uint64_t address, std::uint64_t begin, std::uint64_t end, bool require_aligned = true) noexcept {
+    if (end <= begin || end - begin > kSpanBytes ||
+        !pointer_range(address, begin, static_cast<std::uint32_t>(end - begin), require_aligned))
+      return fail(result_, OwnedViewStatus::invalid_pointer, "A required object span has a null, misaligned or overflowing pointer.");
+    for (std::size_t index = 0; index < span_count_; ++index)
+      if (address + begin >= spans_[index].address && end - begin <= spans_[index].size &&
+          address + begin - spans_[index].address <= spans_[index].size - (end - begin))
+        return true;
+    if (span_count_ == spans_.size() || order_count_ == order_.size())
+      return fail(result_, OwnedViewStatus::read_budget_exhausted, "The bounded observation count was exhausted.");
+    auto& value = spans_[span_count_];
+    value.address = address + begin;
+    value.size = static_cast<std::uint32_t>(end - begin);
+    if (!read_exact(value.address, value.size, value.bytes.data()))
+      return false;
+    order_[order_count_++] = -1 - static_cast<std::int32_t>(span_count_++);
+    return true;
+  }
+
   bool field(std::uint64_t address, std::uint64_t offset, std::uint32_t size, std::uint8_t* output, bool require_aligned = true) noexcept {
     if (!pointer_range(address, offset, size, require_aligned))
       return fail(result_, OwnedViewStatus::invalid_pointer, "A required field has a null, misaligned or overflowing pointer.");
-    if (count_ == observations_.size())
+    if (count_ == observations_.size() || order_count_ == order_.size())
       return fail(result_, OwnedViewStatus::read_budget_exhausted, "The bounded observation count was exhausted.");
-    if (!read(address + offset, size, output))
-      return false;
+    if (size == 0 || size > 16)
+      return fail(result_, OwnedViewStatus::read_budget_exhausted, "The bounded attempted-read allowance was exhausted.");
+    const auto at = address + offset;
+    std::int32_t served = -1;
+    for (std::size_t index = 0; index < span_count_; ++index)
+      if (at >= spans_[index].address && size <= spans_[index].size && at - spans_[index].address <= spans_[index].size - size) {
+        served = static_cast<std::int32_t>(index);
+        break;
+      }
+    if (served >= 0) {
+      std::copy_n(spans_[static_cast<std::size_t>(served)].bytes.begin() + (at - spans_[static_cast<std::size_t>(served)].address), size,
+                  output);
+    } else {
+      if (!read_exact(at, size, output))
+        return false;
+      order_[order_count_++] = static_cast<std::int32_t>(count_);
+    }
     auto& observation = observations_[count_++];
-    observation.address = address + offset;
+    observation.address = at;
     observation.size = size;
+    observation.span = served;
     std::copy_n(output, size, observation.bytes.begin());
     return true;
   }
@@ -79,7 +129,7 @@ class BoundedReader {
       return true;
     // The captured generation resolver uses ordinary MOV loads. Controls alone
     // may be byte aligned: preserve their exact addresses, including low bits.
-    if (!field(control, 28, 4, bytes.data(), false))
+    if (!span(control, 0, 32, false) || !field(control, 28, 4, bytes.data(), false))
       return false;
     if (u32(bytes.data()) != generation)
       return true;
@@ -90,11 +140,30 @@ class BoundedReader {
     return true;
   }
 
+  // Repeats every read of the trace in its original order. Each observed field
+  // is compared as soon as its own read or its span has been reread.
   bool recheck() noexcept {
-    for (std::size_t index = 0; index < count_; ++index) {
-      const auto& observation = observations_[index];
+    for (std::size_t step = 0; step < order_count_; ++step) {
+      const auto item = order_[step];
+      if (item < 0) {
+        const auto index = static_cast<std::int32_t>(-1 - item);
+        const auto& value = spans_[static_cast<std::size_t>(index)];
+        std::array<std::uint8_t, kSpanBytes> fresh;
+        if (!read_exact(value.address, value.size, fresh.data()))
+          return false;
+        for (std::size_t observed = 0; observed < count_; ++observed) {
+          const auto& observation = observations_[observed];
+          if (observation.span != index)
+            continue;
+          const auto* bytes = fresh.data() + (observation.address - value.address);
+          if (!std::equal(bytes, bytes + observation.size, observation.bytes.begin()))
+            return fail(result_, OwnedViewStatus::changed, "An observed field changed during the complete trace recheck.");
+        }
+        continue;
+      }
+      const auto& observation = observations_[static_cast<std::size_t>(item)];
       std::array<std::uint8_t, 16> bytes{};
-      if (!read(observation.address, observation.size, bytes.data()))
+      if (!read_exact(observation.address, observation.size, bytes.data()))
         return false;
       if (!std::equal(bytes.begin(), bytes.begin() + observation.size, observation.bytes.begin()))
         return fail(result_, OwnedViewStatus::changed, "An observed field changed during the complete trace recheck.");
@@ -103,8 +172,10 @@ class BoundedReader {
   }
 
  private:
-  bool read(std::uint64_t address, std::uint32_t size, std::uint8_t* output) noexcept {
-    if (size == 0 || size > 16 || size > kReadBudget - result_.read_bytes)
+  static constexpr std::size_t kMaxSpans = 16;
+
+  bool read_exact(std::uint64_t address, std::uint32_t size, std::uint8_t* output) noexcept {
+    if (size == 0 || size > kReadBudget - result_.read_bytes)
       return fail(result_, OwnedViewStatus::read_budget_exhausted, "The bounded attempted-read allowance was exhausted.");
     result_.read_bytes += size;
     if (reader_.read(address, output, size))
@@ -117,6 +188,11 @@ class BoundedReader {
   Result& result_;
   std::array<Observation, 64> observations_{};
   std::size_t count_ = 0;
+  std::array<Span, kMaxSpans> spans_{};
+  std::size_t span_count_ = 0;
+  // Pass-one reads in order: an observation index, or -1 - span index.
+  std::array<std::int32_t, 64 + kMaxSpans> order_{};
+  std::size_t order_count_ = 0;
 };
 
 bool valid_pool(const ViewPoolSnapshot& pool) noexcept {
@@ -145,7 +221,7 @@ bool valid_pool(const ViewPoolSnapshot& pool) noexcept {
 bool render_target_record(BoundedReader<OwnedViewSnapshot>& source, std::uint64_t texture, bool& present) noexcept {
   present = false;
   std::uint64_t table = 0;
-  if (!source.word(texture, 0x48, table))
+  if (!source.span(texture, 0x40, 0x50) || !source.word(texture, 0x48, table))
     return false;
   if (table != 0) {
     std::uint64_t entries = 0;
@@ -217,9 +293,10 @@ bool output_resource(BoundedReader<OwnedViewSnapshot>& source,
   if (record == 0)
     return true;
   slots[0].texture = true;
-  if (!render_target_record(source, record, slots[0].render_target_record))
+  if (!source.span(record, 16, 0x50) || !render_target_record(source, record, slots[0].render_target_record))
     return false;
-  if (!output_slot(source, entry_material, 664, slots[1]) || !output_slot(source, entry_material, 712, slots[2]))
+  if (!source.span(entry_material, 664, 728) || !output_slot(source, entry_material, 664, slots[1]) ||
+      !output_slot(source, entry_material, 712, slots[2]))
     return false;
   std::uint64_t wrapper = 0;
   if (!source.word(record, 16, wrapper))
@@ -262,7 +339,7 @@ OwnedViewCloseSnapshot inspect_owned_view_for_close(MemoryReader& reader,
   BoundedReader source(reader, result);
   std::uint64_t key = 0, payload_id = 0;
   std::array<std::uint8_t, 16> bytes{};
-  if (!source.word(entry_address, 0, key) || !source.word(entry_address, 16, payload_id))
+  if (!source.span(entry_address, 0, 24) || !source.word(entry_address, 0, key) || !source.word(entry_address, 16, payload_id))
     return result;
   if (key != expected_id || payload_id != expected_id) {
     fail(result, OwnedViewStatus::id_mismatch, "The entry key or payload ID changed before closure.");
@@ -275,7 +352,7 @@ OwnedViewCloseSnapshot inspect_owned_view_for_close(MemoryReader& reader,
          "Gate closure requires a ready owned entry.");
     return result;
   }
-  if (!source.field(entry_address, 24, 4, bytes.data()))
+  if (!source.span(entry_address, 24, 112) || !source.field(entry_address, 24, 4, bytes.data()))
     return result;
   if (u32(bytes.data()) != 2) {
     fail(result, OwnedViewStatus::invalid_request, "Gate closure requires an independent-pose mode2 entry.");
@@ -296,7 +373,7 @@ OwnedViewCloseSnapshot inspect_owned_view_for_close(MemoryReader& reader,
     return result;
   }
   std::uint64_t node = 0, view_node = 0;
-  if (!source.handle(entry_address, 96, node) || !source.handle(view, 104, view_node))
+  if (!source.span(view, 16, 120) || !source.handle(entry_address, 96, node) || !source.handle(view, 104, view_node))
     return result;
   if (!node || !view_node) {
     fail(result, OwnedViewStatus::node_unavailable, "The owned entry/view association is unavailable.");
@@ -342,7 +419,7 @@ OwnedViewSnapshot inspect_owned_view(MemoryReader& reader,
   std::uint64_t key = 0;
   std::uint64_t payload_id = 0;
   std::array<std::uint8_t, 16> bytes{};
-  if (!source.word(entry_address, 0, key) || !source.word(entry_address, 16, payload_id))
+  if (!source.span(entry_address, 0, 24) || !source.word(entry_address, 0, key) || !source.word(entry_address, 16, payload_id))
     return result;
   if (key != expected_id || payload_id != expected_id) {
     fail(result, OwnedViewStatus::id_mismatch, "The entry key or payload ID differs from the expected owned ID.");
@@ -361,7 +438,7 @@ OwnedViewSnapshot inspect_owned_view(MemoryReader& reader,
     fail(result, OwnedViewStatus::invalid_ready_byte, "The entry ready byte is neither zero nor one.");
     return result;
   }
-  if (!source.field(entry_address, 24, 4, bytes.data()))
+  if (!source.span(entry_address, 24, 112) || !source.field(entry_address, 24, 4, bytes.data()))
     return result;
   const auto mode = u32(bytes.data());
   if (!source.field(entry_address, 76, 4, bytes.data()))
@@ -380,7 +457,7 @@ OwnedViewSnapshot inspect_owned_view(MemoryReader& reader,
   }
   std::uint64_t node = 0;
   std::uint64_t view_node = 0;
-  if (!source.handle(entry_address, 96, node) || !source.handle(view, 104, view_node))
+  if (!source.span(view, 16, 160) || !source.handle(entry_address, 96, node) || !source.handle(view, 104, view_node))
     return result;
   if (node == 0 || view_node == 0) {
     fail(result, OwnedViewStatus::node_unavailable, "A ready entry has an unavailable entry or view Node reference.");

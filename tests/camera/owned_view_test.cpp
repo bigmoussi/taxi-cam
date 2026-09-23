@@ -39,6 +39,9 @@ struct Reader final : MemoryReader {
   std::map<std::uint64_t, std::uint8_t> bytes;
   std::vector<std::pair<std::uint64_t, std::size_t>> reads;
   std::vector<std::pair<std::uint64_t, std::size_t>> permitted;
+  // Engine fields the trace may observe. Object spans also read the bytes
+  // between them, which default to zero and are never compared.
+  std::vector<std::pair<std::uint64_t, std::size_t>> fields;
   std::size_t fail_call = 0;
   std::size_t changed_call = 0;
   std::size_t changed_byte = 0;
@@ -63,6 +66,19 @@ struct Reader final : MemoryReader {
     for (std::uint32_t index = 0; index < size; ++index)
       bytes[address + index] = static_cast<std::uint8_t>(value >> (index * 8));
     permitted.emplace_back(address, size);
+    fields.emplace_back(address, size);
+  }
+
+  // One object's span. Bytes no field has set read as zero.
+  void region(std::uint64_t address, std::size_t size) {
+    for (std::size_t index = 0; index < size; ++index)
+      bytes.try_emplace(address + index, 0);
+    permitted.emplace_back(address, size);
+  }
+
+  bool observed(std::uint64_t address) const {
+    return std::any_of(fields.begin(), fields.end(),
+                       [address](const auto& field) { return address >= field.first && address - field.first < field.second; });
   }
 
   void handle(std::uint64_t address, unsigned control_index, std::uint64_t payload) {
@@ -71,8 +87,10 @@ struct Reader final : MemoryReader {
     word(address + 8, 29, 4);
     word(address + 12, 41, 4);
     permitted.emplace_back(address, 16);
+    fields.emplace_back(address, 16);
     word(control + 28, 29, 4);
     word(control, payload);
+    region(control, 32);
   }
 };
 
@@ -102,6 +120,8 @@ struct Fixture {
       reader.word(view + 48, 0x1234567890abcdefull);
       reader.word(view + 56, 0xfedcba0987654321ull);
       reader.permitted.emplace_back(view + 48, 16);
+      reader.region(view + 16, 104);  // Close trace: dimensions through the Node handle.
+      reader.region(view + 16, 144);  // Full trace: through the material handle.
     }
     reader.word(kEntry, kId);
     reader.word(kEntry + 16, kId);
@@ -129,11 +149,16 @@ struct Fixture {
     // Add-diffuse (664) and depth-stencil (712) slots are absent by default.
     null_handle(kMaterial + 664);
     null_handle(kMaterial + 712);
+    reader.region(kEntry, 24);       // Key, ready byte and payload ID.
+    reader.region(kEntry + 24, 88);  // Mode through the Node handle.
+    reader.region(kMaterial + 664, 64);
+    reader.region(kRecord + 16, 64);  // Wrapper through the record table.
   }
   void null_handle(std::uint64_t address) {
     reader.word(address, 0);
     reader.word(address + 8, 0);
     reader.permitted.emplace_back(address, 16);
+    reader.fields.emplace_back(address, 16);
   }
   // Route the diffuse record through a per-subresource table instead.
   void table_record(std::uint64_t entry0) {
@@ -204,7 +229,7 @@ void successful_and_pending() {
               complete.view_address == kView && complete.node_address == kNode && complete.camera_address == kCamera &&
               complete.view_index == 0 && complete.mode == 2 && complete.fov == 1.25f,
           "Full owned-view chain was not observed exactly");
-  require(complete.read_bytes == 614 && full.reader.reads.size() == 72, "Full trace read extent changed unexpectedly");
+  require(complete.read_bytes == 1212 && full.reader.reads.size() == 36, "Full trace read extent changed unexpectedly");
   require(complete.dimensions == std::array<std::array<std::int32_t, 2>, 3>{{{768, 763}, {868, 863}, {968, 963}}} &&
               complete.flags == std::array<std::uint64_t, 2>{0x1234567890abcdefull, 0xfedcba0987654321ull},
           "Dimension pair order, signed scalar decoding or exact64-bit flag values changed");
@@ -229,8 +254,10 @@ void successful_and_pending() {
   Fixture pending;
   pending.reader.word(kEntry + 8, 0, 1);
   const auto result = pending.run();
-  require(result.complete && !result.ready && result.status == OwnedViewStatus::pending && result.read_bytes == 34 &&
-              pending.reader.reads.size() == 6,
+  require(result.complete && !result.ready && result.status == OwnedViewStatus::pending && result.read_bytes == 48 &&
+              pending.reader.reads.size() == 2 &&
+              std::all_of(pending.reader.reads.begin(), pending.reader.reads.end(),
+                          [](const auto& read) { return read == std::pair<std::uint64_t, std::size_t>{kEntry, 24}; }),
           "Pending entry followed uninitialized setup fields");
 }
 
@@ -265,8 +292,7 @@ void absent_output() {
   Fixture stale;
   stale.reader.word(kControl + 0x400 + 28, 30, 4);
   require(stale.run().ready, "A stale optional bitmap reference prevented camera readiness");
-  require(std::none_of(stale.reader.reads.begin(), stale.reader.reads.end(),
-                       [](const auto& read) { return read.first == kControl + 0x400 || read.first == kBitmap + 88; }),
+  require(std::none_of(stale.reader.reads.begin(), stale.reader.reads.end(), [](const auto& read) { return read.first == kBitmap + 88; }),
           "Stale bitmap generation permitted following its payload");
 }
 
@@ -281,10 +307,11 @@ void render_target_records() {
   // Per-subresource table: [T+0x48]->[+8]->[0] decides, the direct field is not read.
   Fixture table;
   table.table_record(kRtRecord);
+  table.reader.word(kRecord + 0x40, 0);
   result = table.run();
   require(result.ready && result.output_slots[0].render_target_record, "Table-resolved render-target record was not observed");
   require(std::none_of(table.reader.reads.begin(), table.reader.reads.end(), [](const auto& read) { return read.first == kRecord + 0x40; }),
-          "The direct record was read although a subresource table exists");
+          "The direct record decided presence although a subresource table exists");
   Fixture empty_table;
   empty_table.table_record(0);
   result = empty_table.run();
@@ -315,6 +342,7 @@ void render_target_records() {
   others.reader.word(kBitmap + 0x2000 + 88, kRecord + 0x1000);
   others.reader.word(kRecord + 0x1000 + 0x48, 0);
   others.reader.word(kRecord + 0x1000 + 0x40, kRtRecord + 0x1000);
+  others.reader.region(kRecord + 0x1000 + 0x40, 16);
   result = others.run();
   require(result.ready && result.output_slots[1].mask() == 1 && result.output_slots[2].mask() == 7,
           "Add-diffuse and depth-stencil slot observations were wrong");
@@ -351,7 +379,7 @@ void mode_observations() {
     test.reader.word(kEntry + 24, mode, 4);
     const auto result = test.run();
     require(result.ready && result.mode == mode, "Ready-entry mode was guessed, clamped or rejected instead of observed exactly");
-    require(std::count(test.reader.reads.begin(), test.reader.reads.end(), std::pair<std::uint64_t, std::size_t>{kEntry + 24, 4}) == 2,
+    require(std::count(test.reader.reads.begin(), test.reader.reads.end(), std::pair<std::uint64_t, std::size_t>{kEntry + 24, 88}) == 2,
             "Mode was omitted from the complete field reread");
   }
   for (unsigned byte = 0; byte < 4; ++byte) {
@@ -509,6 +537,7 @@ void pack_controls(Fixture& test, std::uint64_t low) {
     test.reader.word(kHandleFields[reference], control);
     test.reader.word(control + 28, 29, 4);
     test.reader.word(control, kHandlePayloads[reference]);
+    test.reader.region(control, 32);
   }
 }
 
@@ -520,8 +549,7 @@ void packed_control_records() {
     require(complete.ready && complete.resource_present, "Byte-aligned Node/material/bitmap controls did not resolve");
     for (unsigned reference = 0; reference < kHandleFields.size(); ++reference) {
       const auto control = kPackedControls + reference * 0x100 + low;
-      require(std::count(full.reader.reads.begin(), full.reader.reads.end(), std::pair<std::uint64_t, std::size_t>{control + 28, 4}) == 2 &&
-                  std::count(full.reader.reads.begin(), full.reader.reads.end(), std::pair<std::uint64_t, std::size_t>{control, 8}) == 2,
+      require(std::count(full.reader.reads.begin(), full.reader.reads.end(), std::pair<std::uint64_t, std::size_t>{control, 32}) == 2,
               "Packed control address was masked, adjusted or omitted from full trace");
       for (const bool missing_payload : {false, true}) {
         Fixture test;
@@ -530,7 +558,7 @@ void packed_control_records() {
         test.reader.bytes.erase(missing);
         const auto result = test.run();
         require(result.status == OwnedViewStatus::read_failed && result.read_failures == 1 &&
-                    test.reader.reads.back() == std::pair<std::uint64_t, std::size_t>{missing, missing_payload ? 8 : 4},
+                    test.reader.reads.back() == std::pair<std::uint64_t, std::size_t>{control, 32},
                 "Unreadable packed control was classified as alignment refusal, retried or followed");
       }
       Fixture bad_payload;
@@ -547,9 +575,10 @@ void packed_control_records() {
                                                 : OwnedViewStatus::ready) &&
                   !result.resource_present,
               "Packed stale generation did not retain required/optional handle semantics");
-      require(
-          std::none_of(stale.reader.reads.begin(), stale.reader.reads.end(), [control](const auto& read) { return read.first == control; }),
-          "Stale packed control payload was followed");
+      const auto payload = kHandlePayloads[reference];
+      require(std::none_of(stale.reader.reads.begin(), stale.reader.reads.end(),
+                           [payload](const auto& read) { return read.first >= payload && read.first - payload < 0x800; }),
+              "Stale packed control payload was followed");
     }
 
     // The entry and view may refer to one control record, rather than separate
@@ -575,6 +604,8 @@ void packed_control_records() {
       if (call < reads.size() / 2)
         continue;
       for (std::size_t byte = 0; byte < reads[call].second; ++byte) {
+        if (!full.reader.observed(reads[call].first + byte))
+          continue;
         Fixture changed;
         pack_controls(changed, low);
         changed.reader.changed_call = call + 1;
@@ -608,20 +639,30 @@ void failures_and_mutations() {
             "Failed field/recheck was retried, uncounted or published usable addresses");
   }
   const auto half = reads.size() / 2;
+  std::size_t unobserved = 0;
   for (std::size_t call = half; call < reads.size(); ++call) {
     for (std::size_t byte = 0; byte < reads[call].second; ++byte) {
       Fixture test;
       test.reader.changed_call = call + 1;
       test.reader.changed_byte = byte;
       const auto result = test.run();
+      if (!full.reader.observed(reads[call].first + byte)) {
+        // Span bytes between observed fields are engine data that may change
+        // every frame. They are read with the span but never compared.
+        ++unobserved;
+        require(result.ready && test.reader.reads.size() == reads.size(), "A change between observed fields refused the trace");
+        continue;
+      }
       require(!result.complete && result.status == OwnedViewStatus::changed && test.reader.reads.size() == call + 1,
               "Changed field byte was missed, retried or followed to a new pointer");
     }
   }
-  for (unsigned changed = 4; changed <= 6; ++changed) {
+  require(unobserved != 0, "Span reads no longer include bytes between observed fields");
+  for (const std::size_t byte : {0u, 8u, 16u}) {
     Fixture test;
     test.reader.word(kEntry + 8, 0, 1);
-    test.reader.changed_call = changed;
+    test.reader.changed_call = 2;
+    test.reader.changed_byte = byte;
     require(test.run().status == OwnedViewStatus::changed, "Changed pending entry was accepted as a stable pending state");
   }
 }
@@ -638,12 +679,12 @@ static_assert(!HasCameraProof<OwnedViewCloseSnapshot>);
 void close_only_contract() {
   Fixture fixture;
   const auto result = fixture.run_close();
-  require(result.complete && result.view_address == kView && result.view_index == 0 && result.read_bytes == 258 &&
-              fixture.reader.reads.size() == 32,
-          "Close-only trace did not retain exactly its sixteen guarded fields");
+  require(result.complete && result.view_address == kView && result.view_index == 0 && result.read_bytes == 576 &&
+              fixture.reader.reads.size() == 12,
+          "Close-only trace did not retain exactly its sixteen guarded fields in six reads");
   const auto trace = fixture.reader.reads;
   const auto full = fixture.run();
-  require(full.dimensions == result.dimensions && full.flags == result.flags && full.read_bytes == 614,
+  require(full.dimensions == result.dimensions && full.flags == result.flags && full.read_bytes == 1212,
           "Close-only numeric fields differ from the full inspection");
 
   Fixture no_graph;
@@ -670,6 +711,11 @@ void close_only_contract() {
     if (call < trace.size() / 2)
       continue;
     for (std::size_t byte = 0; byte < trace[call].second; ++byte) {
+      // The entry span also covers the material handle, which only the full
+      // trace observes.
+      const auto address = trace[call].first + byte;
+      if (!fixture.reader.observed(address) || (address >= kEntry + 80 && address < kEntry + 96))
+        continue;
       Fixture changed;
       changed.reader.changed_call = call + 1;
       changed.reader.changed_byte = byte;
@@ -685,7 +731,7 @@ void close_only_contract() {
   for (std::uint32_t ready : {0u, 2u, 255u}) {
     Fixture pending;
     pending.reader.word(kEntry + 8, ready, 1);
-    require(!pending.run_close().complete && pending.reader.reads.size() == 3,
+    require(!pending.run_close().complete && pending.reader.reads.size() == 1,
             "Close-only API followed a pending or malformed ready entry");
   }
   for (std::uint32_t index : {8u, 0x80000000u, 0xffffffffu}) {
@@ -715,6 +761,7 @@ void close_only_contract() {
       packed.reader.word(field, control);
       packed.reader.word(control + 28, 29, 4);
       packed.reader.word(control, kNode);
+      packed.reader.region(control, 32);
       require(packed.run_close().complete, "Close-only API rejected a valid byte-aligned control");
       packed.reader.word(control + 28, 30, 4);
       require(packed.run_close().status == OwnedViewStatus::node_unavailable, "Close-only API accepted a stale association");
@@ -738,7 +785,7 @@ void close_only_contract() {
   require(malformed.run_close().status == OwnedViewStatus::invalid_request && malformed.reader.reads.empty(),
           "Close-only API read a malformed address");
   std::printf(
-      "Close trace:32 exact reads/258 bytes; full trace:72 exact reads/614 bytes. OS query counts not measured by synthetic reader.\n");
+      "Close trace:12 exact reads/576 bytes; full trace:36 exact reads/1212 bytes. OS query counts not measured by synthetic reader.\n");
 }
 }  // namespace
 
