@@ -3,6 +3,7 @@
 #include "../graphics/scene_handoff.hpp"
 #include "../hooks/observer_hook.hpp"
 #include "../shared/camera_rate.hpp"
+#include "../shared/hook_timing.hpp"
 #include "activation_mask.hpp"
 #include "aircraft_inventory.hpp"
 #include "aircraft_scene_pose.hpp"
@@ -1341,6 +1342,7 @@ void observer(void* manager) noexcept {
   auto& runtime = state();
   if (!runtime.enabled.load(std::memory_order_acquire) || runtime.observing.test_and_set(std::memory_order_acquire))
     return;
+  const hook_timing::Scope timing(hook_timing::camera_manager);
   struct Guard {
     Runtime& runtime;
     ~Guard() { runtime.observing.clear(std::memory_order_release); }

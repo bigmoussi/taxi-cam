@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <atomic>
 #include <cstdint>
+#include "hook_timing.hpp"
 
 namespace taxi_camera {
 
@@ -37,6 +38,7 @@ class BoundedLock {
       owned_ = true;
       return;
     }
+    const auto waited_from = hook_timing::ticks();
     if (budget_us) {
       const auto deadline = bounded_lock_now_us() + budget_us;
       unsigned spins = 0;
@@ -47,10 +49,12 @@ class BoundedLock {
           YieldProcessor();
         if (mutex_.try_lock()) {
           owned_ = true;
+          hook_timing::record_wait(budget_us, hook_timing::ticks() - waited_from, true);
           return;
         }
       } while (bounded_lock_now_us() < deadline);
     }
+    hook_timing::record_wait(budget_us, hook_timing::ticks() - waited_from, false);
     if (contended)
       contended->fetch_add(1, std::memory_order_relaxed);
   }

@@ -22,6 +22,7 @@
 #include "../graphics/write_budget.hpp"
 #include "../hooks/render_boundary_observer.hpp"
 #include "../shared/bounded_lock.hpp"
+#include "../shared/hook_timing.hpp"
 #include "native_hooks.hpp"
 #include "root_layout.hpp"
 
@@ -1984,9 +1985,10 @@ template <unsigned I, class C, class... Args>
 struct Creation<I, HRESULT (STDMETHODCALLTYPE C::*)(Args...)> {
   using F = HRESULT(STDMETHODCALLTYPE*)(C*, Args...);
   static HRESULT STDMETHODCALLTYPE call(C* self, Args... args) noexcept {
+    const hook_timing::Scope timing(hook_timing::device);
     const bool observe = owned_depth == 0;
     const OwnedWork guard;
-    const auto hr = creations[I].forward<F>()(self, args...);
+    const auto hr = hook_timing::forward(creations[I].forward<F>(), self, args...);
     if (observe && SUCCEEDED(hr)) {
       const auto tuple = std::forward_as_tuple(args...);
       auto** out = std::get<sizeof...(Args) - 1>(tuple);
@@ -2013,9 +2015,10 @@ const std::array<void*, 10> CreationWrappers{
 NativeSlot root_creation, rtv_creation, dsv_creation, descriptor_copy, descriptor_copy_simple, create_list, create_list1;
 HRESULT STDMETHODCALLTYPE root_create(ID3D12Device* device, UINT node, const void* blob, SIZE_T bytes, REFIID iid, void** out) noexcept {
   using F = HRESULT(STDMETHODCALLTYPE*)(ID3D12Device*, UINT, const void*, SIZE_T, REFIID, void**);
+  const hook_timing::Scope timing(hook_timing::device);
   const bool observe = !owned_depth && registry().ready && same_device(device);
   const OwnedWork guard;
-  const auto hr = root_creation.forward<F>()(device, node, blob, bytes, iid, out);
+  const auto hr = hook_timing::forward(root_creation.forward<F>(), device, node, blob, bytes, iid, out);
   if (observe && SUCCEEDED(hr) && out && *out)
     observe_safely([&] {
       ID3D12RootSignature* native{};
@@ -2045,7 +2048,8 @@ void STDMETHODCALLTYPE rtv_create(ID3D12Device* device,
                                   const D3D12_RENDER_TARGET_VIEW_DESC* desc,
                                   D3D12_CPU_DESCRIPTOR_HANDLE handle) noexcept {
   using F = void(STDMETHODCALLTYPE*)(ID3D12Device*, ID3D12Resource*, const D3D12_RENDER_TARGET_VIEW_DESC*, D3D12_CPU_DESCRIPTOR_HANDLE);
-  rtv_creation.forward<F>()(device, native, desc, handle);
+  const hook_timing::Scope timing(hook_timing::device);
+  hook_timing::forward(rtv_creation.forward<F>(), device, native, desc, handle);
   if (owned_depth || !registry().ready || !same_device(device))
     return;
   const OwnedWork guard;
@@ -2072,7 +2076,8 @@ void STDMETHODCALLTYPE dsv_create(ID3D12Device* device,
                                   const D3D12_DEPTH_STENCIL_VIEW_DESC* desc,
                                   D3D12_CPU_DESCRIPTOR_HANDLE handle) noexcept {
   using F = void(STDMETHODCALLTYPE*)(ID3D12Device*, ID3D12Resource*, const D3D12_DEPTH_STENCIL_VIEW_DESC*, D3D12_CPU_DESCRIPTOR_HANDLE);
-  dsv_creation.forward<F>()(device, native, desc, handle);
+  const hook_timing::Scope timing(hook_timing::device);
+  hook_timing::forward(dsv_creation.forward<F>(), device, native, desc, handle);
   if (owned_depth || !registry().ready || !same_device(device))
     return;
   observe_safely([&] {
@@ -2121,7 +2126,8 @@ void STDMETHODCALLTYPE descriptors_simple(ID3D12Device* device,
                                           D3D12_DESCRIPTOR_HEAP_TYPE type) noexcept {
   using F =
       void(STDMETHODCALLTYPE*)(ID3D12Device*, UINT, D3D12_CPU_DESCRIPTOR_HANDLE, D3D12_CPU_DESCRIPTOR_HANDLE, D3D12_DESCRIPTOR_HEAP_TYPE);
-  descriptor_copy_simple.forward<F>()(device, count, dest, src, type);
+  const hook_timing::Scope timing(hook_timing::device);
+  hook_timing::forward(descriptor_copy_simple.forward<F>(), device, count, dest, src, type);
   if (!owned_depth && registry().ready && (type == D3D12_DESCRIPTOR_HEAP_TYPE_RTV || type == D3D12_DESCRIPTOR_HEAP_TYPE_DSV) &&
       same_device(device))
     observe_safely([&] {
@@ -2144,7 +2150,8 @@ void STDMETHODCALLTYPE descriptors(ID3D12Device* device,
                                    D3D12_DESCRIPTOR_HEAP_TYPE type) noexcept {
   using F = void(STDMETHODCALLTYPE*)(ID3D12Device*, UINT, const D3D12_CPU_DESCRIPTOR_HANDLE*, const UINT*, UINT,
                                      const D3D12_CPU_DESCRIPTOR_HANDLE*, const UINT*, D3D12_DESCRIPTOR_HEAP_TYPE);
-  descriptor_copy.forward<F>()(device, nd, dest, ds, ns, src, ss, type);
+  const hook_timing::Scope timing(hook_timing::device);
+  hook_timing::forward(descriptor_copy.forward<F>(), device, nd, dest, ds, ns, src, ss, type);
   if (owned_depth || !registry().ready || (type != D3D12_DESCRIPTOR_HEAP_TYPE_RTV && type != D3D12_DESCRIPTOR_HEAP_TYPE_DSV) ||
       !same_device(device))
     return;
@@ -2198,9 +2205,10 @@ HRESULT STDMETHODCALLTYPE list_create(ID3D12Device* device,
                                       void** out) noexcept {
   using F = HRESULT(STDMETHODCALLTYPE*)(ID3D12Device*, UINT, D3D12_COMMAND_LIST_TYPE, ID3D12CommandAllocator*, ID3D12PipelineState*, REFIID,
                                         void**);
+  const hook_timing::Scope timing(hook_timing::device);
   const bool observe = !owned_depth;
   const OwnedWork guard;
-  const auto hr = create_list.forward<F>()(device, node, type, allocator, pso, iid, out);
+  const auto hr = hook_timing::forward(create_list.forward<F>(), device, node, type, allocator, pso, iid, out);
   if (observe && SUCCEEDED(hr) && out && *out && type == D3D12_COMMAND_LIST_TYPE_DIRECT) {
     ID3D12GraphicsCommandList* native{};
     if (SUCCEEDED(static_cast<IUnknown*>(*out)->QueryInterface(IID_PPV_ARGS(&native)))) {
@@ -2220,9 +2228,10 @@ HRESULT STDMETHODCALLTYPE list_create1(ID3D12Device4* device,
                                        REFIID iid,
                                        void** out) noexcept {
   using F = HRESULT(STDMETHODCALLTYPE*)(ID3D12Device4*, UINT, D3D12_COMMAND_LIST_TYPE, D3D12_COMMAND_LIST_FLAGS, REFIID, void**);
+  const hook_timing::Scope timing(hook_timing::device);
   const bool observe = !owned_depth;
   const OwnedWork guard;
-  const auto hr = create_list1.forward<F>()(device, node, type, flags, iid, out);
+  const auto hr = hook_timing::forward(create_list1.forward<F>(), device, node, type, flags, iid, out);
   if (observe && SUCCEEDED(hr) && out && *out && type == D3D12_COMMAND_LIST_TYPE_DIRECT) {
     ID3D12GraphicsCommandList* native{};
     if (SUCCEEDED(static_cast<IUnknown*>(*out)->QueryInterface(IID_PPV_ARGS(&native)))) {
@@ -2271,6 +2280,7 @@ void remember_display_settlement(List& item) noexcept {
 }
 HRESULT STDMETHODCALLTYPE close(ID3D12GraphicsCommandList* native) noexcept {
   using F = HRESULT(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*);
+  const hook_timing::Scope timing(hook_timing::close);
   if (!owned_depth && registry().ready) {
     const OwnedWork guard;
     registry().frame_pulse.fetch_add(1, std::memory_order_relaxed);
@@ -2290,7 +2300,7 @@ HRESULT STDMETHODCALLTYPE close(ID3D12GraphicsCommandList* native) noexcept {
       }
     });
   }
-  const auto result = list_close.forward<F>()(native);
+  const auto result = hook_timing::forward(list_close.forward<F>(), native);
   if (!owned_depth && registry().ready) {
     const OwnedWork guard;
     if (auto item = find_list(native)) {
@@ -2306,13 +2316,14 @@ HRESULT STDMETHODCALLTYPE reset(ID3D12GraphicsCommandList* native, ID3D12Command
   using F = HRESULT(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*, ID3D12CommandAllocator*, ID3D12PipelineState*);
   if (owned_depth)
     return list_reset.forward<F>()(native, allocator, pso);
+  const hook_timing::Scope timing(hook_timing::reset);
   const OwnedWork guard;
   const auto observation_epoch = registry().observation_epoch.load(std::memory_order_acquire);
   std::shared_ptr<List> item;
   observe_safely([&] { item = ensure_list(native); });
   if (item)
     item->closed_recording.store(0, std::memory_order_release);
-  const auto hr = list_reset.forward<F>()(native, allocator, pso);
+  const auto hr = hook_timing::forward(list_reset.forward<F>(), native, allocator, pso);
   if (item) {
     // Demand cannot change between qualifying this native Reset and publishing
     // its PFD-state proof. Source state remains continuously observed separately.
@@ -2711,6 +2722,7 @@ struct StateHook<Slot, void (STDMETHODCALLTYPE C::*)(Args...), Action> {
       forward(native, args...);
       return;
     }
+    const hook_timing::Scope timing(hook_timing::state);
     // Target bindings still feed aircraft autodetection, and ClearState must
     // clear those bindings. Other state can be omitted only because an epoch
     // mismatch forbids injection until a real, fully observed native Reset.
@@ -2724,7 +2736,7 @@ struct StateHook<Slot, void (STDMETHODCALLTYPE C::*)(Args...), Action> {
         if (r.diagnostics_enabled.load(std::memory_order_relaxed))
           r.idle_state_bypasses.fetch_add(1, std::memory_order_relaxed);
         const OwnedWork guard;
-        forward(native, args...);
+        hook_timing::forward(forward, native, args...);
         return;
       }
     }
@@ -2738,7 +2750,7 @@ struct StateHook<Slot, void (STDMETHODCALLTYPE C::*)(Args...), Action> {
           Action::before(*item, args...);
       });
     }
-    forward(native, args...);
+    hook_timing::forward(forward, native, args...);
     if (!registry().ready)
       return;
     observe_safely([&] {

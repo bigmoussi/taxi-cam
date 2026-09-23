@@ -341,6 +341,7 @@ if ($Validate) {
         @{Name='calibration'; Sources=@('tests/graphics/calibration_test.cpp')},
         @{Name='write-budget'; Sources=@('tests/graphics/write_budget_test.cpp')},
         @{Name='freeze-guards'; Sources=@('tests/graphics/freeze_guards_test.cpp')},
+        @{Name='hook-timing'; Sources=@('tests/hooks/hook_timing_test.cpp')},
         @{Name='sim-messages'; Sources=@('tests/app/sim_messages_test.cpp')},
         @{Name='scene-handoff'; Sources=@('tests/graphics/scene_handoff_test.cpp','src/graphics/scene_handoff.cpp')},
         @{Name='source-state'; Sources=@('tests/graphics/scene_source_state_test.cpp','src/graphics/scene_source_state.cpp')},

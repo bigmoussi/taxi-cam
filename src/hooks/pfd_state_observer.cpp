@@ -3,6 +3,7 @@
 #include <atomic>
 #include <limits>
 #include <unordered_map>
+#include "../shared/hook_timing.hpp"
 #ifdef TAXI_PFD_STATE_OBSERVER_VALIDATION
 extern "C" BOOL taxi_pfd_test_virtual_protect(void*, SIZE_T, DWORD, PDWORD) noexcept;
 #endif
@@ -71,8 +72,9 @@ HRESULT STDMETHODCALLTYPE reset(ID3D12GraphicsCommandList* list, ID3D12CommandAl
   if (inside)
     return original(list, allocator, pso);
   const Guard guard;
+  const hook_timing::Scope timing(hook_timing::reset);
   const auto generation = lookup(list);
-  const HRESULT hr = original(list, allocator, pso);
+  const HRESULT hr = hook_timing::forward(original, list, allocator, pso);
   if (generation && lookup(list) == generation)
     callbacks.reset_completed(callbacks.context, list, generation, hr, pso);
   return hr;
@@ -84,8 +86,9 @@ void STDMETHODCALLTYPE heaps(ID3D12GraphicsCommandList* list, UINT count, ID3D12
     return;
   }
   const Guard guard;
+  const hook_timing::Scope timing(hook_timing::state);
   const auto generation = lookup(list);
-  original(list, count, values);
+  hook_timing::forward(original, list, count, values);
   if (generation && lookup(list) == generation)
     callbacks.heaps_changed(callbacks.context, list, generation, count, values);
 }
@@ -96,8 +99,9 @@ void STDMETHODCALLTYPE cbv(ID3D12GraphicsCommandList* list, UINT index, D3D12_GP
     return;
   }
   const Guard guard;
+  const hook_timing::Scope timing(hook_timing::state);
   const auto generation = lookup(list);
-  original(list, index, address);
+  hook_timing::forward(original, list, index, address);
   if (generation && lookup(list) == generation)
     callbacks.graphics_cbv(callbacks.context, list, generation, index, address);
 }
@@ -108,8 +112,9 @@ void STDMETHODCALLTYPE root(ID3D12GraphicsCommandList* list, ID3D12RootSignature
     return;
   }
   const Guard guard;
+  const hook_timing::Scope timing(hook_timing::state);
   const auto generation = lookup(list);
-  original(list, signature);
+  hook_timing::forward(original, list, signature);
   if (generation && callbacks.graphics_root && lookup(list) == generation)
     callbacks.graphics_root(callbacks.context, list, generation, signature);
 }
@@ -120,8 +125,9 @@ void STDMETHODCALLTYPE graphics_table(ID3D12GraphicsCommandList* list, UINT inde
     return;
   }
   const Guard guard;
+  const hook_timing::Scope timing(hook_timing::state);
   const auto generation = lookup(list);
-  original(list, index, handle);
+  hook_timing::forward(original, list, index, handle);
   if (generation && callbacks.graphics_table && lookup(list) == generation)
     callbacks.graphics_table(callbacks.context, list, generation, index, handle);
 }

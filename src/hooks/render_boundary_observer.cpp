@@ -1,5 +1,6 @@
 #include "render_boundary_observer.hpp"
 #include "../graphics/native_device_identity.hpp"
+#include "../shared/hook_timing.hpp"
 #include <array>
 #include <atomic>
 #include <unordered_map>
@@ -220,8 +221,9 @@ draw(ID3D12GraphicsCommandList* list, UINT vertices, UINT instances, UINT first_
     return;
   }
   const Guard guard;
+  const hook_timing::Scope timing(hook_timing::draw);
   const auto identity = lookup(list);
-  original(list, vertices, instances, first_vertex, first_instance);
+  hook_timing::forward(original, list, vertices, instances, first_vertex, first_instance);
   if (vertices && instances)
     after_draw_work(list, identity.generation);
 }
@@ -237,8 +239,9 @@ void STDMETHODCALLTYPE draw_indexed(ID3D12GraphicsCommandList* list,
     return;
   }
   const Guard guard;
+  const hook_timing::Scope timing(hook_timing::draw);
   const auto identity = lookup(list);
-  original(list, indices, instances, first_index, vertex_offset, first_instance);
+  hook_timing::forward(original, list, indices, instances, first_index, vertex_offset, first_instance);
   if (indices && instances)
     after_draw_work(list, identity.generation);
 }
@@ -258,9 +261,10 @@ void STDMETHODCALLTYPE copy_resource(ID3D12GraphicsCommandList* list, ID3D12Reso
     return;
   }
   const Guard guard;
+  const hook_timing::Scope timing(hook_timing::copy);
   const auto identity = lookup(list);
   notify_invalidation(list, identity.generation, scope_invalidation(identity));
-  original(list, destination, source);
+  hook_timing::forward(original, list, destination, source);
   if (!same_identity(list, identity.generation))
     return;
   ++copy_resource_calls;
@@ -281,9 +285,10 @@ void STDMETHODCALLTYPE copy_texture(ID3D12GraphicsCommandList* list,
     return;
   }
   const Guard guard;
+  const hook_timing::Scope timing(hook_timing::copy);
   const auto identity = lookup(list);
   notify_invalidation(list, identity.generation, scope_invalidation(identity));
-  original(list, destination, x, y, z, source, box);
+  hook_timing::forward(original, list, destination, x, y, z, source, box);
   if (!same_identity(list, identity.generation))
     return;
   ++copy_texture_calls;
@@ -346,6 +351,7 @@ void STDMETHODCALLTYPE legacy(ID3D12GraphicsCommandList* list, UINT count, const
     return;
   }
   const Guard guard;
+  const hook_timing::Scope timing(hook_timing::barrier);
   const auto identity = lookup(list);
   if (identity.generation) {
     ++legacy_calls;
@@ -418,7 +424,7 @@ void STDMETHODCALLTYPE legacy(ID3D12GraphicsCommandList* list, UINT count, const
       }
   }
   // Preserve the exact count, pointer, order and flags; no replay or splitting.
-  original(list, count, barriers);
+  hook_timing::forward(original, list, count, barriers);
 }
 bool install_active_end(ID3D12GraphicsCommandList4* list) noexcept;
 void STDMETHODCALLTYPE begin(ID3D12GraphicsCommandList4* list,
@@ -433,6 +439,7 @@ void STDMETHODCALLTYPE begin(ID3D12GraphicsCommandList4* list,
   }
   const auto key = identity_key(list);
   const Guard guard;
+  const hook_timing::Scope timing(hook_timing::render_pass);
   const auto identity = lookup(key);
   bool ordinary_access = false;
   if (identity.generation) {
@@ -476,7 +483,7 @@ void STDMETHODCALLTYPE begin(ID3D12GraphicsCommandList4* list,
                           ((after_begin_state.invalid || after_begin_state.suspended || (flags & D3D12_RENDER_PASS_FLAG_RESUMING_PASS) != 0)
                                ? InvalidationPassState
                                : 0u));
-  original(list, count, targets, depth, flags);
+  hook_timing::forward(original, list, count, targets, depth, flags);
   // The native runtime can replace this object's vtable for the active pass.
   // Observe and patch only its actual End slot before returning to the caller.
   // Different active tables keep distinct immutable originals and trampolines.
@@ -488,6 +495,7 @@ void end_impl(ID3D12GraphicsCommandList4* list, End original) noexcept {
     original(list);
     return;
   }
+  const hook_timing::Scope timing(hook_timing::render_pass);
   const auto key = identity_key(list);
   const Guard guard;
   const auto identity = lookup(key);
@@ -496,12 +504,12 @@ void end_impl(ID3D12GraphicsCommandList4* list, End original) noexcept {
   // An End with no Begin still invalidates: pass_closed is false.
   if (identity.generation && identity.pass_closed && !identity.active && !identity.suspended && !identity.invalid &&
       enabled.load(std::memory_order_acquire)) {
-    original(list);
+    hook_timing::forward(original, list);
     return;
   }
   if (!identity.active || identity.suspended || identity.invalid || !enabled.load(std::memory_order_acquire))
     notify_invalidation(key, identity.generation, InvalidationPassState | scope_invalidation(identity));
-  original(list);
+  hook_timing::forward(original, list);
   if (identity.generation && callbacks.pass_ended)
     callbacks.pass_ended(callbacks.context, key, identity.generation);
   // End access can discard/resolve; no image is copied here and no RTV binding
@@ -582,6 +590,7 @@ void STDMETHODCALLTYPE enhanced(ID3D12GraphicsCommandList7* list, UINT count, co
     return;
   }
   const Guard guard;
+  const hook_timing::Scope timing(hook_timing::barrier);
   const auto identity = lookup(list);
   if (identity.generation && callbacks.enhanced_call)
     callbacks.enhanced_call(callbacks.context, list, identity.generation);
@@ -651,7 +660,7 @@ void STDMETHODCALLTYPE enhanced(ID3D12GraphicsCommandList7* list, UINT count, co
         }
       }
   }
-  original(list, count, groups);
+  hook_timing::forward(original, list, count, groups);
 }
 bool region(const void* address, std::size_t size, MEMORY_BASIC_INFORMATION& info) noexcept {
   if (!address ||
