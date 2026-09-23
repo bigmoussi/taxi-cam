@@ -67,6 +67,12 @@ $retainedResizeTest = Join-Path $outputDirectory 'view-resize-recovery-test.exe'
 if ($LASTEXITCODE -ne 0) { throw 'Retained resolution recovery compilation failed.' }
 & $retainedResizeTest
 if ($LASTEXITCODE -ne 0) { throw 'Retained resolution recovery validation failed.' }
+$resizeSettlementTest = Join-Path $outputDirectory 'view-resize-settlement-test.exe'
+& $compiler @common (Join-Path $PSScriptRoot 'view_resize_settlement_test.cpp') `
+    (Join-Path $nativeRoot 'src/camera/entry_pair.cpp') '-o' $resizeSettlementTest
+if ($LASTEXITCODE -ne 0) { throw 'Retained resolution settlement compilation failed.' }
+& $resizeSettlementTest
+if ($LASTEXITCODE -ne 0) { throw 'Retained resolution settlement validation failed.' }
 $retainedProfileTest = Join-Path $outputDirectory 'retained-profile-test.exe'
 & $compiler @common (Join-Path $PSScriptRoot 'retained_profile_test.cpp') `
     (Join-Path $nativeRoot 'src/camera/entry_pair.cpp') '-o' $retainedProfileTest
