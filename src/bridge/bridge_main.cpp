@@ -239,6 +239,7 @@ DWORD run_impl() {
   wchar_t gpu_timing_option[2]{};
   const bool gpu_timing = GetEnvironmentVariableW(L"TAXI_CAM_GPU_TIMING", gpu_timing_option, 2) == 1 && gpu_timing_option[0] == L'1';
   scene_runtime::set_gpu_timing_enabled(gpu_timing);
+  scene_runtime::set_waiting_stale_ms(profiles::WaitingPageStaleMs);
   wchar_t graphics_diagnostics_option[2]{};
   const bool graphics_diagnostics = GetEnvironmentVariableW(L"TAXI_CAM_GRAPHICS_DIAGNOSTICS", graphics_diagnostics_option, 2) == 1 &&
                                     graphics_diagnostics_option[0] == L'1';

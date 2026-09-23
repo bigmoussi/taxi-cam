@@ -87,6 +87,10 @@ struct Snapshot {
 };
 SceneCaptureManager& manager();
 void set_gpu_timing_enabled(bool enabled);
+// Camera-image age that brings the PLEASE WAIT page back while a side stays on.
+// 0, the default, disables the age rule; the bridge sets WaitingPageStaleMs.
+// Validation hosts that hold one composed image for a long time leave it off.
+void set_waiting_stale_ms(std::uint64_t ms);
 bool init_device(std::uint64_t key, ID3D12Device* device);
 void destroy_device(std::uint64_t key);
 bool init_queue(std::uint64_t key, ID3D12CommandQueue* queue);

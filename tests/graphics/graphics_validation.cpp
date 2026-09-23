@@ -599,6 +599,16 @@ void active_profile_switch_case(bool warp) {
     const auto before = runtime::snapshot(key).stamps;
     const auto on = render_displays(offset, 3);
     require(runtime::snapshot(key).stamps == before + 2, "Fresh camera images reach both current-profile PFDs");
+    if (phase == 2) {
+      // With the age rule on, a camera image that stops updating is replaced
+      // by the retained PLEASE WAIT page on both sides.
+      runtime::set_waiting_stale_ms(200);
+      Sleep(300);
+      const auto stale_before = runtime::snapshot(key).stamps;
+      require_waiting_page(render_displays(offset, 3), a350, offset, "A stale camera image is replaced by PLEASE WAIT");
+      require(runtime::snapshot(key).stamps == stale_before + 2, "PLEASE WAIT covers both sides once the camera image is stale");
+      runtime::set_waiting_stale_ms(0);
+    }
     UINT nose_pixels = 0, tail_pixels = 0;
     for (UINT side = 0; side < 2; ++side) {
       const UINT left = a350 && side ? 838u : 0u, width = a350 ? 806u : 768u;

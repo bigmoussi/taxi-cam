@@ -42,6 +42,8 @@ struct Runtime {
   std::mutex mutex;
   std::atomic<std::uint64_t> contended_writes{0};
   bool gpu_timing_enabled = false;
+  // Camera-image age that brings the PLEASE WAIT page back; 0 disables it.
+  std::uint64_t waiting_stale_ms = 0;
   std::array<Device, SceneCaptureManager::MaximumDevices> devices;
 };
 Runtime& runtime() {
@@ -94,8 +96,11 @@ bool show_waiting(const Device& item, bool minimum_time) {
     return false;
   if (minimum_time || !current_output(item))
     return true;
+  const auto limit = runtime().waiting_stale_ms;
+  if (!limit)
+    return false;
   const auto now = GetTickCount64();
-  return !item.output_ms || now < item.output_ms || now - item.output_ms > profiles::WaitingPageStaleMs;
+  return !item.output_ms || now < item.output_ms || now - item.output_ms > limit;
 }
 
 D3D12_RECT native_rect(const profiles::DisplayRect& rect) {
@@ -200,6 +205,10 @@ bool try_snapshot_queue_patches(std::uint64_t key, std::uint64_t generation, Que
 SceneCaptureManager& manager() {
   static auto* const instance = new SceneCaptureManager(scene_handoff());
   return *instance;
+}
+void set_waiting_stale_ms(std::uint64_t ms) {
+  const std::lock_guard lock(runtime().mutex);
+  runtime().waiting_stale_ms = ms;
 }
 void set_gpu_timing_enabled(bool enabled) {
   const standalone::OwnedWork owned_work_guard;
@@ -368,10 +377,12 @@ bool copy_patch(ID3D12GraphicsCommandList* list,
   // Only a fully validated native copy opportunity may request private work.
   // A cold request records no app commands; terminal delivery remains available
   // until a later composition publishes this exact typed patch.
-  // Reserve the camera patch as well, so the live image is ready when the page ends.
+  // Reserve both patches, so the live image is ready when the page ends and
+  // the page is already drawn when a side first starts or goes stale.
   const bool camera_requested = item->output.request_patch(format, width, height, local);
+  const bool waiting_requested = waiting_page(*item) && item->waiting_output.request_patch(format, width, height, local);
   auto& patches = page ? item->waiting_output : item->output;
-  if (!camera_requested || (page && !patches.request_patch(format, width, height, local))) {
+  if (!camera_requested || (page && !waiting_requested)) {
     ++item->status.state_skips;
     return false;
   }
