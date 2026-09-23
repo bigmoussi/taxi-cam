@@ -25,11 +25,14 @@
 #include "../shared/profile_selection.hpp"
 #include "../graphics/target_assignment.hpp"
 #include "updater.hpp"
+#include "changelog.hpp"
+#include "changelog_fetch.hpp"
 
 namespace {
 using namespace taxi_camera;
 namespace win = standalone;
-constexpr UINT TrayMessage = WM_APP + 1, StatusMessage = WM_APP + 2;
+constexpr UINT TrayMessage = WM_APP + 1, StatusMessage = WM_APP + 2, WhatsNewMessage = WM_APP + 3;
+constexpr win::ChangelogVersion InstalledVersion{TAXI_CAM_VERSION_MAJOR, TAXI_CAM_VERSION_MINOR, TAXI_CAM_VERSION_PATCH};
 constexpr wchar_t WindowClass[] = L"380TaxiCamera.Settings";
 constexpr wchar_t DonationUrl[] = L"https://www.paypal.com/donate/?hosted_button_id=EPVELD44P6NXW";
 constexpr wchar_t GithubUrl[] = L"https://github.com/rthoms334/taxi-cam";
@@ -70,6 +73,8 @@ bool hotkey_editor_focused{}, hotkeys_closing{};
 win::Updater updater;
 ULONGLONG next_update_check{};
 bool update_prompt{};
+win::ChangelogFetcher changelog_fetcher;
+bool whats_new{};  // The installed version's notes have not been read yet.
 int scale(int v) {
   return MulDiv(v, static_cast<int>(dpi), 96);
 }
@@ -390,31 +395,51 @@ LRESULT CALLBACK shortcut_editor(HWND control, UINT message, WPARAM w, LPARAM l,
   }
   return DefSubclassProc(control, message, w, l);
 }
-struct ShortcutDialogTemplate {
+struct DialogTemplate {
   DLGTEMPLATE dialog{WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME, WS_EX_DLGMODALFRAME, 0, 0, 0, 450, 260};
   WORD menu{}, window_class{}, title{};
 };
+// Dark caption and a client area of the given unscaled size, centred on Settings.
+void place_dialog(HWND hwnd, const wchar_t* title, int client_width, int client_height) {
+  SetWindowTextW(hwnd, title);
+  BOOL dark = TRUE;
+  DwmSetWindowAttribute(hwnd, 20, &dark, sizeof(dark));
+  RECT bounds{0, 0, scale(client_width), scale(client_height)}, owner{};
+  AdjustWindowRectExForDpi(&bounds, WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME, FALSE, WS_EX_DLGMODALFRAME, dpi);
+  GetWindowRect(window, &owner);
+  const int width = bounds.right - bounds.left, height = bounds.bottom - bounds.top;
+  SetWindowPos(hwnd, nullptr, owner.left + (owner.right - owner.left - width) / 2, owner.top + (owner.bottom - owner.top - height) / 2,
+               width, height, SWP_NOZORDER | SWP_NOACTIVATE);
+}
+HWND dialog_control(HWND hwnd,
+                    const wchar_t* type,
+                    const wchar_t* label,
+                    int id,
+                    int x,
+                    int y,
+                    int width,
+                    int height,
+                    DWORD style = 0,
+                    HFONT font = nullptr) {
+  HWND control = CreateWindowExW(0, type, label, WS_CHILD | WS_VISIBLE | style, scale(x), scale(y), scale(width), scale(height), hwnd,
+                                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance, nullptr);
+  SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font ? font : normal), TRUE);
+  SetWindowTheme(control, L"DarkMode_Explorer", nullptr);
+  return control;
+}
+INT_PTR dialog_colors(WPARAM w) {
+  const auto dc = reinterpret_cast<HDC>(w);
+  SetTextColor(dc, Text);
+  SetBkColor(dc, Card);
+  return reinterpret_cast<INT_PTR>(card_brush);
+}
 INT_PTR CALLBACK shortcut_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM) {
   if (message == WM_INITDIALOG) {
     shortcut_window = hwnd;
     hotkey_draft = hotkey_saved;
-    SetWindowTextW(hwnd, L"Taxi Cam — Flight-deck keyboard shortcuts");
-    BOOL dark = TRUE;
-    DwmSetWindowAttribute(hwnd, 20, &dark, sizeof(dark));
-    RECT bounds{0, 0, scale(680), scale(460)}, owner{};
-    AdjustWindowRectExForDpi(&bounds, WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME, FALSE, WS_EX_DLGMODALFRAME, dpi);
-    GetWindowRect(window, &owner);
-    const int width = bounds.right - bounds.left, height = bounds.bottom - bounds.top;
-    SetWindowPos(hwnd, nullptr, owner.left + (owner.right - owner.left - width) / 2, owner.top + (owner.bottom - owner.top - height) / 2,
-                 width, height, SWP_NOZORDER | SWP_NOACTIVATE);
+    place_dialog(hwnd, L"Taxi Cam — Flight-deck keyboard shortcuts", 680, 460);
     const auto make = [&](const wchar_t* type, const wchar_t* label, int id, int x, int y, int width, int height, DWORD style = 0,
-                          HFONT font = nullptr) {
-      HWND control = CreateWindowExW(0, type, label, WS_CHILD | WS_VISIBLE | style, scale(x), scale(y), scale(width), scale(height), hwnd,
-                                     reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance, nullptr);
-      SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font ? font : normal), TRUE);
-      SetWindowTheme(control, L"DarkMode_Explorer", nullptr);
-      return control;
-    };
+                          HFONT font = nullptr) { return dialog_control(hwnd, type, label, id, x, y, width, height, style, font); };
     make(L"STATIC", L"Flight-deck keyboard shortcuts", -1, 20, 17, 640, 28, 0, heading);
     make(L"STATIC", L"Use Ctrl or Alt with a letter, number or function key. Clear disables a shortcut.", -1, 20, 51, 640, 27, 0, small);
     for (unsigned i = 0; i < win::CameraHotkeyNames.size(); ++i) {
@@ -435,12 +460,8 @@ INT_PTR CALLBACK shortcut_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM) {
     refresh_shortcut_status();
     return TRUE;
   }
-  if (message == WM_CTLCOLORDLG || message == WM_CTLCOLORSTATIC || message == WM_CTLCOLOREDIT) {
-    const auto dc = reinterpret_cast<HDC>(w);
-    SetTextColor(dc, Text);
-    SetBkColor(dc, Card);
-    return reinterpret_cast<INT_PTR>(card_brush);
-  }
+  if (message == WM_CTLCOLORDLG || message == WM_CTLCOLORSTATIC || message == WM_CTLCOLOREDIT)
+    return dialog_colors(w);
   if (message == WM_COMMAND) {
     const int id = LOWORD(w);
     if (id >= 620 && id < 620 + static_cast<int>(win::CameraHotkeyNames.size()) && HIWORD(w) == EN_CHANGE) {
@@ -495,11 +516,71 @@ INT_PTR CALLBACK shortcut_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM) {
   return FALSE;
 }
 void edit_camera_hotkeys() {
-  const ShortcutDialogTemplate layout;
+  const DialogTemplate layout;
   if (DialogBoxIndirectParamW(instance, &layout.dialog, window, shortcut_dialog, 0) == -1) {
     notice = L"Could not open the keyboard shortcut editor.";
     InvalidateRect(window, nullptr, FALSE);
   }
+}
+INT_PTR CALLBACK whats_new_dialog(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
+  if (message == WM_INITDIALOG) {
+    place_dialog(hwnd, L"Taxi Cam — What's new", 620, 480);
+    dialog_control(hwnd, L"STATIC", L"What's new in Taxi Cam", -1, 20, 17, 580, 28, 0, heading);
+    const auto notes = dialog_control(hwnd, L"EDIT", reinterpret_cast<const std::wstring*>(l)->c_str(), 700, 20, 56, 580, 356,
+                                      WS_TABSTOP | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL);
+    SendMessageW(notes, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(scale(8), scale(8)));
+    const auto close = dialog_control(hwnd, L"BUTTON", L"Close", IDCANCEL, 502, 428, 98, 34, WS_TABSTOP | BS_DEFPUSHBUTTON);
+    SetFocus(close);  // Keep the notes unselected until the user tabs into them.
+    return FALSE;
+  }
+  if (message == WM_CTLCOLORDLG || message == WM_CTLCOLORSTATIC || message == WM_CTLCOLOREDIT)
+    return dialog_colors(w);
+  if ((message == WM_COMMAND && (LOWORD(w) == IDOK || LOWORD(w) == IDCANCEL)) || message == WM_CLOSE) {
+    EndDialog(hwnd, IDCANCEL);
+    return TRUE;
+  }
+  return FALSE;
+}
+void request_whats_new() {
+  if (changelog_fetcher.busy())
+    return;
+  if (!changelog_fetcher.begin(window, WhatsNewMessage)) {
+    notice = L"Could not start loading What's new. Try again.";
+  } else {
+    SetDlgItemTextW(window, 515, L"Loading…");
+    notice = L"Loading What's new from GitHub…";
+  }
+  InvalidateRect(window, nullptr, FALSE);
+}
+void show_whats_new() {
+  win::ChangelogFetchResult result;
+  if (!changelog_fetcher.take(result))
+    return;
+  SetDlgItemTextW(window, 515, L"What's new");
+  std::vector<win::ChangelogRelease> releases;
+  if (!result.ok || !win::parse_changelog(result.body, releases)) {
+    notice = result.ok ? L"What's new could not be read. Try again later."
+                       : L"Could not load What's new from GitHub. Check your connection and try again.";
+    InvalidateRect(window, nullptr, FALSE);
+    return;
+  }
+  const auto text = win::format_changelog(win::releases_up_to(releases, InstalledVersion), InstalledVersion);
+  const DialogTemplate layout;
+  if (DialogBoxIndirectParamW(instance, &layout.dialog, window, whats_new_dialog, reinterpret_cast<LPARAM>(&text)) == -1) {
+    notice = L"Could not open What's new.";
+    InvalidateRect(window, nullptr, FALSE);
+    return;
+  }
+  // Read once per installed version; the link returns after the next update.
+  whats_new = false;
+  if (const auto link = GetDlgItem(window, 515)) {
+    if (GetFocus() == link)
+      SetFocus(GetDlgItem(window, 514));
+    ShowWindow(link, SW_HIDE);
+  }
+  if (!win::record_whats_new_seen(win::settings_directory(), InstalledVersion))
+    notice = L"Could not remember that What's new was read. It will show again next launch.";
+  InvalidateRect(window, nullptr, FALSE);
 }
 bool apply(bool save = true) {
   auto settings = draft();
@@ -689,6 +770,11 @@ void build_controls() {
   const auto report_button = button(L"Report a bug", 512, 24, 638, 40, 40);
   const auto version_link = button(L"v" TAXI_CAM_VERSION_WIDE, 514, 24, 692, 155, 22);
   SendMessageW(version_link, WM_SETFONT, reinterpret_cast<WPARAM>(version_font), TRUE);
+  HWND whats_new_link{};
+  if (whats_new) {
+    whats_new_link = button(changelog_fetcher.busy() ? L"Loading…" : L"What's new", 515, 76, 647, 110, 22);
+    SendMessageW(whats_new_link, WM_SETFONT, reinterpret_cast<WPARAM>(version_font), TRUE);
+  }
   sidebar_tooltip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, CW_USEDEFAULT,
                                     CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, window, nullptr, instance, nullptr);
   if (sidebar_tooltip) {
@@ -705,6 +791,11 @@ void build_controls() {
     tip.uId = reinterpret_cast<UINT_PTR>(version_link);
     tip.lpszText = const_cast<wchar_t*>(L"Open Taxi Cam on GitHub");
     SendMessageW(sidebar_tooltip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tip));
+    if (whats_new_link) {
+      tip.uId = reinterpret_cast<UINT_PTR>(whats_new_link);
+      tip.lpszText = const_cast<wchar_t*>(L"See what changed in this version");
+      SendMessageW(sidebar_tooltip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tip));
+    }
   }
   button(L"Menu", 602, 930, 37, 80, 34);
   button(L"Save changes", 500, 835, 686, 175, 42);
@@ -1485,7 +1576,8 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
     case WM_ERASEBKGND:
       return 1;
     case WM_SETCURSOR:
-      if (const auto link = GetDlgItem(hwnd, 514); link && reinterpret_cast<HWND>(w) == link && LOWORD(l) == HTCLIENT) {
+      if (const auto link = reinterpret_cast<HWND>(w);
+          link && GetParent(link) == hwnd && (GetDlgCtrlID(link) == 514 || GetDlgCtrlID(link) == 515) && LOWORD(l) == HTCLIENT) {
         SetCursor(LoadCursorW(nullptr, IDC_HAND));
         return TRUE;
       }
@@ -1521,10 +1613,10 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       const int id = static_cast<int>(item->CtlID);
       const bool disabled = (item->itemState & ODS_DISABLED) != 0;
       const bool selected = !disabled && ((id >= 100 && id < 106 && id - 100 == page) || is_on(id, draft()));
-      HBRUSH surround = CreateSolidBrush((id >= 100 && id < 106) || id == 512 || id == 513 || id == 514 ? Sidebar : Background);
+      HBRUSH surround = CreateSolidBrush((id >= 100 && id < 106) || (id >= 512 && id <= 515) ? Sidebar : Background);
       FillRect(item->hDC, &item->rcItem, surround);
       DeleteObject(surround);
-      if (id == 514) {
+      if (id == 514 || id == 515) {
         const int saved = SaveDC(item->hDC);
         wchar_t label[64]{};
         GetWindowTextW(item->hwndItem, label, 64);
@@ -1583,6 +1675,9 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         target_combos(draft());
       if (IsWindowVisible(hwnd))
         InvalidateRect(hwnd, nullptr, FALSE);
+      return 0;
+    case WhatsNewMessage:
+      show_whats_new();
       return 0;
     case WM_CONTEXTMENU:
       PostMessageW(hwnd, TrayMessage, 0, WM_CONTEXTMENU);
@@ -1676,6 +1771,10 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
       }
       if (id == 513) {
         donate();
+        return 0;
+      }
+      if (id == 515) {
+        request_whats_new();
         return 0;
       }
       if (id == 514) {
@@ -1963,6 +2062,7 @@ int WINAPI wWinMain(HINSTANCE app, HINSTANCE, LPWSTR, int) {
     win::settings_override = installation + L"\\preview-settings";
   if (!win::load_settings(current, installation))
     notice = L"Saved settings were invalid; profile defaults loaded.";
+  whats_new = win::whats_new_pending(win::settings_directory(), InstalledVersion);
   // enabled is runtime connection state. A saved Service: Off value from an
   // older version must never prevent Connect or Auto-connect from enabling it.
   current.enabled = 0;
@@ -2007,6 +2107,7 @@ int WINAPI wWinMain(HINSTANCE app, HINSTANCE, LPWSTR, int) {
   }
   running = false;
   updater.stop();
+  changelog_fetcher.stop();
   WaitForSingleObject(worker, 1500);
   CloseHandle(worker);
   CloseHandle(show_event);
