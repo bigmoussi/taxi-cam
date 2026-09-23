@@ -70,11 +70,14 @@ inline bool outside_local_calibration_radius(const char* reason) noexcept {
   return reason && !std::strcmp(reason, "outside_local_calibration_radius");
 }
 
-// Issue 54: a stale local lock must not latch pose_invalid (that needs a manual
-// deactivate/activate). Use the existing retryable inspection path so cleanup
-// then recalibration can recreate the pair at the arrival airport.
-inline SceneStopReason stop_reason_for_body_pose_failure(const char* pose_error) noexcept {
-  return outside_local_calibration_radius(pose_error) ? SceneStopReason::inspection_unavailable : SceneStopReason::pose_invalid;
+// Active-pair policy when a pose capture fails. Issue 54: a stale local lock
+// must not latch pose_invalid (that needs a manual deactivate/activate). Issue
+// 84: nor may it retire the pair, since the replacement pair it forces is the
+// RenderThreadProc crash path. Retain the closed pair from the stale report
+// until the arrival latch completes. Calibration pending on its own, outside a
+// relocation, keeps its existing handling.
+inline bool retain_pair_for_recalibration(bool stale_local_calibration, bool retained_recalibration, bool calibration_pending) noexcept {
+  return stale_local_calibration || (retained_recalibration && calibration_pending);
 }
 
 // Observer policy, serialized by the probe mailbox mutex. No native calls.

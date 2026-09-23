@@ -122,8 +122,15 @@ struct Runtime {
   bool pose_captured = false;
   bool pose_busy = false;
   // Set when sample_body_pose reports outside_local_calibration_radius so the
-  // active-pair path can reset calibration and restart creation (issue 54).
+  // active-pair path can reset calibration (issue 54).
   bool stale_local_calibration = false;
+  // Set when capture_pose ran calibration and the three-sample latch has not
+  // completed yet. Per call, like pose_busy.
+  bool calibration_pending = false;
+  // Issue 84: the active pair is retained closed while arrival calibration
+  // re-latches, with its scene publication stopped. A replacement pair is never
+  // created for relocation; the retained pair republishes when its pose applies.
+  bool retained_recalibration = false;
   bool inspection_changed = false;
   SceneStopReason inspection_stop = SceneStopReason::identity_refused;
   MountPair mounts = default_mounts();
@@ -348,10 +355,20 @@ std::string describe_camera_match(const CameraMatchReport& report) {
                 report.horizontal_m, report.altitude_m, report.fov_delta, report.calibration_samples);
   return report.public_ready ? text : std::string("public_stale ") + text;
 }
-bool capture_pose(Runtime& runtime) {
+std::array<std::uint64_t, kMaxCameraFeeds> view_addresses(const std::array<ec::OwnedViewSnapshot, kMaxCameraFeeds>& views) {
+  std::array<std::uint64_t, kMaxCameraFeeds> out{};
+  for (unsigned i = 0; i < views.size(); ++i)
+    out[i] = views[i].complete && views[i].ready ? views[i].view_address : 0;
+  return out;
+}
+// fresh_views: view addresses of the owned pair from the caller's current
+// inspection, indexed like owned_ids. Only calibration reads them, to exclude
+// the retained pair from the pool scan.
+bool capture_pose(Runtime& runtime, const std::array<std::uint64_t, kMaxCameraFeeds>& fresh_views = {}) {
   runtime.pose_captured = false;
   runtime.pose_busy = false;
   runtime.stale_local_calibration = false;
+  runtime.calibration_pending = false;
   runtime.mounted_poses = {};
   std::string memory_detail;
   auto body = sample_body_pose(GetTickCount64());
@@ -378,10 +395,10 @@ bool capture_pose(Runtime& runtime) {
   }
   if (!body.valid && outside_local_calibration_radius(body.error)) {
     // Departure local lock is still held after a long sector. Clear it so the
-    // caller can recalibrate and recreate instead of latching pose_invalid.
+    // caller can recalibrate at arrival instead of latching pose_invalid.
     reset_body_pose_calibration();
     runtime.stale_local_calibration = true;
-    runtime.message = std::string("Aircraft body pose unavailable: ") + body.error;
+    runtime.message = "Local body-pose calibration expired after relocation; recalibrating at the current airport.";
     return false;
   }
   if (!body.valid && !body.calibration_required) {
@@ -423,7 +440,21 @@ bool capture_pose(Runtime& runtime) {
     }
     ViewMatchScan scan;
     const char* view_source = matched ? "not_scanned" : "renderer_absent";
-    if (!matched && runtime.renderer) {
+    // A retained owned pair (issue 84, profile change) is in the pool while
+    // calibration runs. Exclude its pooled views, recorded at creation or freshly
+    // inspected by the caller; if any owned ID has neither, scan nothing rather
+    // than risk latching on our own camera.
+    std::array<std::uint64_t, 2 * kMaxCameraFeeds> excluded{};
+    bool owned_resolved = true;
+    const auto owned_ids = runtime.pair.snapshot().owned_ids;
+    for (unsigned i = 0; i < kMaxCameraFeeds; ++i) {
+      excluded[i] = runtime.owned_pool_views[i];
+      excluded[kMaxCameraFeeds + i] = fresh_views[i];
+      owned_resolved = owned_resolved && (!owned_ids[i] || runtime.owned_pool_views[i] || fresh_views[i]);
+    }
+    if (!matched && runtime.renderer && !owned_resolved)
+      view_source = "owned_views_unresolved";
+    else if (!matched && runtime.renderer) {
       LocalMemoryReader views;
       const auto pool = inspected(runtime, [&] { return ec::inspect_view_pool(views, runtime.renderer); }, &memory_detail);
       view_source = "pool_unavailable";
@@ -431,7 +462,8 @@ bool capture_pose(Runtime& runtime) {
         views.reset_budget();
         std::array<double, 3> translation{};
         const auto chosen = inspected(
-            runtime, [&] { return select_source_view(views, pool, accept_public_camera_source, &scan, &translation); }, &memory_detail);
+            runtime, [&] { return select_source_view(views, pool, accept_public_camera_source, &scan, &translation, excluded); },
+            &memory_detail);
         view_source = chosen.complete ? "matched" : source_view_status_name(chosen.status);
         if (chosen.complete) {
           position = translation;
@@ -456,6 +488,7 @@ bool capture_pose(Runtime& runtime) {
       }
       if (!memory_detail.empty())
         runtime.message += " " + memory_detail;
+      runtime.calibration_pending = true;
       return false;
     }
     body = sample_body_pose(GetTickCount64());
@@ -834,6 +867,7 @@ void service_profile_transition(Runtime& runtime, void* manager, ProbeSnapshot& 
   const auto pair = runtime.pair.snapshot();
   report.pair = pair;
   bool validated = false;
+  std::array<std::uint64_t, kMaxCameraFeeds> retained_views{};
   if (!transition.failed() && timed(runtime, ProbeStage::manager, [&] { return manager_context(runtime, manager); })) {
     RetainedProfileTransition::Views views{};
     inspect_pair(runtime, pair.owned_ids, report, views, false);
@@ -862,12 +896,13 @@ void service_profile_transition(Runtime& runtime, void* manager, ProbeSnapshot& 
     validated = transition.ready();
     if (validated)
       runtime.gates = {};
+    retained_views = view_addresses(views);
   }
   // A prior ready acknowledgement never authorizes resume after a failed fresh
   // manager inspection. Missing telemetry/calibration keeps this hold active.
   const auto resume_epoch = get_aircraft_session_epoch();
   const bool pose_ready = validated && resume_requested && session_work_allowed(runtime) && aircraft_matches_profile() &&
-                          timed(runtime, ProbeStage::pose, [&] { return capture_pose(runtime); });
+                          timed(runtime, ProbeStage::pose, [&] { return capture_pose(runtime, retained_views); });
   report.outputs_matched = false;
   report.pose_waiting = resume_requested && validated && !pose_ready;
   report.message = transition.failed() ? "Aircraft change paused: retained camera identity could not be validated. Restart MSFS to resume."
@@ -1219,6 +1254,7 @@ void clear_retired_pair(Runtime& runtime) {
     if (view && runtime.retired_views.retain(runtime.owned_pool_renderer, view))
       view = 0;
   runtime.owned_control = 0;
+  runtime.retained_recalibration = false;
   runtime.scheduled_ids = {};
   runtime.resized_ids = {};
   runtime.resized_dimensions = {};
@@ -1796,7 +1832,8 @@ void observer(void* manager) noexcept {
           // Every scheduled feed needs the shared aircraft body pose. Omitting the
           // third slot left the right-wing camera at a stale world transform.
           const bool needs_pose = desired[0] || desired[1] || desired[2];
-          const bool pose_ready = !needs_pose || timed(runtime, ProbeStage::pose, [&] { return capture_pose(runtime); });
+          const bool pose_ready =
+              !needs_pose || timed(runtime, ProbeStage::pose, [&] { return capture_pose(runtime, view_addresses(views)); });
           bool aa_ready = true;
           if (pose_ready && needs_pose) {
             for (unsigned i = 0; i < desired.size(); ++i) {
@@ -1817,6 +1854,12 @@ void observer(void* manager) noexcept {
                   if (desired[i])
                     apply_pose(runtime, views[i], runtime.mounted_poses[i]);
               });
+            if (needs_pose && runtime.retained_recalibration) {
+              // The retained pair now carries the arrival pose. Reopen its scene
+              // like a retained profile resume; the next inspection republishes.
+              runtime.retained_recalibration = false;
+              scene_handoff().begin_scene();
+            }
             timed(runtime, ProbeStage::activation, [&] { apply_gates(runtime, pair.owned_ids, desired, report, new_pair); });
             runtime.scheduled_ids = pair.owned_ids;
             runtime.schedule = next_schedule;
@@ -1859,21 +1902,21 @@ void observer(void* manager) noexcept {
             } else if (hold_changed_session(runtime, pair)) {
               report.pose_waiting = true;
               runtime.message = "Aircraft changed during pose inspection; retaining the closed camera pair.";
-            } else if (runtime.stale_local_calibration) {
-              // Issue 54: parked re-arm after a long sector. Drop the departure
-              // local lock and retire the pair through the retryable path so
-              // creation restarts at the arrival airport instead of latching
-              // pose_invalid (manual deactivate/activate remains a fallback).
-              reset_body_pose_calibration();
+            } else if (retain_pair_for_recalibration(runtime.stale_local_calibration, runtime.retained_recalibration,
+                                                     runtime.calibration_pending)) {
+              // Issues 54 and 84: parked re-arm after a long sector. capture_pose
+              // dropped the departure local lock. Keep this closed pair and
+              // re-latch in place; retiring it for a replacement pair is the
+              // retained RenderThreadProc crash path. The stopped publication
+              // keeps the departure image off the displays until the new pose.
+              if (!runtime.retained_recalibration) {
+                scene_handoff().stop_scene();
+                runtime.retained_recalibration = true;
+              }
               runtime.stale_local_calibration = false;
-              record_stop(runtime, stop_reason_for_body_pose_failure("outside_local_calibration_radius"),
-                          "Local body-pose calibration expired after relocation; requesting a fresh camera pair.", now);
-              scene_handoff().stop_scene();
-              runtime.pair.request_disable();
-              timed(runtime, ProbeStage::lifecycle, [&] { runtime.pair.process_update(runtime.token, callbacks); });
-              pair = runtime.pair.snapshot();
-              runtime.stage_error = "Local body-pose calibration expired after relocation; owned cameras were closed for recalibration.";
-              runtime.message = runtime.stage_error;
+              runtime.scheduled_ids = pair.owned_ids;
+              runtime.schedule = next_schedule;
+              report.pose_waiting = true;
             } else {
               record_stop(runtime, SceneStopReason::pose_invalid, runtime.message.c_str(), now);
               scene_handoff().stop_scene();

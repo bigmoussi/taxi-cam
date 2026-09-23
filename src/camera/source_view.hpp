@@ -3,6 +3,8 @@
 #include "view_pool.hpp"
 
 #include <array>
+#include <cstdint>
+#include <span>
 
 namespace taxi_camera::native_camera {
 
@@ -62,12 +64,16 @@ SourceViewSnapshot inspect_source_view(engine_camera::MemoryReader& reader, cons
 // first usable camera. A predicate may skip a usable camera, including the
 // aircraft-object camera, without ending the scan or publishing its address.
 // validated_position is cleared first and set only for the accepted camera.
+// excluded_views lets a caller that already owns views (a retained pair being
+// recalibrated) skip them by pool view address: an excluded slot is not read,
+// examined or published. Zero entries are ignored.
 using SourceViewPredicate = bool (*)(const std::array<double, 3>& translation, float fov, void* context);
 SourceViewSnapshot select_source_view(engine_camera::MemoryReader& reader,
                                       const engine_camera::ViewPoolSnapshot& pool,
                                       SourceViewPredicate accept,
                                       void* context,
-                                      std::array<double, 3>* validated_position = nullptr) noexcept;
+                                      std::array<double, 3>* validated_position = nullptr,
+                                      std::span<const std::uint64_t> excluded_views = {}) noexcept;
 
 // Same validation for one independently verified source object with its Node
 // handle at +104. Does not read a pool or infer the source object's identity.
