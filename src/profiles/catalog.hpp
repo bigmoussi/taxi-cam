@@ -308,19 +308,18 @@ static_assert(Pmdg777300ER.mounts[0] != Pmdg777Mounts[0]);
 static_assert(Pmdg777F.mounts[0] == Pmdg777Mounts[0]);
 // Aerosoft A346 Pro 1.0.1 panel.cfg: every display is an htmlgauge on one
 // 4096x4096 $GAUGES_UNIFIED texture. The TACS selectors show the camera on the
-// captain's PFD (CAM CAPT), the first officer's display (CAM FO) and the lower
-// ECAM (CAM SD), which are sides 0, 1 and 2. The captain's side uses the
-// CaptPFD region: live testing on 2026-09-23 showed the CaptND region one
-// display out, while CoND and ECAM_LOWER appeared where expected. Mip count and
-// DXGI format are not scanned yet.
+// captain's PFD (CAM CAPT), the first officer's PFD (CAM FO) and the lower ECAM
+// (CAM SD), which are sides 0, 1 and 2: the CaptPFD, CoPFD and ECAM_LOWER
+// regions, as in the other Airbus profiles. Live testing on 2026-09-23 showed
+// the ND regions one display out on both pilot sides. Mip count and DXGI format
+// are not scanned yet.
 inline constexpr const char* A346Texture = "$GAUGES_UNIFIED";
 inline constexpr unsigned A346DisplaySize = 4096;
-inline constexpr unsigned A346CaptPfdX = 9;
-inline constexpr unsigned A346NdX = 769;
+// panel.cfg CaptPFD 9, 470; CoPFD 9, 1230; ECAM_LOWER 1529, 1230; each 750 x 750.
+inline constexpr unsigned A346PfdX = 9;
 inline constexpr unsigned A346CaptY = 470;
-inline constexpr unsigned A346FoNdY = 1230;
-inline constexpr unsigned A346NdSize = 750;
-// ECAM_LOWER 1529, 1230, 750, 750.
+inline constexpr unsigned A346FoY = 1230;
+inline constexpr unsigned A346DisplayUnit = 750;
 inline constexpr unsigned A346SdX = 1529;
 inline constexpr unsigned A346SdY = 1230;
 // flight_model.cfg contact points (feet): NLG forward/up 103.51/-21.4; left
@@ -347,20 +346,20 @@ inline constexpr AircraftProfile AerosoftA346 = [] {
                     L"Aerosoft A340-600",
                     {"L:AB_VC_CAM_CAPT_SEL", "L:AB_VC_CAM_FO_SEL"},
                     {"", ""},
-                    {"CaptPFD", "CoND"},
+                    {"CaptPFD", "CoPFD"},
                     A346Mounts,
                     A346DisplaySize,
                     A346DisplaySize,
                     0,
                     TaxiControl::lvar_off,
                     {"", "", ""},
-                    {{{A346CaptPfdX, A346CaptY, A346CaptPfdX + A346NdSize, A346CaptY + A346NdSize},
-                      {A346NdX, A346FoNdY, A346NdX + A346NdSize, A346FoNdY + A346NdSize}}}};
+                    {{{A346PfdX, A346CaptY, A346PfdX + A346DisplayUnit, A346CaptY + A346DisplayUnit},
+                      {A346PfdX, A346FoY, A346PfdX + A346DisplayUnit, A346FoY + A346DisplayUnit}}}};
   p.sides = 3;
   p.taxi_lvars[2] = "L:AB_VC_CAM_SD_SEL";
   p.taxi_events[2] = "";
   p.pfd_labels[2] = "ECAM_LOWER";
-  p.display_regions[2] = {A346SdX, A346SdY, A346SdX + A346NdSize, A346SdY + A346NdSize};
+  p.display_regions[2] = {A346SdX, A346SdY, A346SdX + A346DisplayUnit, A346SdY + A346DisplayUnit};
   p.composition = A346Composition;
   p.formats = {};
   p.package_markers = {"simobjects/airplanes/airbus-a346-pro", "aerosoft-aircraft-a346-pro", ""};
