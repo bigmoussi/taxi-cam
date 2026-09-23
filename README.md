@@ -27,7 +27,7 @@ If you find Taxi Cam useful, please consider donating.
 - **iniBuilds A350-1000** — nose and tail cameras on the PFD.
 - **iniBuilds A380** — nose and tail cameras; use keyboard shortcuts or manual previews because its TAXI buttons are marked INOP.
 - **PMDG 777** (777-200ER, 777-300ER and 777F) — three cameras (nose gear, left wing, right wing) on the inboard navigation displays. Split-bottom ND layout; ground-speed overlay off; reference guides disabled. Use Ctrl + Shift + L / R / B. No cockpit CAM button.
-- **Aerosoft A340-600** — nose and tail cameras on the captain and first-officer navigation displays and the lower ECAM, controlled by the **CAM CAPT**, **CAM F/O** and **CAM SD** selectors (or **Ctrl + Shift + D** for the SD). The aircraft's own built-in taxi-camera page is covered while Taxi Cam draws. Texture identity, framing and guides are not yet verified in the simulator.
+- **Aerosoft A340-600** — nose and tail cameras on the captain's PFD, the first officer's display and the lower ECAM, controlled by the **CAM CAPT**, **CAM F/O** and **CAM SD** selectors (or **Ctrl + Shift + D** for the SD). The F/O and SD displays were confirmed in the simulator; the captain's display was moved one position after that test and is not yet re-checked.
 
 ## Installation
 
