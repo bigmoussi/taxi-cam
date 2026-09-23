@@ -270,6 +270,8 @@ DWORD run_impl() {
   std::vector<PfdTargetObservation> inventory;
   unsigned rate{}, feeds{}, applied_profile{};
   ParkedRatePolicy parked_policy;
+  FrameRateCap frame_cap;
+  std::uint64_t manager_updates{};
   EffectiveCameraRate effective_rate;
   std::uint64_t applied_profile_request{}, applied_session_epoch{};
   std::uint64_t pending_profile_request{}, pending_session_epoch{}, transition_token{};
@@ -649,10 +651,12 @@ DWORD run_impl() {
     // camera_rate are untouched; configure() on a live pair retains deadlines.
     const bool parked = parked_policy.update(now, speed.valid, speed.knots);
     const auto* rate_profile = profiles::find(applied_profile ? applied_profile : settings.profile);
-    effective_rate =
-        effective_camera_rate(settings.camera_rate, rate_profile ? rate_profile->pfd_refresh_hz : 0, parked, settings.parked_rate);
     const unsigned desired_feeds =
         settings.single_camera ? 1u : (rate_profile && rate_profile->composition.split_bottom != 0 ? 3u : 2u);
+    // Updates counted by the previous loop's scene snapshot.
+    const unsigned frame_rate_cap = frame_cap.update(now, manager_updates, desired_feeds);
+    effective_rate = effective_camera_rate(settings.camera_rate, rate_profile ? rate_profile->pfd_refresh_hz : 0, parked,
+                                           settings.parked_rate, frame_rate_cap);
     if (connected && (rate != effective_rate.rate || feeds != desired_feeds)) {
       rate = effective_rate.rate;
       feeds = desired_feeds;
@@ -780,6 +784,7 @@ DWORD run_impl() {
       scene_runtime::hide_ground_speed(key);
     service_scene();
     const auto scene = native_camera::scene_snapshot();
+    manager_updates = scene.updates;
     const auto output = scene_runtime::snapshot(key);
     if (scene.stop_sequence != last_stop_sequence) {
       progress.reset();
@@ -995,7 +1000,7 @@ DWORD run_impl() {
           "stop_seq=%llu stop=%s "
           "retry=%u pending=%u pose_wait=%u view_wait=%u waits=%llu ready=%u/%u outputs=%u/%u output_waits=%u inspection=%s/%s "
           "entries=%llu/%llu suspended=%u "
-          "rate=%u saved_rate=%u useful_rate=%u rate_limit=%s parked=%u speed_knots=%.2f "
+          "rate=%u saved_rate=%u useful_rate=%u rate_limit=%s frame_cap=%u parked=%u speed_knots=%.2f "
           "gates=%u/%u tail=%s "
           "draws=%llu unknown_lists=%llu invalid_recordings=%llu scoped_invalidations=%llu ignored_recordings=%llu "
           "pass_no_rts=%llu pass_unresolved_rts=%llu invalid_draws=%llu "
@@ -1011,7 +1016,7 @@ DWORD run_impl() {
           scene.output_ready[1], scene.output_waits, scene.inspection_status[0], scene.inspection_status[1],
           static_cast<unsigned long long>(scene.pair.owned_ids[0]), static_cast<unsigned long long>(scene.pair.owned_ids[1]),
           demand.suspend, status.effective_rate, settings.camera_rate, status.useful_rate, camera_rate_limit_name(status.rate_limits),
-          status.parked, speed.valid ? speed.knots : -1.0, scene.gates[0], scene.gates[1], output.capture.tail_status,
+          frame_cap.cap(), status.parked, speed.valid ? speed.knots : -1.0, scene.gates[0], scene.gates[1], output.capture.tail_status,
           static_cast<unsigned long long>(output.capture.source_draws),
           static_cast<unsigned long long>(output.capture.unknown_submitted_lists),
           static_cast<unsigned long long>(output.capture.invalid_source_recordings),
@@ -1195,6 +1200,17 @@ DWORD run_impl() {
       log_status(status, copy_detail);
       log_contention(status, graphics, output);
       log_hook_timing(status);
+      // More accepted captures than activations for a feed means the engine
+      // drew its view on closed-gate updates too (issue 71 frame jumps).
+      char cadence_detail[384];
+      std::snprintf(
+          cadence_detail, sizeof(cadence_detail),
+          "Feed cadence: activations=%llu/%llu/%llu accepted=%llu/%llu/%llu stale=%llu rate=%u frame_cap=%u updates=%llu",
+          static_cast<unsigned long long>(scene.activation_counts[0]), static_cast<unsigned long long>(scene.activation_counts[1]),
+          static_cast<unsigned long long>(scene.activation_counts[2]), static_cast<unsigned long long>(output.accepted_frames[0]),
+          static_cast<unsigned long long>(output.accepted_frames[1]), static_cast<unsigned long long>(output.accepted_frames[2]),
+          static_cast<unsigned long long>(output.stale_frames), rate, frame_cap.cap(), static_cast<unsigned long long>(scene.updates));
+      log_status(status, cadence_detail);
       if (!logged || status.active_profile != last_logged.active_profile || std::strcmp(status.aircraft_type, last_logged.aircraft_type) ||
           std::strcmp(status.aircraft_path, last_logged.aircraft_path)) {
         char identity_detail[640];

@@ -277,6 +277,69 @@ void effective_rate_caps() {
     require(useful_camera_rate(profile->pfd_refresh_hz) == kManagerCeilingCameraRate,
             "Every catalogued PFD refresh currently sits at or above the manager ceiling");
   static_assert(effective_camera_rate(kDefaultCameraRate, 0, true).rate == kDefaultParkedCameraRate);
+  check(effective_camera_rate(10, 0, false, 5, 7), 7, 15, kRateLimitFrameRate, "Frame-rate cap lowers the moving rate");
+  check(effective_camera_rate(10, 0, false, 5, 12), 10, 15, kRateLimitNone, "A frame-rate cap above the saved rate is not a limit");
+  check(effective_camera_rate(30, 0, false, 5, 7), 7, 15, kRateLimitManager | kRateLimitFrameRate, "Frame-rate cap below the ceiling");
+  check(effective_camera_rate(10, 0, false, 5, 2), 5, 15, kRateLimitFrameRate, "Frame-rate cap never goes below the minimum");
+  check(effective_camera_rate(10, 0, true, 5, 7), 5, 15, kRateLimitFrameRate | kRateLimitParked, "Parked floor still applies under a cap");
+  require(std::string_view(camera_rate_limit_name(kRateLimitManager | kRateLimitFrameRate)) == "frame_rate" &&
+              std::string_view(camera_rate_limit_name(kRateLimitParked | kRateLimitFrameRate)) == "parked" &&
+              camera_rate_limit_text(kRateLimitFrameRate)[0] != L'\0',
+          "Frame-rate limit name and companion suffix");
+}
+
+// The cap follows the measured manager update rate: feeds * rate stays within
+// a third of it, and it only moves when two consecutive windows agree.
+void frame_rate_cap() {
+  using namespace taxi_camera;
+  constexpr auto window = FrameRateCap::kWindowMs;
+  const auto settle = [](FrameRateCap& cap, std::uint64_t& now, std::uint64_t& updates, unsigned fps, unsigned feeds, unsigned windows) {
+    for (unsigned n = 0; n < windows; ++n) {
+      now += window;
+      updates += std::uint64_t(fps) * window / 1000;
+      cap.update(now, updates, feeds);
+    }
+    return cap.cap();
+  };
+  for (const auto& [fps, feeds, expected] : std::initializer_list<std::array<unsigned, 3>>{
+           {30, 2, 5}, {45, 2, 7}, {60, 2, 10}, {90, 2, 15}, {200, 2, 33}, {1000, 2, 60}, {45, 3, 5}, {45, 1, 15}, {10, 2, 5}}) {
+    FrameRateCap cap;
+    std::uint64_t now = 1000, updates = 0;
+    require(cap.update(now, updates, feeds) == kMaximumCameraRate, "Frame-rate cap limited before any measurement");
+    require(settle(cap, now, updates, fps, feeds, 1) == kMaximumCameraRate, "One window moved the cap");
+    require(settle(cap, now, updates, fps, feeds, 1) == expected, "Two agreeing windows did not set the frame-rate cap");
+    require(settle(cap, now, updates, fps, feeds, 3) == expected, "A steady update rate moved the cap");
+  }
+  // Rate 10 with two feeds at 30 fps: the case from issue 71.
+  static_assert(FrameRateCap::kUpdatesPerOpening * 2 * 5 <= 30 && FrameRateCap::kUpdatesPerOpening * 2 * 10 > 30);
+
+  FrameRateCap jitter;
+  std::uint64_t now = 0, updates = 0;
+  jitter.update(now, updates, 2);
+  settle(jitter, now, updates, 45, 2, 2);
+  require(jitter.cap() == 7, "Jitter fixture did not settle");
+  for (unsigned n = 0; n < 20; ++n)
+    require(settle(jitter, now, updates, n % 2 ? 42 : 48, 2, 1) == 7, "Alternating frame times made the cap hunt");
+  require(settle(jitter, now, updates, 60, 2, 2) == 10, "A faster simulator did not raise the cap");
+  require(settle(jitter, now, updates, 30, 2, 2) == 5, "A slower simulator did not lower the cap");
+
+  FrameRateCap idle;
+  now = 0;
+  updates = 0;
+  idle.update(now, updates, 2);
+  settle(idle, now, updates, 30, 2, 2);
+  require(idle.cap() == 5, "Idle fixture did not settle");
+  require(settle(idle, now, updates, 0, 2, 2) == kMaximumCameraRate, "An idle camera runtime kept a stale frame-rate cap");
+
+  FrameRateCap restart;
+  now = 0;
+  updates = 1000;
+  restart.update(now, updates, 2);
+  settle(restart, now, updates, 30, 2, 2);
+  now += window;
+  require(restart.update(now, 10, 2) == 5, "A restarted update counter changed the cap without a measurement");
+  now += window;
+  require(restart.update(now, 10 + 30 * window / 1000, 2) == 5, "Restarted counter window was not measured");
 }
 
 // Drives the schedule the way the bridge does: public ground speed selects
@@ -382,6 +445,7 @@ int main() {
     lower_budget_changes();
     parked_policy_hysteresis();
     effective_rate_caps();
+    frame_rate_cap();
     adaptive_parked_schedule();
     adaptive_rate_switch_contract();
     std::printf(

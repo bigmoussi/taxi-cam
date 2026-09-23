@@ -474,6 +474,8 @@ void service() {
     // Keep this high-water mark after composition/reset. Device timeline values
     // never restart, and an older recording may retire in a later service call.
     newest = frame.order;
+    if (frame.match.feed < item->status.accepted_frames.size())
+      ++item->status.accepted_frames[frame.match.feed];
     auto& previous = item->pending[frame.match.feed];
     if (previous.token)
       manager().discard_frame(previous.token);

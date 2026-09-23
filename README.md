@@ -72,7 +72,7 @@ Choose **Apply live** to preview the positions, then **Save changes** to keep th
 
 ### Brightness and smoothness
 
-On **Display**, adjust brightness, automatic night exposure and ground-speed text colour (when the profile draws GS; the PMDG 777 keeps ground speed off). **Camera frame rate** accepts **5–60** (minimum **5**), with a default of **10**. This version's installer writes **10** into existing settings so a saved 15 becomes 10; later changes you make are kept. Higher values update the cameras more often and increase simulator work. The achieved rate also depends on simulator performance. Choose **Save changes** when finished.
+On **Display**, adjust brightness, automatic night exposure and ground-speed text colour (when the profile draws GS; the PMDG 777 keeps ground speed off). **Camera frame rate** accepts **5–60** (minimum **5**), with a default of **10**. This version's installer writes **10** into existing settings so a saved 15 becomes 10; later changes you make are kept. Higher values update the cameras more often and increase simulator work. When the simulator's frame rate is low, Taxi Cam lowers the camera rate automatically so extra camera renders stay on at most a third of frames, and the status shows it as limited by the simulator frame rate. Choose **Save changes** when finished.
 
 On **Reference guides**, **Marking colour** changes the nose squares and tail brackets independently of GS. A350 and A380 both default to magenta square nose markers. Choose **Save changes** to retain the colour for the selected aircraft profile.
 
