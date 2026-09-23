@@ -245,15 +245,15 @@ void array_json(std::ostream& out, const Values& values) {
 std::string settings_json(const ipc::Settings& s) {
   std::ostringstream out;
   out << std::setprecision(17);
-  out << "{\"enabled\":" << s.enabled << ",\"camera_rate\":" << s.camera_rate << ",\"automatic_exposure\":" << s.automatic_exposure
-      << ",\"exposure\":" << s.exposure << ",\"night_boost\":" << s.night_boost << ",\"profile\":" << s.profile
-      << ",\"auto_profile\":" << s.auto_profile << ",\"follow_taxi\":" << s.follow_taxi << ",\"auto_detect\":" << s.auto_detect
-      << ",\"single_camera\":" << s.single_camera << ",\"manual_mask\":" << s.manual_mask << ",\"calibration_mask\":" << s.calibration_mask
-      << ",\"calibration_budget\":" << s.calibration_budget << ",\"scene_test\":" << s.scene_test
-      << ",\"route_request\":" << s.route_request << ",\"left_id\":" << s.left_id << ",\"right_id\":" << s.right_id
-      << ",\"profile_request\":" << s.profile_request << ",\"aircraft_session_epoch\":" << s.aircraft_session_epoch
-      << ",\"taxi_request\":" << s.taxi_request << ",\"taxi_selected_mask\":" << s.taxi_selected_mask
-      << ",\"taxi_desired_mask\":" << s.taxi_desired_mask << ",\"speed_color\":";
+  out << "{\"enabled\":" << s.enabled << ",\"camera_rate\":" << s.camera_rate << ",\"parked_rate\":" << s.parked_rate
+      << ",\"automatic_exposure\":" << s.automatic_exposure << ",\"exposure\":" << s.exposure << ",\"night_boost\":" << s.night_boost
+      << ",\"profile\":" << s.profile << ",\"auto_profile\":" << s.auto_profile << ",\"follow_taxi\":" << s.follow_taxi
+      << ",\"auto_detect\":" << s.auto_detect << ",\"single_camera\":" << s.single_camera << ",\"manual_mask\":" << s.manual_mask
+      << ",\"calibration_mask\":" << s.calibration_mask << ",\"calibration_budget\":" << s.calibration_budget
+      << ",\"scene_test\":" << s.scene_test << ",\"route_request\":" << s.route_request << ",\"left_id\":" << s.left_id
+      << ",\"right_id\":" << s.right_id << ",\"profile_request\":" << s.profile_request
+      << ",\"aircraft_session_epoch\":" << s.aircraft_session_epoch << ",\"taxi_request\":" << s.taxi_request
+      << ",\"taxi_selected_mask\":" << s.taxi_selected_mask << ",\"taxi_desired_mask\":" << s.taxi_desired_mask << ",\"speed_color\":";
   array_json(out, s.speed_color);
   out << ",\"nose_dot\":";
   array_json(out, s.nose_dot);
@@ -275,10 +275,11 @@ std::string status_json(const ipc::Status& s) {
   out << std::setprecision(17);
   out << "{\"heartbeat\":" << s.heartbeat << ",\"graphics_ready\":" << s.graphics_ready << ",\"scene_ready\":" << s.scene_ready
       << ",\"taxi_mask\":" << s.taxi_mask << ",\"speed_inhibited\":" << s.speed_inhibited << ",\"active_profile\":" << s.active_profile
-      << ",\"detected_profile\":" << s.detected_profile << ",\"aircraft_session_epoch\":" << s.aircraft_session_epoch
-      << ",\"identity_sample_ms\":" << s.identity_sample_ms << ",\"aircraft_type\":" << json(s.aircraft_type)
-      << ",\"aircraft_path\":" << json(s.aircraft_path) << ",\"captures\":" << s.captures << ",\"composed\":" << s.composed
-      << ",\"stamps\":" << s.stamps << ",\"left_id\":" << s.left_id << ",\"right_id\":" << s.right_id
+      << ",\"detected_profile\":" << s.detected_profile << ",\"effective_rate\":" << s.effective_rate
+      << ",\"useful_rate\":" << s.useful_rate << ",\"rate_limits\":" << s.rate_limits << ",\"parked\":" << s.parked
+      << ",\"aircraft_session_epoch\":" << s.aircraft_session_epoch << ",\"identity_sample_ms\":" << s.identity_sample_ms
+      << ",\"aircraft_type\":" << json(s.aircraft_type) << ",\"aircraft_path\":" << json(s.aircraft_path) << ",\"captures\":" << s.captures
+      << ",\"composed\":" << s.composed << ",\"stamps\":" << s.stamps << ",\"left_id\":" << s.left_id << ",\"right_id\":" << s.right_id
       << ",\"hook_failures\":" << s.hook_failures << ",\"speed\":" << s.speed << ",\"exposure\":" << s.exposure
       << ",\"probe_elapsed_ms\":" << s.probe_cpu_ms << ",\"probe_max_elapsed_ms\":" << s.probe_max_ms << ",\"stage_elapsed_ms\":";
   array_json(out, s.stage_ms);

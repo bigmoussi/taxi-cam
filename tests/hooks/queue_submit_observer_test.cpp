@@ -57,7 +57,7 @@ void invoke(ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lis
 }
 
 struct Context {
-  std::atomic<unsigned> before{0}, after{0}, refused{0}, contended{0}, bad{0}, phase{0};
+  std::atomic<unsigned> before{0}, after{0}, refused{0}, contended{0}, unordered{0}, bad{0}, phase{0};
   std::atomic<unsigned> calls_at_contention{0};
   std::atomic<std::uint64_t> sequence{0};
   std::atomic<bool> recurse_before{false}, recurse_after{false};
@@ -176,15 +176,23 @@ void refused(void* opaque, ID3D12CommandQueue*, qs::Refusal reason) noexcept {
 }
 
 qs::Callbacks callbacks(Context* context) {
-  return {context, before, after, refused,
-          [](void* opaque, ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists) noexcept {
-            auto& current = *static_cast<Context*>(opaque);
-            if (expected.queue != queue || expected.count != count || expected.lists != lists)
-              ++current.bad;
-            current.calls_at_contention = static_cast<MockQueue*>(queue)->calls.load();
-            refused(opaque, queue, qs::Refusal::contended_submission);
-            return std::uint64_t{0};
-          }};
+  qs::Callbacks value{context, before, after, refused,
+                      [](void* opaque, ID3D12CommandQueue* queue, UINT count, ID3D12CommandList* const* lists) noexcept {
+                        auto& current = *static_cast<Context*>(opaque);
+                        if (expected.queue != queue || expected.count != count || expected.lists != lists)
+                          ++current.bad;
+                        current.calls_at_contention = static_cast<MockQueue*>(queue)->calls.load();
+                        refused(opaque, queue, qs::Refusal::contended_submission);
+                        return std::uint64_t{0};
+                      }};
+  value.forwarded_unordered = [](void* opaque, ID3D12CommandQueue* queue) noexcept {
+    auto& current = *static_cast<Context*>(opaque);
+    // Fires only after the exact original forward of a zero-receipt batch.
+    if (expected.queue != queue || static_cast<MockQueue*>(queue)->calls.load() == 0)
+      ++current.bad;
+    ++current.unordered;
+  };
+  return value;
 }
 
 DWORD protection(void* address) {
@@ -266,6 +274,16 @@ void mock() {
   require(queue->calls == 10 && queue->bad == 0 && context->before == 4 && context->after == 3 && context->contended == 1 &&
               context->refused == 5 && context->bad == 0 && context->phase == 0 && context->calls_at_contention == 9,
           "A contended helper submit blocked on the owner thread or dropped a forwarded batch");
+  // A zero receipt (unrelated, or ordering skipped within its wait budget)
+  // forwards without after and then reports forwarded_unordered exactly once.
+  require(context->unordered == 0, "forwarded_unordered fired for an observed or refused batch");
+  context->receipt_enabled = false;
+  context->phase = 0;
+  invoke(queue, 2, lists);
+  context->receipt_enabled = true;
+  require(queue->calls == 11 && context->before == 5 && context->after == 3 && context->unordered == 1 && context->bad == 0,
+          "A zero-receipt batch was completed, dropped or not reported as unordered");
+  context->phase = 0;
 
   std::array<std::thread, 4> workers;
   for (auto& worker : workers)
@@ -276,19 +294,25 @@ void mock() {
     });
   for (auto& worker : workers)
     worker.join();
-  require(queue->calls == 810 && queue->bad == 0 && context->bad == 0 && context->phase == 0,
+  require(queue->calls == 811 && queue->bad == 0 && context->bad == 0 && context->phase == 0,
           "Concurrent queue submissions dropped or corrupted a forwarded batch");
-  require(context->after >= 3 && context->before == context->after + 1 && context->refused == 4 + context->contended &&
+  require(context->after >= 3 && context->before == context->after + 2 && context->refused == 4 + context->contended &&
               context->after + context->contended == 804,
           "Concurrent observation lost receipt pairing or double-counted a contended submit");
   const auto stats = qs::statistics(queue);
-  require(stats.submissions + context->contended == 808 && stats.receipts == context->after && stats.refusals == context->refused,
+  require(stats.submissions + context->contended == 809 && stats.receipts == context->after && stats.refusals == context->refused,
           "Submission statistics are inconsistent");
+  // Every wrapper entry for this registered queue, minus nested forwards, is a
+  // presentation pulse; contended counts the helper submits that found the lock busy.
+  require(stats.calls == 809 && stats.contended == context->contended && qs::total_statistics().calls >= stats.calls &&
+              qs::total_statistics().contended >= stats.contended,
+          "Presentation pulse or contention statistics are inconsistent");
   const auto observed_after = context->after.load();
   require(qs::disable_queue(queue).status == qs::Status::disabled, "Disabling the queue failed");
   invoke(queue, 2, lists);
-  require(queue->calls == 811 && context->after == observed_after && queue->references == 2,
+  require(queue->calls == 812 && context->after == observed_after && queue->references == 2,
           "Disable observed work or released the retained queue");
+  require(qs::statistics(queue).calls == 810, "A disabled queue's submit was not counted as a presentation pulse");
   require(qs::register_queue(queue, callbacks(context)).status == qs::Status::already_registered,
           "Identical registration could not resume");
   for (unsigned i = 1; i < qs::kMaximumQueues; ++i)
@@ -307,7 +331,7 @@ void mock() {
           "Owned-slot removal did not restore the original and page protection");
   require(qs::register_queue(queue, callbacks(context)).status == qs::Status::installation_consumed, "Removed installation was reused");
   invoke(queue, 2, lists);
-  require(queue->calls == 812 && queue->bad == 0 && context->after == observed_after,
+  require(queue->calls == 813 && queue->bad == 0 && context->after == observed_after,
           "Removed hook still observed or omitted an original call");
 }
 

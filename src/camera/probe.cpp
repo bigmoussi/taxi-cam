@@ -96,6 +96,10 @@ struct Runtime {
   ClearedAaLedger cleared_aa;
   std::uint64_t aa_restores = 0;
   std::uint64_t aa_restore_failures = 0;
+  // Consecutive activation pulses refused because the diffuse texture had no
+  // render-target record; bounded by ViewResizeWarmup::MaximumOutputWaits.
+  unsigned rt_record_refusals = 0;
+  std::uint64_t rt_record_holds = 0;
   std::array<std::uint64_t, 2> owned_pool_views{};
   std::uint64_t owned_pool_renderer{};
   ViewCreationWait creation_wait;
@@ -157,7 +161,7 @@ void begin_session_reset(Runtime& runtime, const profiles::AircraftProfile& prof
   // then refuse, leaving observer() as a no-op. Waiting for that path
   // deadlocks camera launch on the next flight-session reset.
   if (SceneSessionReset::acknowledge_empty_without_observer(runtime.hooked.load(std::memory_order_acquire),
-                                                           runtime.enabled.load(std::memory_order_acquire)))
+                                                            runtime.enabled.load(std::memory_order_acquire)))
     runtime.session_reset.observe_empty(cancelled, runtime.pair.snapshot());
   if (runtime.profile_transition_token != UINT64_MAX)
     ++runtime.profile_transition_token;
@@ -310,15 +314,24 @@ bool accept_public_camera_source(const std::array<double, 3>& translation, float
 
 const char* source_view_status_name(SourceViewStatus status) noexcept {
   switch (status) {
-    case SourceViewStatus::ready: return "ready";
-    case SourceViewStatus::no_source: return "no_source";
-    case SourceViewStatus::invalid_pool: return "invalid_pool";
-    case SourceViewStatus::invalid_pointer: return "invalid_pointer";
-    case SourceViewStatus::pool_changed: return "pool_changed";
-    case SourceViewStatus::read_failed: return "read_failed";
-    case SourceViewStatus::changed: return "changed";
-    case SourceViewStatus::read_limit: return "read_limit";
-    case SourceViewStatus::not_inspected: break;
+    case SourceViewStatus::ready:
+      return "ready";
+    case SourceViewStatus::no_source:
+      return "no_source";
+    case SourceViewStatus::invalid_pool:
+      return "invalid_pool";
+    case SourceViewStatus::invalid_pointer:
+      return "invalid_pointer";
+    case SourceViewStatus::pool_changed:
+      return "pool_changed";
+    case SourceViewStatus::read_failed:
+      return "read_failed";
+    case SourceViewStatus::changed:
+      return "changed";
+    case SourceViewStatus::read_limit:
+      return "read_limit";
+    case SourceViewStatus::not_inspected:
+      break;
   }
   return "not_inspected";
 }
@@ -563,6 +576,7 @@ void inspect_pair(Runtime& runtime,
     report.resource_present[i] = report.ready[i] && view.resource_present;
     report.output_ready[i] =
         report.ready[i] && runtime.resized_ids[i] == ids[i] && owned_view_output_ready(view, runtime.resized_dimensions[i]);
+    report.output_slots[i] = view.complete && view.ready ? owned_view_slot_digits(view) : 0u;
     if (report.ready[i]) {
       report.dimensions[i] = view.dimensions;
       report.flags[i] = view.flags;
@@ -1695,13 +1709,27 @@ void observer(void* manager) noexcept {
           // that its requested output exists. The renderer binds that output
           // without a null check, so a gate opens only for a view whose exact
           // pane output was observed by this inspection. The pair is retained.
+          bool record_blocked = false;
           for (unsigned i = 0; i < desired.size(); ++i) {
-            if (desired[i] && !owned_view_output_ready(views[i], runtime.resized_dimensions[i])) {
+            if (!desired[i])
+              continue;
+            if (!owned_view_pane_output(views[i], runtime.resized_dimensions[i])) {
               desired[i] = false;
               output_blocked = true;
               report.inspection_status[i] = "output_unavailable";
+            } else if (!owned_view_render_target_ready(views[i])) {
+              // The diffuse texture has no render-target record: exactly the
+              // slot-0 state the captured binder dereferences. Hold this gate.
+              desired[i] = false;
+              output_blocked = record_blocked = true;
+              report.inspection_status[i] = "rt_record_absent";
             }
           }
+          if (record_blocked) {
+            ++runtime.rt_record_refusals;
+            ++runtime.rt_record_holds;
+          } else if (desired[0] || desired[1])
+            runtime.rt_record_refusals = 0;
           const bool needs_pose = desired[0] || desired[1];
           const bool pose_ready = !needs_pose || timed(runtime, ProbeStage::pose, [&] { return capture_pose(runtime); });
           bool aa_ready = true;
@@ -1727,10 +1755,25 @@ void observer(void* manager) noexcept {
             timed(runtime, ProbeStage::activation, [&] { apply_gates(runtime, pair.owned_ids, desired, report, new_pair); });
             runtime.scheduled_ids = pair.owned_ids;
             runtime.schedule = next_schedule;
-            if (output_blocked) {
+            if (record_blocked && runtime.rt_record_refusals > ViewResizeWarmup::MaximumOutputWaits) {
+              // Bounded like the initial output wait: the record did not appear
+              // across consecutive pulses. Use the existing guarded retirement;
+              // the pair is never opened and never replaced in place.
+              runtime.stage_error = "The diffuse texture never received a render-target record; the pair is retired closed.";
+              record_stop(runtime, SceneStopReason::creation_failed, runtime.stage_error, now);
+              scene_handoff().stop_scene();
+              runtime.pair.request_disable();
+              timed(runtime, ProbeStage::lifecycle, [&] { runtime.pair.process_update(runtime.token, callbacks); });
+              pair = runtime.pair.snapshot();
+              runtime.rt_record_refusals = 0;
+              runtime.message = runtime.stage_error;
+            } else if (output_blocked) {
               report.view_waiting = true;
-              runtime.message =
-                  "Camera output texture is absent or not pane-sized; that render gate stays closed while the pair is retained.";
+              runtime.message = record_blocked
+                                    ? "Camera output texture has no render-target record; that render gate stays closed while the pair "
+                                      "is retained."
+                                    : "Camera output texture is absent or not pane-sized; that render gate stays closed while the pair is "
+                                      "retained.";
             }
           } else if (!aa_ready) {
             timed(runtime, ProbeStage::activation, [&] { apply_gates(runtime, pair.owned_ids, {}, report, true); });
@@ -1845,6 +1888,8 @@ void observer(void* manager) noexcept {
     report.aa_restores = runtime.aa_restores;
     report.aa_restore_failures = runtime.aa_restore_failures;
     report.aa_cleared_pending = runtime.cleared_aa.pending();
+    report.rt_record_refusals = runtime.rt_record_refusals;
+    report.rt_record_holds = runtime.rt_record_holds;
     report.view_wait_count = runtime.view_wait.episodes();
     report.observer_last_ms = runtime.observer_last_ms;
     report.observer_max_ms = runtime.observer_max_ms;

@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <mutex>
 #include <unordered_map>
+#include "../shared/bounded_lock.hpp"
 
 namespace taxi_camera {
 
@@ -86,6 +87,9 @@ class SceneHandoff {
   void unregister_device(std::uint64_t device_key);
   bool register_resource(std::uint64_t device_key, std::uint64_t resource_handle, std::uint64_t registry_resource_id);
   void unregister_resource(std::uint64_t device_key, std::uint64_t resource_handle);
+  // Same as unregister_resource, waiting at most budget_us for the lock. False
+  // means nothing was changed; the caller must retry from a thread it owns.
+  bool try_unregister_resource(std::uint64_t device_key, std::uint64_t resource_handle, std::uint32_t budget_us) noexcept;
 
   std::uint64_t begin_scene();
   void stop_scene();

@@ -57,7 +57,7 @@ inline std::string bug_report_snapshot(const BugReportContext& context) {
   };
   out << "Profile=";
   profile(s.profile);
-  out << "; service=" << s.enabled << "; fps=" << s.camera_rate << '\n';
+  out << "; service=" << s.enabled << "; fps=" << s.camera_rate << "; parked_fps=" << s.parked_rate << '\n';
   out << "TAXI_follow=" << s.follow_taxi << "; preview_mask=" << s.manual_mask << "; calibration_mask=" << s.calibration_mask
       << "; scene_test=" << s.scene_test << "; first_camera_only=" << s.single_camera << '\n';
   out << "Auto_detect=" << s.auto_detect << "; requested_PFDs=" << s.left_id << '/' << s.right_id
@@ -73,6 +73,8 @@ inline std::string bug_report_snapshot(const BugReportContext& context) {
     out << "Bridge: graphics_ready=" << sample.graphics_ready << "; scene_ready=" << sample.scene_ready << '\n';
     out << "TAXI_mask=" << sample.taxi_mask << "; speed_inhibited=" << sample.speed_inhibited << "; speed_knots=" << sample.speed
         << "; applied_EV=" << sample.exposure << '\n';
+    out << "Rate_in_use=" << sample.effective_rate << "; useful_rate=" << sample.useful_rate << "; rate_limits=" << sample.rate_limits
+        << "; parked=" << sample.parked << '\n';
     out << "PFDs=" << sample.left_id << '/' << sample.right_id << "; candidates=" << sample.candidate_count
         << "; captures=" << sample.captures << "; compositions=" << sample.composed << "; stamps=" << sample.stamps
         << "; hook_failures=" << sample.hook_failures << '\n';

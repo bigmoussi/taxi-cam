@@ -13,6 +13,7 @@
 #include "launcher.hpp"
 #include "launcher_log.hpp"
 #include "connection_recoverability.hpp"
+#include "../shared/camera_rate_policy.hpp"
 #include "../shared/protocol.hpp"
 #include "settings_store.hpp"
 #include "startup_state.hpp"
@@ -847,7 +848,7 @@ void draw_page(HDC dc) {
          264, 446, 530, 30, small, Muted, DT_LEFT | DT_WORDBREAK);
     panel(dc, 244, 511, 766, 102);
     text(dc, L"Camera frame rate", 264, 525, 460, 30, heading);
-    text(dc, L"Min 5 fps per camera (range 5–60). This install sets 10.", 264, 564, 540, 24, small, Muted);
+    text(dc, L"Range 5–60 per camera; install default 10. Parked aircraft run at the 5 fps floor.", 264, 564, 560, 24, small, Muted);
     text(dc, L"Cameras and TAXI buttons turn off above 60 knots.", 250, 630, 730, 24, small, Muted);
   } else if (page == 1) {
     constexpr const wchar_t* labels[]{L"Right (m)", L"Up (m)", L"Forward (m)", L"Pitch (deg)", L"Yaw (deg)", L"Lens (rad)"};
@@ -871,7 +872,7 @@ void draw_page(HDC dc) {
     const wchar_t* descriptions[]{L"Exposure compensation in EV. Your calibrated baseline is −8.8.",
                                   L"Gradually brighten the camera display as ambient light drops.",
                                   L"Additional exposure at night, from 0 to +8 EV. Default: +8 EV.",
-                                  L"Activation limit per camera: min 5 fps, range 5–60. Install default: 10."};
+                                  L"Per camera, 5–60; default 10. Parked aircraft use the 5 fps floor; higher rates are capped."};
     for (int i = 0; i < 4; ++i) {
       panel(dc, 244, ys[i], 766, 105);
       text(dc, names[i], 264, ys[i] + 12, 515, 29, heading);
@@ -880,6 +881,12 @@ void draw_page(HDC dc) {
     wchar_t value[96];
     std::swprintf(value, 96, L"Currently applied exposure: %.2f EV", sample.exposure);
     text(dc, sample.heartbeat ? value : L"Applied exposure appears when the camera bridge connects.", 251, 630, 480, 24, small, Muted);
+    if (sample.heartbeat) {
+      wchar_t rate_line[192];
+      std::swprintf(rate_line, 192, L"Camera rate in use: %u fps%ls. Useful maximum on this aircraft: %u fps.", sample.effective_rate,
+                    camera_rate_limit_text(sample.rate_limits), sample.useful_rate);
+      text(dc, rate_line, 251, 654, 740, 24, small, Muted);
+    }
   } else if (page == 3) {
     panel(dc, 244, 119, 766, 226);
     text(dc, L"PFD assignment", 262, 127, 420, 30, heading);
@@ -1459,6 +1466,7 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
                     win::connection_button_label(connection_requested.load(std::memory_order_acquire)));
         AppendMenuW(menu, MF_STRING | (preview_ui || updater.busy() || update_prompt ? MF_GRAYED : 0), 603,
                     updater.busy() ? L"Checking for updates..." : L"Check for updates");
+        AppendMenuW(menu, MF_STRING | (draft().in_sim_messages ? MF_CHECKED : MF_UNCHECKED), 605, L"Show messages in simulator");
         AppendMenuW(menu, MF_STRING, 512, L"Report a bug");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING, 601, L"Exit");
@@ -1474,6 +1482,15 @@ LRESULT CALLBACK procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l) {
         }
         if (selected == 603)
           check_updates(true);
+        if (selected == 605) {
+          // Global preference; persisted with the other selections in settings.ini.
+          auto s = draft();
+          s.in_sim_messages = s.in_sim_messages ? 0u : 1u;
+          publish(s);
+          if (!win::save_settings(draft()))
+            notice = L"Could not save settings. Check access to your local settings folder.";
+          InvalidateRect(hwnd, nullptr, FALSE);
+        }
         if (selected == 512)
           report_bug();
         if (selected == 601) {

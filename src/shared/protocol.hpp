@@ -11,7 +11,7 @@
 #include "version.hpp"
 
 namespace taxi_camera::standalone {
-constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 9;
+constexpr std::uint32_t ProtocolMagic = 0x54415849, ProtocolVersion = 11;
 constexpr const wchar_t* Version = TAXI_CAM_VERSION_WIDE;
 struct Settings {
   std::uint32_t enabled = 1, camera_rate = kDefaultCameraRate, automatic_exposure = 1;
@@ -22,6 +22,9 @@ struct Settings {
   std::uint64_t taxi_request{};            // Session-only desired aircraft button state from a shortcut.
   std::uint32_t taxi_selected_mask{}, taxi_desired_mask{};
   std::uint32_t auto_profile = 1;
+  // Global (settings.ini [messages] in_simulator): important events are shown
+  // inside the simulator through the bridge's SimConnect text channel.
+  std::uint32_t in_sim_messages = 1;
   std::array<float, 3> speed_color = profiles::A380.composition.speed_color;
   std::array<float, 3> guide_color = profiles::A380.composition.guide_color;
   // Normalized left-side guide positions; the right side mirrors X. These are
@@ -33,6 +36,8 @@ struct Settings {
   std::uint32_t profile = 1, follow_taxi = 1, auto_detect = 1, single_camera = 0, manual_mask = 0, calibration_mask = 0,
                 calibration_budget = 4096, scene_test = 0;
   std::array<std::array<double, 6>, 2> mounts = profiles::A380.mounts;
+  // Protocol 11: schedule rate while ground speed stays at zero; 0 disables the floor.
+  std::uint32_t parked_rate = kDefaultParkedCameraRate;
 };
 inline void reset_guide_settings(Settings& settings, const profiles::AircraftProfile& profile) noexcept {
   settings.guide_color = profile.composition.guide_color;
@@ -58,6 +63,10 @@ struct Status {
   std::array<double, 10> stage_ms{};
   Candidate candidates[16]{};
   char message[384]{};
+  // Protocol 11: rate requested from the schedule now, the aircraft's useful
+  // maximum while moving, CameraRateLimit bits and the parked flag. The saved
+  // camera_rate is never rewritten.
+  std::uint32_t effective_rate{}, useful_rate{}, rate_limits{}, parked{};
 };
 struct Shared {
   std::uint32_t magic{}, version{}, bytes{}, owner_pid{};
@@ -74,8 +83,9 @@ inline bool valid_settings(const Settings& s) noexcept {
     for (const float c : color)
       if (!std::isfinite(c) || c < 0 || c > 1)
         return false;
-  if (s.auto_profile > 1 || !profiles::find(s.profile) || s.follow_taxi > 1 || s.auto_detect > 1 || s.single_camera > 1 ||
-      s.scene_test > 1 || s.manual_mask > 3 || s.calibration_mask > 3 || s.calibration_budget < 64 || s.calibration_budget > 16384)
+  if (s.auto_profile > 1 || s.in_sim_messages > 1 || !profiles::find(s.profile) || s.follow_taxi > 1 || s.auto_detect > 1 ||
+      s.single_camera > 1 || s.scene_test > 1 || s.manual_mask > 3 || s.calibration_mask > 3 || s.calibration_budget < 64 ||
+      s.calibration_budget > 16384)
     return false;
   if (s.taxi_selected_mask > 3 || (s.taxi_desired_mask & ~s.taxi_selected_mask) || (!s.taxi_request && s.taxi_selected_mask))
     return false;
@@ -87,6 +97,8 @@ inline bool valid_settings(const Settings& s) noexcept {
         m[5] < 0.05 || m[5] > 1.55)
       return false;
   }
+  if (s.parked_rate && (s.parked_rate < kMinimumCameraRate || s.parked_rate > kMaximumCameraRate))
+    return false;
   return s.enabled <= 1 && s.camera_rate >= kMinimumCameraRate && s.camera_rate <= kMaximumCameraRate && s.automatic_exposure <= 1 &&
          std::isfinite(s.exposure) && s.exposure >= -16 && s.exposure <= 4 && std::isfinite(s.night_boost) && s.night_boost >= 0 &&
          s.night_boost <= 8;

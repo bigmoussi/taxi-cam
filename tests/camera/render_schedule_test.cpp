@@ -1,10 +1,14 @@
 #include "../../src/camera/render_schedule.hpp"
+#include "../../src/profiles/catalog.hpp"
+#include "../../src/shared/camera_rate_policy.hpp"
 
 #include <cstdio>
 #include <limits>
 #include <stdexcept>
 
 namespace {
+using taxi_camera::EffectiveCameraRate;
+using taxi_camera::ParkedRatePolicy;
 using taxi_camera::native_camera::RenderSchedule;
 unsigned checks = 0;
 void require(bool value, const char* message) {
@@ -164,6 +168,167 @@ void lower_budget_changes() {
   require(schedule.tick(20000) == std::array<bool, 2>{}, "Low-rate duplicate timestamp left a gate open");
   require(schedule.tick(20000) == std::array<bool, 2>{}, "Low-rate stall caused a catch-up burst");
 }
+
+void parked_policy_hysteresis() {
+  ParkedRatePolicy policy;
+  require(!policy.parked(), "Policy starts moving");
+  for (std::uint64_t now = 0; now < ParkedRatePolicy::kParkedSettleMs; now += 22)
+    require(!policy.update(now, true, 0.0), "Zero speed parked before the settle time");
+  require(policy.update(ParkedRatePolicy::kParkedSettleMs, true, 0.0), "Sustained zero speed did not park");
+  require(policy.update(ParkedRatePolicy::kParkedSettleMs + 22, true, 0.3), "Creep below the parked threshold unparked");
+  require(policy.update(ParkedRatePolicy::kParkedSettleMs + 44, true, 0.7), "Speed inside the hysteresis band unparked");
+  require(!policy.update(ParkedRatePolicy::kParkedSettleMs + 66, true, 1.0), "Reaching the moving threshold did not restore the rate");
+  require(!policy.update(ParkedRatePolicy::kParkedSettleMs + 88, true, 0.0), "A brief stop re-parked without settling");
+  // Alternating stopped/creeping samples at taxi start must never park.
+  ParkedRatePolicy creeping;
+  for (std::uint64_t now = 0; now < 20000; now += 22)
+    require(!creeping.update(now, true, (now / 22) % 2 ? 0.8 : 0.0), "Creeping taxi start parked the schedule");
+  // Once parked, samples inside the band hold the parked state.
+  ParkedRatePolicy holding;
+  for (std::uint64_t now = 0; now <= ParkedRatePolicy::kParkedSettleMs; now += 20)
+    holding.update(now, true, 0.0);
+  require(holding.parked(), "Holding fixture did not park");
+  for (std::uint64_t now = 4000; now < 10000; now += 22)
+    require(holding.update(now, true, (now / 22) % 2 ? 0.8 : 0.0), "Band jitter flapped a parked schedule");
+  // Missing or stale telemetry is moving, never a reason to lower the rate.
+  require(!holding.update(10000, false, 0.0), "Invalid telemetry kept the parked floor");
+  require(!holding.update(10022, true, 0.0), "Telemetry return re-parked without settling");
+  require(!holding.update(10044, true, std::numeric_limits<double>::quiet_NaN()), "NaN speed parked");
+  require(!holding.update(10066, true, -1.0), "Negative speed parked");
+  ParkedRatePolicy reversal;
+  for (std::uint64_t now = 5000; now < 6000; now += 22)
+    reversal.update(now, true, 0.0);
+  require(!reversal.update(100, true, 0.0), "Clock reversal parked early");
+  require(!reversal.update(100 + ParkedRatePolicy::kParkedSettleMs - 22, true, 0.0), "Clock reversal did not restart the settle time");
+  require(reversal.update(100 + ParkedRatePolicy::kParkedSettleMs, true, 0.0), "Settle after clock reversal failed");
+}
+
+void effective_rate_caps() {
+  using namespace taxi_camera;
+  const auto check = [](EffectiveCameraRate actual, unsigned rate, unsigned useful, unsigned reasons, const char* message) {
+    require(actual.rate == rate && actual.useful_maximum == useful && actual.reasons == reasons, message);
+  };
+  check(effective_camera_rate(10, 0, false), 10, 15, kRateLimitNone, "Default rate on an unmeasured aircraft runs unchanged");
+  check(effective_camera_rate(15, 0, false), 15, 15, kRateLimitNone, "The manager ceiling itself is honoured");
+  check(effective_camera_rate(30, 0, false), 15, 15, kRateLimitManager, "30 is reported as manager-capped, not honoured");
+  check(effective_camera_rate(60, 0, false), 15, 15, kRateLimitManager, "60 is reported as manager-capped, not honoured");
+  check(effective_camera_rate(60, 80, false), 15, 15, kRateLimitManager, "A350 PFD refresh above the ceiling leaves the manager cap");
+  check(effective_camera_rate(30, 16, false), 15, 15, kRateLimitManager, "ini A380 16 Hz refresh sits just above the manager ceiling");
+  check(effective_camera_rate(30, 12, false), 12, 12, kRateLimitPfdRefresh, "A slower PFD caps below the manager ceiling");
+  check(effective_camera_rate(10, 12, false), 10, 12, kRateLimitNone, "A rate under the PFD refresh is not capped");
+  check(effective_camera_rate(30, 2, false), 5, 5, kRateLimitPfdRefresh, "PFD cap never goes below the schedule minimum");
+  check(effective_camera_rate(3, 0, false), 5, 15, kRateLimitNone, "Out-of-range saved rate is clamped, not flagged");
+  check(effective_camera_rate(10, 0, true), 5, 15, kRateLimitParked, "Parked default drops to the 5 fps floor");
+  check(effective_camera_rate(5, 0, true), 5, 15, kRateLimitNone, "Floor equal to the saved rate is not a limit");
+  check(effective_camera_rate(10, 0, true, 0), 10, 15, kRateLimitNone, "parked_rate 0 disables the floor");
+  check(effective_camera_rate(10, 0, true, 20), 10, 15, kRateLimitNone, "A floor above the saved rate never raises it");
+  check(effective_camera_rate(10, 0, true, 8), 8, 15, kRateLimitParked, "An adjusted floor applies while parked");
+  check(effective_camera_rate(30, 0, true), 5, 15, kRateLimitParked | kRateLimitManager, "Parked and capped both reported");
+  check(effective_camera_rate(30, 12, true), 5, 12, kRateLimitParked | kRateLimitPfdRefresh, "Parked and PFD-capped both reported");
+  require(std::string_view(camera_rate_limit_name(kRateLimitNone)) == "user" &&
+              std::string_view(camera_rate_limit_name(kRateLimitParked | kRateLimitManager)) == "parked" &&
+              std::string_view(camera_rate_limit_name(kRateLimitPfdRefresh)) == "pfd_refresh" &&
+              std::string_view(camera_rate_limit_name(kRateLimitManager)) == "manager_ceiling",
+          "Rate limit names");
+  require(camera_rate_limit_text(kRateLimitNone)[0] == L'\0' && camera_rate_limit_text(kRateLimitParked)[0] != L'\0',
+          "Companion rate suffix");
+  require(profiles::A380.pfd_refresh_hz == 0 && profiles::IniA380.pfd_refresh_hz == 16 && profiles::A359.pfd_refresh_hz == 80 &&
+              profiles::A35K.pfd_refresh_hz == 80,
+          "Catalog PFD refresh values changed");
+  for (const auto* profile : profiles::Catalog)
+    require(useful_camera_rate(profile->pfd_refresh_hz) == kManagerCeilingCameraRate,
+            "Every catalogued PFD refresh currently sits at or above the manager ceiling");
+  static_assert(effective_camera_rate(kDefaultCameraRate, 0, true).rate == kDefaultParkedCameraRate);
+}
+
+// Drives the schedule the way the bridge does: public ground speed selects
+// the rate, configure() applies it to the live pair, and the gates keep
+// pulsing while parked. Contracts are checked against the rate in force.
+void adaptive_parked_schedule() {
+  constexpr std::uint64_t step = 22;  // ~45 Hz manager, as measured live.
+  constexpr unsigned user_rate = 10;
+  const auto speed_at = [](std::uint64_t now) {
+    if (now < 20000)
+      return 0.0;  // Parked at the gate.
+    if (now < 20500)
+      return 0.3;  // Brake release creep.
+    if (now < 21000)
+      return 0.7;  // Inside the hysteresis band.
+    if (now < 40000)
+      return 8.0;  // Taxiing.
+    return 0.0;    // Holding.
+  };
+  RenderSchedule schedule;
+  ParkedRatePolicy policy;
+  std::array<unsigned, 2> parked_pulses{}, moving_pulses{};
+  std::array<std::uint64_t, 2> last{};
+  std::array<bool, 2> seen{};
+  std::uint64_t last_any = 0, longest_parked_gap = 0;
+  bool any = false, previous_on = false;
+  unsigned expected_feed = 0;
+  for (std::uint64_t now = 0; now < 60000; now += step) {
+    const bool parked = policy.update(now, true, speed_at(now));
+    // Settling completes on the first manager update at or after the settle
+    // time, so allow one update of slack at each parked-window start.
+    constexpr auto settle = ParkedRatePolicy::kParkedSettleMs;
+    if (now < settle || (now >= 21000 && now < 40000 + settle))
+      require(!parked, "Parked outside the expected windows");
+    else if (now >= settle + step && (now < 21000 || now >= 40000 + settle + 2 * step))
+      require(parked, "Not parked inside the expected windows");
+    const auto effective = taxi_camera::effective_camera_rate(user_rate, 0, parked);
+    require(effective.rate == (parked ? 5u : user_rate), "Adaptive rate selection");
+    schedule.configure(effective.rate, 2);
+    const auto active = schedule.tick(now);
+    require(!(active[0] && active[1]), "Adaptive path scheduled both cameras at once");
+    const bool on = active[0] || active[1];
+    require(!(on && previous_on), "Adaptive path skipped the mandatory closed interval");
+    previous_on = on;
+    if (!on)
+      continue;
+    const unsigned feed = active[0] ? 0 : 1;
+    require(feed == expected_feed, "Adaptive path broke feed alternation");
+    expected_feed = (expected_feed + 1) % 2;
+    const auto per_feed_ms = (1000 + effective.rate - 1) / effective.rate;
+    const auto between_ms = (1000 + 2 * effective.rate - 1) / (2 * effective.rate);
+    if (any)
+      require(now - last_any >= between_ms, "Adaptive rate change caused a catch-up burst");
+    if (seen[feed])
+      require(now - last[feed] >= per_feed_ms, "Adaptive rate change exceeded the per-camera budget");
+    if (any && parked && policy.parked())
+      longest_parked_gap = std::max(longest_parked_gap, now - last_any);
+    any = true;
+    seen[feed] = true;
+    last_any = now;
+    last[feed] = now;
+    (parked ? parked_pulses : moving_pulses)[feed]++;
+  }
+  // Parked windows: 3–20 s and 43–60 s = 34 s; moving: 0–3 s and 21–43 s = 25 s.
+  const auto total = [](const std::array<unsigned, 2>& count) { return count[0] + count[1]; };
+  const double parked_per_second = total(parked_pulses) / 34.0, moving_per_second = total(moving_pulses) / 25.0;
+  require(parked_pulses[0] > 0 && parked_pulses[1] > 0, "Parked floor closed a camera view");
+  require(longest_parked_gap <= 2 * ((1000 + 9) / 10) + step, "Parked schedule stopped pulsing");
+  require(total(parked_pulses) <= 5 * 2 * 34, "Parked window exceeded the floor budget");
+  require(parked_per_second < 0.75 * moving_per_second, "Parked floor did not reduce activation work materially");
+  require(moving_per_second > 12 && moving_per_second <= 20, "Moving window did not return to the saved rate");
+  require(parked_per_second > 7 && parked_per_second <= 10, "Parked window did not run at the floor");
+}
+
+void adaptive_rate_switch_contract() {
+  // Lowering to the floor right after an opening pulse keeps that pulse's
+  // mandatory close and its aggregate deadline; raising back never bursts.
+  RenderSchedule schedule;
+  schedule.configure(10, 2);
+  require(schedule.tick(1000)[0], "Opening pulse before parking");
+  schedule.configure(taxi_camera::effective_camera_rate(10, 0, true).rate, 2);
+  require(schedule.tick(1001) == std::array<bool, 2>{}, "Parking did not close the open pulse");
+  require(schedule.tick(1099) == std::array<bool, 2>{}, "Parking erased the aggregate deadline");
+  require(schedule.tick(1100)[1], "Parked floor did not continue with the other feed");
+  schedule.configure(taxi_camera::effective_camera_rate(10, 0, false).rate, 2);
+  require(schedule.tick(1101) == std::array<bool, 2>{}, "Unparking left the tail gate open");
+  require(schedule.tick(1149) == std::array<bool, 2>{}, "Unparking burst ahead of the aggregate interval");
+  require(schedule.tick(1150)[0], "Unparked schedule did not resume at the saved rate");
+  require(schedule.rate() == 10, "Saved rate not restored after unparking");
+}
 }  // namespace
 
 int main() {
@@ -177,8 +342,14 @@ int main() {
     suspend_and_resume();
     effective_lower_budgets();
     lower_budget_changes();
-    std::printf("PASS: %u render-schedule checks; rate limits, alternating feeds, mandatory off intervals and no catch-up bursts.\n",
-                checks);
+    parked_policy_hysteresis();
+    effective_rate_caps();
+    adaptive_parked_schedule();
+    adaptive_rate_switch_contract();
+    std::printf(
+        "PASS: %u render-schedule checks; rate limits, alternating feeds, mandatory off intervals, no catch-up bursts, "
+        "parked floor and rate caps.\n",
+        checks);
     return 0;
   } catch (const std::exception& error) {
     std::fprintf(stderr, "FAIL after %u checks: %s\n", checks, error.what());

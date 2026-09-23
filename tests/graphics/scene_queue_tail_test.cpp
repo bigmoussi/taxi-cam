@@ -94,9 +94,25 @@ void run() {
   manager->publish_list(helper_recording);
   Discovery discovery{manager.get()};
   require(manager->set_unknown_list_observer(discover, &discovery), "Install CPU-only discovery callback");
-  const auto blocked = [&](ID3D12GraphicsCommandList* list, bool should_bypass, bool expect_receipt, bool expect_discovery) {
+  // Uncontended: related recordings open an exact ordered transaction.
+  const auto ordered = [&](ID3D12GraphicsCommandList* list, bool expect_receipt) {
+    manager->publish_list(recording);
+    ID3D12CommandList* batch[]{list};
+    const auto receipt = manager->before_submission(native_queue, 1, batch);
+    if (receipt)
+      manager->after_submission(native_queue, receipt);
+    else
+      manager->forwarded_unordered(native_queue);  // The wrapper pairs every zero receipt.
+    require((receipt != 0) == expect_receipt, "Related recordings retain exact transaction admission");
+  };
+  // Another thread holds submission serialization for longer than the
+  // simulator thread's budget. The submit thread must return within that
+  // budget: unrelated recordings bypass, everything else escapes without a
+  // receipt (no Wait is queued) and publishes its invalidation after the forward.
+  const auto held_lock = [&](ID3D12GraphicsCommandList* list, bool expect_discovery, bool expect_escape) {
     manager->publish_list(recording);
     discovery.called.store(false, std::memory_order_release);
+    const auto before = manager->statistics();
     std::unique_lock held(manager->submission_mutex_);
     std::promise<void> entered;
     auto started = entered.get_future();
@@ -106,36 +122,66 @@ void run() {
       const auto receipt = manager->before_submission(native_queue, 1, batch);
       if (receipt)
         manager->after_submission(native_queue, receipt);
+      else
+        manager->forwarded_unordered(native_queue);
       return receipt;
     });
     started.wait();
-    const bool returned_while_locked = completed.wait_for(std::chrono::milliseconds(100)) == std::future_status::ready;
+    const bool returned_while_locked = completed.wait_for(std::chrono::milliseconds(200)) == std::future_status::ready;
     const bool discovered_while_locked = discovery.called.load(std::memory_order_acquire);
     held.unlock();  // Always release before checking, including regression failure.
     const auto receipt = completed.get();
-    require(returned_while_locked == should_bypass, "Only known unrelated recordings bypass held submission serialization");
-    require((receipt != 0) == expect_receipt, "Related recordings retain exact transaction admission");
+    const auto after = manager->statistics();
+    require(returned_while_locked, "A simulator thread was parked on held submission serialization past its budget");
+    require(receipt == 0, "A batch that could not be ordered within budget invented a receipt");
     require(discovered_while_locked == expect_discovery, "Unknown discovery runs before acquiring submission serialization");
+    require((after.unordered_submissions == before.unordered_submissions + 1) == expect_escape &&
+                (after.contended_submissions == before.contended_submissions + 1) == expect_escape,
+            "Escaped ordering was not counted exactly once, or an unrelated bypass was counted as contention");
   };
-  blocked(known, true, false, false);
+  held_lock(known, false, false);
   require(!queue.signals && !queue.waits, "Unrelated submission queues no timeline operations");
-  recording.consumer = true;
-  blocked(known, false, true, false);
-  recording.consumer = false;
+  const taxi_camera::source_state::Key source{0x1234, 1};
+  require(owner.source_states.register_source(source, taxi_camera::source_state::Model::legacy_rt), "Seed ordered source-state evidence");
   recording.source_touched = true;
-  blocked(known, false, true, false);
+  held_lock(known, false, true);
+  manager->apply_deferred();
+  require(owner.source_states.state(source).model == taxi_camera::source_state::Model::unknown && !owner.failed,
+          "A source recording escaped within budget must invalidate the source model after its forward");
+  require(!queue.signals && !queue.waits, "An escaped batch queued a timeline operation");
+  require(owner.source_states.rearm_retained_rt() == 1, "Restore source fixture after the escape");
   recording.source_touched = false;
   recording.packets = 1;
-  blocked(known, false, true, false);
+  held_lock(known, false, true);
+  recording.packets = 0;
+  require(!queue.signals && !queue.waits, "An escaped capture batch queued a timeline operation");
+  // A consumer recording escaped by OUR expired budget keeps the device: the
+  // source model is invalidated and counted, unlike a helper-contended escape.
+  recording.consumer = true;
+  held_lock(known, false, true);
+  manager->apply_deferred();
+  require(!owner.failed && manager->statistics().unordered_consumers == 1,
+          "A budget-expiry escape of a consumer recording failed the device for the session");
+  require(owner.source_states.state(source).model == taxi_camera::source_state::Model::unknown,
+          "A budget-expiry consumer escape must still invalidate the source model");
+  require(owner.source_states.rearm_retained_rt() == 1, "Restore source fixture after the consumer escape");
+  ordered(known, true);
+  recording.consumer = false;
+  recording.source_touched = true;
+  ordered(known, true);
+  recording.source_touched = false;
+  recording.packets = 1;
+  ordered(known, true);
   recording.packets = 0;
   require(queue.signals == 3 && queue.waits == 2 && !queue.future_wait && owner.last_signal == 3,
           "Consumer/source/capture paths preserve ordered Wait and Signal receipts");
   recording.awaiting_native_reset = true;
-  blocked(known, false, false, false);
+  ordered(known, false);
+  held_lock(known, false, true);
   recording.awaiting_native_reset = false;
-  const taxi_camera::source_state::Key source{0x1234, 1};
-  require(owner.source_states.register_source(source, taxi_camera::source_state::Model::legacy_rt), "Seed ordered source-state evidence");
-  blocked(unknown, false, false, true);
+  manager->apply_deferred();
+  require(owner.source_states.rearm_retained_rt() == 1, "Restore source fixture after the unobserved escape");
+  held_lock(unknown, true, true);
   manager->apply_deferred();
   require(owner.source_states.state(source).model == taxi_camera::source_state::Model::unknown && !owner.failed,
           "Unknown and unobserved submissions retain conservative source invalidation");

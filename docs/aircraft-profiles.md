@@ -71,6 +71,6 @@ The user confirmed camera rendering with the revised bridge, then reported that 
 
 ### Integration requirements
 
-Define an `AircraftProfile` in [the catalog](../src/profiles/catalog.hpp): accepted aircraft types and add-on path markers, control strategy and variables, texture constraints, side-order rule, destination rectangles and border insets, camera dimensions, mounts, composition and speed limit. Rendering, GPU synchronization, exposure and native camera ownership consume these values without aircraft-name branches.
+Define an `AircraftProfile` in [the catalog](../src/profiles/catalog.hpp): accepted aircraft types and add-on path markers, control strategy and variables, texture constraints, side-order rule, destination rectangles and border insets, camera dimensions, mounts, composition, speed limit and the measured PFD refresh (`pfd_refresh_hz`: bridge `stamps`/s ÷ 2; 0 until measured; iniBuilds A380 16 from 0.9.11, A350 80 from the 0.9.35 sweep under frame generation, FBW A380 not yet measured). Rendering, GPU synchronization, exposure and native camera ownership consume these values without aircraft-name branches.
 
 Add profile/settings tests and a GPU fixture that checks both camera regions and every preserved display region. Then verify actual cockpit buttons, texture identity, framing, cutoff and aircraft reload. An aircraft with different control semantics needs a control adapter; an aircraft without two camera views needs a different composition contract.
