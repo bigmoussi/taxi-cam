@@ -231,7 +231,8 @@ SourceViewSnapshot select_source_view(engine_camera::MemoryReader& reader,
                                       const engine_camera::ViewPoolSnapshot& pool,
                                       SourceViewPredicate accept,
                                       void* context,
-                                      std::array<double, 3>* validated_position) noexcept {
+                                      std::array<double, 3>* validated_position,
+                                      std::span<const std::uint64_t> excluded_views) noexcept {
   if (validated_position)
     *validated_position = {};
   SourceViewSnapshot result;
@@ -242,7 +243,7 @@ SourceViewSnapshot select_source_view(engine_camera::MemoryReader& reader,
   BoundedReader source(reader, result);
   bool saw_usable = false;
   for (const auto& slot : pool.slots) {
-    if (!slot.association_valid)
+    if (!slot.association_valid || std::find(excluded_views.begin(), excluded_views.end(), slot.view_address) != excluded_views.end())
       continue;
     ++result.candidates_examined;
     std::uint64_t view = 0;

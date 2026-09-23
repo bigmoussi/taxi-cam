@@ -151,6 +151,27 @@ void success_and_selection() {
   require(!none.complete && none.status == native_camera::SourceViewStatus::no_source && selected == std::array<double, 3>{} &&
               none.candidates_examined == 8,
           "Rejected cameras published a position or stopped the scan");
+  // Issue 84: a retained owned pair recalibrates with its own views in the pool.
+  // Excluded owned views are never read, examined or published, even when their
+  // pose would match; a zero entry excludes nothing.
+  Fixture owned;
+  const std::array<std::uint64_t, 3> owned_views{kSource, 0, kSource + 0x2000};
+  owned.reader.reads.clear();
+  selected = {};
+  const auto after_owned = native_camera::select_source_view(owned.reader, owned.pool, nullptr, nullptr, &selected, owned_views);
+  require(after_owned.complete && after_owned.view_index == 1 && after_owned.source_address == kSource + 0x1000 &&
+              after_owned.candidates_examined == 1 && selected[0] == 12,
+          "An excluded owned view was selected or counted as a source candidate");
+  for (const auto& read : owned.reader.reads)
+    require((read.first < kSource || read.first >= kSource + 0x1000) && (read.first < kControl || read.first >= kControl + 0x1000),
+            "An excluded owned view was read");
+  Fixture only_owned;
+  for (unsigned index = 1; index < 8; ++index)
+    only_owned.reader.word(kCamera + index * 0x1000 + 160, 6, 2);
+  const std::array<std::uint64_t, 1> first_owned{kSource};
+  const auto owned_only = native_camera::select_source_view(only_owned.reader, only_owned.pool, nullptr, nullptr, nullptr, first_owned);
+  require(!owned_only.complete && owned_only.status == native_camera::SourceViewStatus::no_source && owned_only.candidates_examined == 7,
+          "The only usable view was accepted although it is owned");
   result = full.run(true);
   require(result.complete && result.view_index == -1 && result.read_bytes == 292 && result.source_address == kSource,
           "Explicit source did not use the same bounded pose validation");
