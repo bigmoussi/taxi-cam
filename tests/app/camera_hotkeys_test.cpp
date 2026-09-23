@@ -26,7 +26,7 @@ void command(int id) {
   procedure(window, WM_COMMAND, MAKEWPARAM(id, BN_CLICKED), 0);
 }
 HWND shortcut_fixture() {
-  const ShortcutDialogTemplate layout;
+  const DialogTemplate layout;
   const auto editor = CreateDialogIndirectParamW(instance, &layout.dialog, window, shortcut_dialog, 0);
   require(editor != nullptr, "Create own hidden native shortcut editor");
   return editor;

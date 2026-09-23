@@ -92,6 +92,28 @@ Notes contain installation guidance, GPLv3 licence information, links to the exa
 
 [The publication script](../ci/publish-release.ps1) creates the new tag from the exact built commit on `main`. It marks a release Latest only when that tag is the last `v*-build.N` tag reachable on `origin/main` (or `main`), matching the published GitHub release the updater already follows. Untagged `main` and pull-request CI artifacts are not a publish baseline.
 
+## What's new notes
+
+[`changelog.json`](../changelog.json) at the repository root holds the short, user-facing notes behind the companion's **What's new** link. They are written by hand and are separate from the generated GitHub release notes above.
+
+- The link appears in the Settings sidebar whenever the installed version differs from the last version whose notes were read, recorded as `[whats_new] seen` in `settings.ini`. A settings reset shows it again.
+- Nothing is downloaded until the link is clicked. The click fetches `https://raw.githubusercontent.com/rthoms334/taxi-cam/main/changelog.json` off the UI thread: HTTPS only, no redirects, 64 KiB limit. If the fetch or the file fails, the link stays and the status line says so.
+- The dialog lists the releases at or below the installed version, newest first, so notes for merged but unpublished builds stay hidden. Once the dialog has been shown, the link is hidden until a different version is installed.
+
+To add notes, put a new object at the top of `releases`:
+
+~~~json
+{
+  "version": "0.9.39",
+  "date": "2026-09-23",
+  "changes": ["One short sentence per user-visible change."]
+}
+~~~
+
+`version` is `major.minor.patch` and versions must be strictly descending. `date` (`YYYY-MM-DD`) is optional. `changes` holds 1–32 non-empty strings of at most 400 characters. Unknown keys are refused. Each first-parent commit on `main` advances the patch, so label an entry with the version its merge will build as: the current `main` version plus one for the merge commit. An entry labelled higher than the version eventually built stays hidden until a build at or above that version is installed.
+
+Because the companion reads the file from `main`, notes can be corrected after a release without rebuilding, and a change to `changelog.json` alone does not start the release workflow. Every pull request still validates the file through `tests/app/changelog_test.cpp` in `build.ps1 -Validate`.
+
 ## Failures and reruns
 
 Build, validation or packaging failure prevents creation of a publishable candidate. Workflow artifacts retain logs and available package output for 30 days. The publish job depends on a successful build and only runs from `main` after environment approval.
