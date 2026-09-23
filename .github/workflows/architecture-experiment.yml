@@ -1,0 +1,101 @@
+name: Windows exact-target architecture experiment
+
+on:
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: windows-exact-target-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  exact-target:
+    name: Exact-target PassState experiment
+    runs-on: windows-2025
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out the pull-request merge commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Apply exact-target PassState experiment
+        run: |
+          $patch = 'ci/experiments/passstate-exact-target.patch'
+          git apply --check --whitespace=error-all $patch
+          if ($LASTEXITCODE -ne 0) { throw 'Exact-target experiment patch no longer applies cleanly.' }
+          git apply --whitespace=error-all $patch
+          if ($LASTEXITCODE -ne 0) { throw 'Exact-target experiment patch failed to apply.' }
+          git diff --check
+          if ($LASTEXITCODE -ne 0) { throw 'Patched tree failed git diff --check.' }
+          $diff = git diff -- src/bridge/d3d12_bridge.cpp
+          if ($LASTEXITCODE -ne 0 -or -not ($diff -match 'can_scope_to_exact_targets')) {
+            throw 'Exact-target source invalidation policy is not present in the patched bridge.'
+          }
+
+      - name: Test semantic version progression
+        run: ./ci/version_test.ps1
+
+      - name: Cache verified compiler archive
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: build/deps/llvm-mingw.zip
+          key: windows-2025-llvm-${{ hashFiles('dependencies.json') }}
+
+      - name: Bootstrap pinned compiler
+        run: ./bootstrap.ps1
+
+      - name: Test exact-target invalidation policy
+        run: ./tests/graphics/source_invalidation_policy_test.ps1
+
+      - name: Build, validate and smoke-test patched bridge with software D3D12
+        run: |
+          New-Item -ItemType Directory -Force -Path build | Out-Null
+          Start-Transcript -Path build/exact-target-validation.log
+          try {
+            ./build.ps1 -Validate -WarpOnly
+            ./smoke-test.ps1
+          } finally {
+            Stop-Transcript
+          }
+
+      - name: Write experiment checksums
+        run: |
+          $native = 'build/native'
+          $receipt = Get-Content -Raw -LiteralPath (Join-Path $native 'validation.json') | ConvertFrom-Json
+          if (-not $receipt.passed) { throw 'Exact-target validation receipt did not pass.' }
+          $lines = foreach ($name in @('taxi-cam.exe', 'taxi-camera-bridge.dll')) {
+            $path = Join-Path $native $name
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Experiment missing $name." }
+            $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $name"
+          }
+          $lines | Set-Content -LiteralPath (Join-Path $native 'SHA256SUMS.txt') -Encoding ascii
+
+      - name: Keep exact-target experiment binaries
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-exact-target-${{ github.event.pull_request.number }}-run-${{ github.run_number }}-attempt-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            build/native/taxi-cam.exe
+            build/native/taxi-camera-bridge.dll
+            build/native/SHA256SUMS.txt
+            build/native/validation.json
+            build/native/version.json
+            build/exact-target-validation.log
+            ci/experiments/passstate-exact-target.patch
+
+      - name: Record experiment status
+        run: |
+          'This artifact is an architecture experiment only. It is not a release and is not installed automatically.' >> $env:GITHUB_STEP_SUMMARY
+          'The source patch is applied only inside this CI job and is included beside the binaries.' >> $env:GITHUB_STEP_SUMMARY
+          'All 256 source-invalidation reason combinations are checked before the native build.' >> $env:GITHUB_STEP_SUMMARY

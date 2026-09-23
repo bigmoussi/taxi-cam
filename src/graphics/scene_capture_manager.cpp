@@ -625,6 +625,18 @@ void SceneCaptureManager::invalidate_source_recording(ID3D12GraphicsCommandList*
   const std::lock_guard lock(mutex_);
   if (auto* item = list(native); item && item->object_generation == generation) {
     stats_.last_invalidation_reasons = reasons;
+    // A pass-state refusal does not describe a transition of every camera on
+    // the device. Preserve unrelated sources, but discard all evidence named
+    // by this recording. Never narrow alias/split/unknown-work/reset failures,
+    // including those combined with PassState, or a previously invalid log.
+    using namespace engine_hook::render_boundary;
+    constexpr std::uint32_t pass_reasons = InvalidationPassBegin | InvalidationPassState;
+    if ((reasons & InvalidationPassState) && !(reasons & ~pass_reasons) &&
+        item->source_effects.invalidate_named_sources()) {
+      if (item->source_effects.count)
+        touch_sources(*item);
+      return;
+    }
     item->source_effects.invalidate();
     if (global)
       touch_sources(*item);
