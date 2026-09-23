@@ -29,6 +29,10 @@ Observed Wait/Signal pairing still serializes on that queue. A helper that canno
 
 Private camera composition also defers when submission admission is busy, retaining its input leases for a later service iteration. It must not hold up PFD discovery or turn routine queue contention into a permanently failed output device. These checks do not remove native API calls or all CPU serialization.
 
+A pass-state refusal is now scoped to the generation-qualified source keys already named by that recording. An unrelated pass no longer clears every camera's submitted render-target evidence. A named source becomes non-render-target until fresh absolute state evidence is submitted; the retained-state watchdog cannot revive it. The change does not narrow unknown commands, aliases, split barriers, reset failures, disabled observers, malformed/overflowing logs, or any combination containing those reasons. It also leaves escaped-submission ownership and queue synchronization unchanged.
+
+This is a narrower change than the experimental `fix/56-passstate-capture-wipe` branch: it does not assume that unsupported native commands leave unnamed sources untouched. Portable source-state regressions pass locally; the Windows manager/GPU regressions and exact native build/smoke checks must pass before delivery. The available disconnected log cannot establish which invalidation occurred during the user's live session. Continuous camera motion under the user's ReShade/MFG configuration remains a simulator acceptance check.
+
 This keeps the presentation chain moving. It does not prove that camera pixels reach the PFD while frame generation, ReShade add-ons or DLSS-G are active. If capture stays paused at "waiting for verified GPU state", collect the bridge log. Disabling ReShade/MFG remains the confirmed local workaround; this change is a hang fix, not live MFG acceptance.
 
 ## Startup timing

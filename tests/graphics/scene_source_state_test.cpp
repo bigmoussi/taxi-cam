@@ -28,6 +28,48 @@ void state_is(const Tracker& tracker, Key key, Model model, bool drawn) {
   require(value.model == model && value.drawn == drawn, "submitted final state/draw evidence differs");
 }
 
+void pass_local_invalidation() {
+  Tracker tracker;
+  require(tracker.register_source(nose, Model::legacy_rt) && tracker.register_source(tail, Model::enhanced_rt), "register pass pair");
+  Recording bystander;
+  require(bystander.invalidate_named_sources() && tracker.apply(bystander), "empty pass refusal");
+  state_is(tracker, nose, Model::legacy_rt, false);
+  state_is(tracker, tail, Model::enhanced_rt, false);
+  auto affected = record({{nose, Kind::legacy_rt}, {nose, Kind::draw}});
+  require(affected.invalidate_named_sources(), "scope named pass");
+  state_is(tracker, nose, Model::legacy_rt, false);  // No recording-time mutation.
+  require(tracker.apply(affected), "submit scoped refusal");
+  state_is(tracker, nose, Model::other, false);
+  state_is(tracker, tail, Model::enhanced_rt, false);
+  require(tracker.rearm_retained_rt() == 0, "watchdog must not revive refused source");
+  require(tracker.apply(record({{nose, Kind::draw}})), "draw after refused pass");
+  state_is(tracker, nose, Model::other, false);
+  require(tracker.apply(record({{nose, Kind::legacy_rt}, {nose, Kind::draw}})), "fresh absolute evidence restores capture");
+  state_is(tracker, nose, Model::legacy_rt, true);
+  require(tracker.apply(affected), "replay preserves scoped refusal");
+  state_is(tracker, tail, Model::enhanced_rt, false);
+  require(tracker.register_source({nose.handle, nose.generation + 1}, Model::legacy_rt), "replacement source");
+  require(tracker.apply(affected), "old generation replay");
+  state_is(tracker, {nose.handle, nose.generation + 1}, Model::legacy_rt, false);
+  Recording full;
+  for (std::size_t i = 0; i < Recording::capacity; ++i)
+    require(full.append({{i + 1, 1}, Kind::draw}), "fill scoped recording");
+  require(full.invalidate_named_sources() && !full.invalid && full.count == Recording::capacity, "full recording remains bounded");
+  for (std::size_t i = 0; i < full.count; ++i)
+    require(full.effects[i].kind == Kind::other, "full recording retains no RT or draw proof");
+  for (unsigned failure = 0; failure < 5; ++failure) {
+    Recording bad;
+    if (failure == 0) bad.invalidate();
+    if (failure == 1) bad.overflowed = true;
+    if (failure == 2) bad.count = Recording::capacity + 1;
+    if (failure == 3) { bad.count = 1; bad.effects[0] = {{0, 1}, Kind::draw}; }
+    if (failure == 4) { bad.count = 1; bad.effects[0] = {nose, static_cast<Kind>(99)}; }
+    require(!bad.invalidate_named_sources() && bad.invalid, "unsafe recording must remain globally invalid");
+    require(!tracker.apply(bad), "unsafe submission refused");
+    state_is(tracker, tail, Model::unknown, false);
+  }
+}
+
 void actual_submission_order() {
   Tracker tracker;
   require(tracker.register_source(nose) && tracker.register_source(tail), "pair registration refused");
@@ -322,6 +364,7 @@ void source_bounds() {
 }  // namespace
 
 int main() {
+  pass_local_invalidation();
   native_creation_state();
   actual_submission_order();
   ordering_permutations();
