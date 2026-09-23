@@ -507,6 +507,7 @@ void known_list_and_idle_checks() {
   auto target = std::make_shared<win::Resource>();
   target->native = reinterpret_cast<ID3D12Resource*>(0x6100);
   target->id = 61;
+  target->display_shape = true;
   constexpr D3D12_CPU_DESCRIPTOR_HANDLE handle{0x6120};
   r.rtvs[handle.ptr] = {target, DXGI_FORMAT_R8G8B8A8_UNORM, 0, handle.ptr};
   TargetsHook::invoke(forward_targets, native, 1, &handle, FALSE, nullptr);
@@ -518,6 +519,17 @@ void known_list_and_idle_checks() {
   require(
       target->draws == 1 && r.draws == old_draws && !item->pfd_dirty && win::runtime::manager().statistics().source_draws == old_sources,
       "Idle draw must retain autodetection activity without dirty PFD admission or unrelated source counters");
+  // Shared scene targets are never PFD candidates, so their draws are not counted.
+  auto scene = std::make_shared<win::Resource>();
+  scene->native = reinterpret_cast<ID3D12Resource*>(0x6200);
+  scene->id = 62;
+  constexpr D3D12_CPU_DESCRIPTOR_HANDLE scene_handle{0x6220};
+  r.rtvs[scene_handle.ptr] = {scene, DXGI_FORMAT_R8G8B8A8_UNORM, 0, scene_handle.ptr};
+  TargetsHook::invoke(forward_targets, native, 1, &scene_handle, FALSE, nullptr);
+  win::after_draw(nullptr, native, item->id, true);
+  require(scene->draws == 0 && target->draws == 1, "Draws to a non-display target must not count PFD activity");
+  r.rtvs.erase(scene_handle.ptr);
+  TargetsHook::invoke(forward_targets, native, 1, &handle, FALSE, nullptr);
   ClearHook::invoke(inner_clear, native, nullptr);
   win::after_draw(nullptr, native, item->id, true);
   require(item->count == 0 && target->draws == 1, "Idle ClearState must end target activity without retaining stale RTV bindings");

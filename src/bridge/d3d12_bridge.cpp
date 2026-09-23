@@ -43,6 +43,10 @@ struct Resource : Metadata {
   ID3D12Resource* native{};
   std::uint64_t key{};
   D3D12_RESOURCE_DESC desc{};
+  // Matches some catalog profile's display. Only these feed PFD inventory, so
+  // only these count draws: shared scene targets would otherwise have every
+  // recording thread increment the same counter on every draw.
+  bool display_shape{};
   std::atomic<std::uint64_t> draws{};
   std::atomic<std::uint64_t> submission_activity{};
   // Last insertable state left by a closed list, or all-bits when unknown.
@@ -848,6 +852,9 @@ bool observe_resource(ID3D12Device* device, IUnknown* object, source_state::Mode
         item->key = r.key;
         item->desc = desc;
         item->id = ++r.next_id;
+        for (const auto* profile : profiles::Catalog)
+          item->display_shape = item->display_shape || profiles::matches_display(*profile, static_cast<UINT>(desc.Width), desc.Height,
+                                                                                 desc.MipLevels, static_cast<UINT>(desc.Format));
         r.resources[native] = item;
         for (const auto* profile : profiles::Catalog)
           if (profiles::matches_display(*profile, static_cast<UINT>(desc.Width), desc.Height, desc.MipLevels,
@@ -1278,6 +1285,9 @@ void invalidate(void*, ID3D12GraphicsCommandList* native, std::uint64_t id, std:
   }
   runtime::manager().invalidate_source_recording(native, id, true, reasons);
 }
+// The global observed-draw count is diagnostic. Each recording thread adds its
+// draws in batches so the counter's cache line is not shared on every draw.
+thread_local unsigned unpublished_draws = 0;
 void after_draw(void*, ID3D12GraphicsCommandList* native, std::uint64_t id, bool allowed) noexcept {
   const OwnedWork guard;
   auto list = find_list(native);
@@ -1290,15 +1300,18 @@ void after_draw(void*, ID3D12GraphicsCommandList* native, std::uint64_t id, bool
   // draws without any tracked RTV avoid even the global diagnostic counter.
   if (!observed && !list->count)
     return;
-  if (observed)
-    ++r.draws;
+  if (observed && ++unpublished_draws == 256) {
+    r.draws.fetch_add(unpublished_draws, std::memory_order_relaxed);
+    unpublished_draws = 0;
+  }
   std::array<ID3D12Resource*, 8> sources;
   std::array<std::uint64_t, 8> ids;
   UINT count = 0;
   for (UINT i = 0; i < list->count; ++i) {
     const auto& target = list->targets[i];
     if (target.resource && target.resource->alive && !target.mip) {
-      target.resource->draws.fetch_add(1, std::memory_order_relaxed);
+      if (target.resource->display_shape)
+        target.resource->draws.fetch_add(1, std::memory_order_relaxed);
       if (maybe_selected(target.resource->native))
         list->submission_proof.note_render_target_write({reinterpret_cast<std::uint64_t>(target.resource->native), target.resource->id},
                                                         12);
@@ -2324,7 +2337,9 @@ HRESULT STDMETHODCALLTYPE reset(ID3D12GraphicsCommandList* native, ID3D12Command
   if (item)
     item->closed_recording.store(0, std::memory_order_release);
   const auto hr = hook_timing::forward(list_reset.forward<F>(), native, allocator, pso);
-  if (item) {
+  if (!item)
+    return hr;
+  {
     // Demand cannot change between qualifying this native Reset and publishing
     // its PFD-state proof. Source state remains continuously observed separately.
     // Without the lock the recording is simply unobserved until the next Reset.
@@ -2352,15 +2367,21 @@ HRESULT STDMETHODCALLTYPE reset(ID3D12GraphicsCommandList* native, ID3D12Command
       item->graphics.reset(++item->recording, true);
       item->submission_proof.reset(item->recording, true);
       item->graphics.bind_pipeline(pso);
-      if (registry().live_backfill.load(std::memory_order_relaxed))
-        registry().live_bind.clear(native);
-      boundary::successful_reset(native, item->id);
-      runtime::manager().successful_reset(native, item->id);
     } else {
       item->submission_proof.invalidate();
       item->graphics.invalidate("native_reset_failed");
-      boundary::reset_failed(native, item->id);
     }
+  }
+  // Boundary identity and capture-manager retirement take their own locks and
+  // do not depend on demand. Outside observation_mutex, one thread's Reset no
+  // longer waits while another thread retires its previous recording.
+  if (item->ready) {
+    if (registry().live_backfill.load(std::memory_order_relaxed))
+      registry().live_bind.clear(native);
+    boundary::successful_reset(native, item->id);
+    runtime::manager().successful_reset(native, item->id);
+  } else {
+    boundary::reset_failed(native, item->id);
   }
   return hr;
 }

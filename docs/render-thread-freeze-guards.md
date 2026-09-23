@@ -4,7 +4,9 @@ The bridge runs on the simulator's threads: command-list recording hooks, `Close
 
 ## Rule
 
-Simulator threads acquire bridge locks through `BoundedLock` (`src/shared/bounded_lock.hpp`) with a budget and skip their work for the current frame when it expires. Budgets: 100 us per-command recording hooks, 500 us Close-time PFD delivery, 1 ms `ExecuteCommandLists` ordering, 5 ms creation and destruction paths. Bridge-owned threads keep ordinary blocking locks.
+Simulator threads acquire bridge locks through `BoundedLock` (`src/shared/bounded_lock.hpp`) with a budget and skip their work for the current frame when it expires. Budgets: 100 us per-command recording hooks (including the capture manager's `successful_reset`, which every recording thread reaches many times per frame), 500 us Close-time PFD delivery, 1 ms `ExecuteCommandLists` ordering, 5 ms creation and destruction paths. Only budgets of 1 ms or more yield the core with `SwitchToThread`. Under simulator load that call can hand the core to another ready thread for a whole quantum: issue 71 hook timing showed 100 us waits lasting 3–20 ms. Shorter budgets spin with `YieldProcessor` only. Bridge-owned threads keep ordinary blocking locks.
+
+The native `Reset` hook holds `observation_mutex` only while it qualifies the observation epoch and resets the list's own recording state. It releases the mutex before the render-boundary identity reset and the capture-manager retirement, which take their own locks, so one thread's Reset does not wait while another thread retires its previous recording. Render-boundary Reset and invalidation first look for an entry under the hook's list pointer with the caller's generation. That match needs no readability probe (`VirtualQuery` and `ReadProcessMemory`) or unwrap. A proxy argument or a fixture key that does not match falls back to the checked `registry_key` path.
 
 A skip always leaves the bridge in a state that refuses injection rather than guessing:
 

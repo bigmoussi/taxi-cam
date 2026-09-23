@@ -52,6 +52,9 @@ SRWLOCK registry_lock = SRWLOCK_INIT, control_lock = SRWLOCK_INIT;
 std::unordered_map<ID3D12GraphicsCommandList*, Identity> identities;
 Callbacks callbacks;
 std::atomic<bool> enabled{false};
+// Advanced before every exclusive registry release, so a reader that sees the
+// same value before and after a call knows no identity changed in between.
+std::atomic<std::uint64_t> identity_changes{0};
 std::atomic<Legacy> original_legacy{nullptr};
 std::atomic<Begin> original_begin{nullptr};
 std::atomic<End> original_end{nullptr};
@@ -86,6 +89,8 @@ struct Lock {
       AcquireSRWLockShared(&lock);
   }
   ~Lock() {
+    if (exclusive && &lock == &registry_lock)
+      identity_changes.fetch_add(1, std::memory_order_release);
     if (exclusive)
       ReleaseSRWLockExclusive(&lock);
     else
@@ -197,8 +202,11 @@ void observe_work(ID3D12GraphicsCommandList* list) noexcept {
       !it->second.invalid)
     it->second.prior_work = true;
 }
-void after_draw_work(ID3D12GraphicsCommandList* list, std::uint64_t generation) noexcept {
-  const auto current = lookup(list);
+// The identity read before the draw is still current unless some identity
+// changed while it ran. That saves a second unwrap and registry lock per draw.
+void after_draw_work(ID3D12GraphicsCommandList* list, const Identity& before, std::uint64_t changes) noexcept {
+  const auto generation = before.generation;
+  const auto current = identity_changes.load(std::memory_order_acquire) == changes ? before : lookup(list);
   if (!generation || current.generation != generation)
     return;
   if (!current.prior_work)
@@ -222,10 +230,11 @@ draw(ID3D12GraphicsCommandList* list, UINT vertices, UINT instances, UINT first_
   }
   const Guard guard;
   const hook_timing::Scope timing(hook_timing::draw);
+  const auto changes = identity_changes.load(std::memory_order_acquire);
   const auto identity = lookup(list);
   hook_timing::forward(original, list, vertices, instances, first_vertex, first_instance);
   if (vertices && instances)
-    after_draw_work(list, identity.generation);
+    after_draw_work(list, identity, changes);
 }
 void STDMETHODCALLTYPE draw_indexed(ID3D12GraphicsCommandList* list,
                                     UINT indices,
@@ -240,10 +249,11 @@ void STDMETHODCALLTYPE draw_indexed(ID3D12GraphicsCommandList* list,
   }
   const Guard guard;
   const hook_timing::Scope timing(hook_timing::draw);
+  const auto changes = identity_changes.load(std::memory_order_acquire);
   const auto identity = lookup(list);
   hook_timing::forward(original, list, indices, instances, first_index, vertex_offset, first_instance);
   if (indices && instances)
-    after_draw_work(list, identity.generation);
+    after_draw_work(list, identity, changes);
 }
 bool previous_legacy_change(UINT index, const D3D12_RESOURCE_BARRIER* barriers, ID3D12Resource* resource) noexcept {
   for (UINT n = 0; n < index; ++n) {
@@ -932,8 +942,26 @@ void unregister_list(ID3D12GraphicsCommandList* list, std::uint64_t generation) 
   if (it != identities.end() && it->second.generation == generation)
     identities.erase(it);
 }
+// Hooks receive the native list, which is normally its own registry key. An
+// entry under that exact pointer with the caller's generation belongs to this
+// list incarnation, so Reset and invalidation skip registry_key's readability
+// probe (VirtualQuery and ReadProcessMemory) and unwrap. Anything else, such as
+// a proxy argument, takes the checked path unchanged.
+Identity* same_key_identity(ID3D12GraphicsCommandList* list, std::uint64_t generation) noexcept {
+  const auto it = identities.find(list);
+  return it != identities.end() && it->second.generation == generation ? &it->second : nullptr;
+}
 void successful_reset(ID3D12GraphicsCommandList* list, std::uint64_t generation) noexcept {
+  {
+    const Lock lock(registry_lock, true);
+    if (auto* identity = same_key_identity(list, generation)) {
+      *identity = Identity{generation, false, false, !enabled.load(std::memory_order_acquire)};
+      return;
+    }
+  }
   const auto key = registry_key(list);
+  if (key == list)
+    return;
   const Lock lock(registry_lock, true);
   const auto it = identities.find(key);
   if (it != identities.end() && it->second.generation == generation)
@@ -943,8 +971,19 @@ void reset_failed(ID3D12GraphicsCommandList* list, std::uint64_t generation) noe
   invalidate_recording(list, generation, InvalidationResetFailed);
 }
 void invalidate_recording(ID3D12GraphicsCommandList* list, std::uint64_t generation, std::uint32_t reasons) noexcept {
-  const auto key = registry_key(list);
+  auto key = list;
+  bool found = false;
   {
+    const Lock lock(registry_lock, true);
+    if (auto* identity = same_key_identity(list, generation)) {
+      identity->invalid = true;
+      found = true;
+    }
+  }
+  if (!found) {
+    key = registry_key(list);
+    if (key == list)
+      return;
     const Lock lock(registry_lock, true);
     const auto it = identities.find(key);
     if (it == identities.end() || it->second.generation != generation)

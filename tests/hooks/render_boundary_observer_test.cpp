@@ -55,7 +55,8 @@ struct Evidence {
   unsigned after_draws = 0, draw_originals_seen = 0, invalidations = 0, invalid_begins_seen = 0, invalid_barriers_seen = 0;
   unsigned invalid_raw_seen = 0;
   std::uint32_t invalid_reasons = 0;
-  bool draw_allowed = false, nested_draw = false, retire_draw = false, invalidation_reentered = false, reenter_invalidation = false;
+  bool draw_allowed = false, nested_draw = false, retire_draw = false, invalidate_draw = false, invalidation_reentered = false,
+       reenter_invalidation = false;
   unsigned active_ends = 0;
   unsigned pass_metadata = 0, metadata_invalidations_seen = 0, metadata_begins_seen = 0;
   unsigned enhanced_notifications = 0, enhanced_originals_seen = 0;
@@ -129,6 +130,8 @@ void STDMETHODCALLTYPE original_draw(ID3D12GraphicsCommandList* list, UINT count
   evidence.draw_arguments = {count, instances, first, first_instance};
   if (evidence.retire_draw)
     obs::unregister_list(list, 2);
+  if (evidence.invalidate_draw)
+    obs::invalidate_recording(list, 2);
 }
 void STDMETHODCALLTYPE
 original_draw_indexed(ID3D12GraphicsCommandList* list, UINT count, UINT instances, UINT first, INT offset, UINT first_instance) {
@@ -1094,6 +1097,15 @@ int main() {
     evidence.reenter_invalidation = false;
     require(evidence.invalidation_reentered && evidence.invalid_reasons == obs::InvalidationResetFailed,
             "Invalidation callback ran under observer locks");
+    obs::successful_reset(list, 2);
+    // The identity read before a draw is reused after it only when no identity
+    // changed meanwhile; an invalidation during the original must still refuse.
+    list->DrawInstanced(3, 1, 0, 0);
+    require(evidence.draw_allowed, "Successful Reset did not restore draw capture");
+    evidence.invalidate_draw = true;
+    list->DrawInstanced(3, 1, 0, 0);
+    evidence.invalidate_draw = false;
+    require(!evidence.draw_allowed, "Invalidation during the original draw was hidden by the pre-draw identity");
     obs::successful_reset(list, 2);
     after_draw_before = evidence.after_draws;
     evidence.retire_draw = true;

@@ -42,8 +42,12 @@ class BoundedLock {
     if (budget_us) {
       const auto deadline = bounded_lock_now_us() + budget_us;
       unsigned spins = 0;
+      // SwitchToThread can hand this core to another ready thread for its whole
+      // quantum. Under simulator load that turned 100 us budgets into 5-20 ms
+      // waits, so only budgets of at least a millisecond yield the core.
+      const bool may_yield_core = budget_us >= 1000;
       do {
-        if (++spins % 64 == 0)
+        if (may_yield_core && ++spins % 64 == 0)
           SwitchToThread();
         else
           YieldProcessor();
