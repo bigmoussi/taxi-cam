@@ -36,8 +36,8 @@ jobs:
           git diff --check
           if ($LASTEXITCODE -ne 0) { throw 'Patched tree failed git diff --check.' }
           $diff = git diff -- src/bridge/d3d12_bridge.cpp
-          if ($LASTEXITCODE -ne 0 -or -not ($diff -match 'InvalidationPassState')) {
-            throw 'Exact-target PassState change is not present in the patched tree.'
+          if ($LASTEXITCODE -ne 0 -or -not ($diff -match 'can_scope_to_exact_targets')) {
+            throw 'Exact-target source invalidation policy is not present in the patched bridge.'
           }
 
       - name: Test semantic version progression
@@ -51,6 +51,9 @@ jobs:
 
       - name: Bootstrap pinned compiler
         run: ./bootstrap.ps1
+
+      - name: Test exact-target invalidation policy
+        run: ./tests/graphics/source_invalidation_policy_test.ps1
 
       - name: Build, validate and smoke-test patched bridge with software D3D12
         run: |
@@ -95,3 +98,4 @@ jobs:
         run: |
           'This artifact is an architecture experiment only. It is not a release and is not installed automatically.' >> $env:GITHUB_STEP_SUMMARY
           'The source patch is applied only inside this CI job and is included beside the binaries.' >> $env:GITHUB_STEP_SUMMARY
+          'All 256 source-invalidation reason combinations are checked before the native build.' >> $env:GITHUB_STEP_SUMMARY
